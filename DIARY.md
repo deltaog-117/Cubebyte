@@ -48,12 +48,14 @@ Determinism and the event log are the core of the project, and owning the loop m
 #### Implementation Notes
 - Native first. WASM stays possible because `wgpu` targets WebGPU.
 - Add `wgpu`, `winit` and `glam` when rendering starts, not before.
+- The stack is recorded in `README.md` for readers who do not open the diary.
 
 #### Review / Update Log
 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-25 | Initial entry | deltaog-117 |
+| 2026-10-25 | Stack recorded in README.md | deltaog-117 |
 
 ---
 

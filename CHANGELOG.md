@@ -23,5 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shared::clock::FixedClock` and `Tick`: integer-time fixed timestep with carry-over and a cap on catch-up steps per advance
 - Property tests for the clock (frame splitting never changes the tick count) and the generator (determinism, bounds, fork independence)
 - Criterion benchmark for `Rng::next_u64` and `Rng::below`
+- `README.md` with the project description, status, tech stack (Rust + `wgpu` + `winit`), structure and test commands
 
 ---

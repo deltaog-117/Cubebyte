@@ -16,6 +16,7 @@ Items are organized by priority, not by timeline.
 - ✅ `Event::BlockSet` with its inverse, and an append-only `EventLog`
 - ✅ Property tests (positions, chunk contents, undo, replay) and a hot-path benchmark
 - ✅ Seeded `Rng` (xoshiro256++ with a pinned output stream and per-key forks) and a `FixedClock` with a catch-up cap
+- ✅ `README.md` recording the tech stack (Rust + `wgpu` + `winit`)
 
 ---
 
@@ -63,11 +64,10 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Record the tech stack** – Rust + `wgpu` + `winit`, in the README.
-2. **Terrain generation** – `world/generation`, seeded and deterministic, forking one `Rng` per chunk position.
-3. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
-4. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
-5. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
+1. **Terrain generation** – `world/generation`, seeded and deterministic, forking one `Rng` per chunk position.
+2. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
+3. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
+4. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
 
 ---
 
