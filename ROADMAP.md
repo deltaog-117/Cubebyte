@@ -20,6 +20,7 @@ Items are organized by priority, not by timeline.
 - ✅ Seeded terrain generation: Perlin heightmap with grass, dirt and stone layers, inserted into the world without logging events
 - ✅ Chunk meshing: one quad per exposed block face, as plain vertex and index data with no `wgpu` types
 - ✅ Basic renderer: `wgpu` pipeline with depth buffer, free-flying camera (WASD, mouse, Space/Shift) and a `winit` window drawing a fixed grid of terrain chunks
+- ✅ Block placing and breaking: voxel ray cast, `building/service` edits routed through the event log, and per-chunk mesh replacement (left click breaks, right click places, 1/2/3 pick stone, dirt or grass)
 
 ---
 
@@ -29,7 +30,7 @@ Items are organized by priority, not by timeline.
 - **Chunk streaming** – Loading and unloading chunks around the player, using the terrain generator.
 - **Event replay wiring** – Rebuild a world from the log through `app`, and persist the log.
 - **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only, so replays always match.
-- **Building** – Place and break blocks, with a block registry.
+- **Block registry** – Block names, colours and properties in one table, replacing the fixed `BlockId` constants and the colour `match`.
 - **Resource management** – Inventory, item stacks, gathering and basic survival stats.
 - **Crafting** – Recipe system and crafting interface.
 - **Combat** – Health, damage, basic hostile mobs and weapons.
@@ -66,8 +67,8 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log. Needs a ray cast from the camera.
-2. **Chunk streaming** – Replace the fixed 9×9 chunk grid in `app` with loading and unloading around the camera, and remesh loaded neighbours.
+1. **Chunk streaming** – Replace the fixed 9×9 chunk grid in `app` with loading and unloading around the camera, and remesh loaded neighbours. Edits to chunks that are not loaded must survive: `insert_generated` refuses a chunk that already holds edits.
+2. **Event replay wiring** – Rebuild a world from the log through `app`, and persist the log.
 
 ---
 

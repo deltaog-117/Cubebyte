@@ -125,6 +125,28 @@ pub fn mesh_chunk(world: &World, pos: ChunkPos) -> MeshData {
     mesh
 }
 
+/// Chunks whose meshes depend on the block at `pos`: the chunk holding it, plus any
+/// neighbouring chunk that holds a block touching one of its faces.
+///
+/// After an edit at `pos`, re-meshing exactly these chunks keeps every mesh up to date.
+pub fn chunks_to_remesh(pos: WorldPos) -> Vec<ChunkPos> {
+    let mut chunks = vec![pos.split().0];
+    for face in Face::ALL {
+        let step = face.normal();
+        // Saturating at the edge of the representable world only repeats `pos` itself.
+        let touching = WorldPos {
+            x: pos.x.saturating_add(i32::from(step[0])),
+            y: pos.y.saturating_add(i32::from(step[1])),
+            z: pos.z.saturating_add(i32::from(step[2])),
+        };
+        let chunk = touching.split().0;
+        if !chunks.contains(&chunk) {
+            chunks.push(chunk);
+        }
+    }
+    chunks
+}
+
 /// The block that `face` of the block at `local` looks at.
 fn neighbor(world: &World, pos: ChunkPos, chunk: &Chunk, local: LocalPos, face: Face) -> BlockId {
     let step = face.normal();
@@ -318,6 +340,31 @@ mod tests {
                 // A unit triangle has half the area of its quad, so the cross product has
                 // length 1 and must equal the normal exactly.
                 prop_assert_eq!(area, normal);
+            }
+        }
+
+        #[test]
+        fn an_edit_changes_only_the_meshes_it_asks_to_remesh(
+            cells in prop::collection::vec((-16i32..32, -16i32..32, -16i32..32), 0..200),
+            edit in (-16i32..32, -16i32..32, -16i32..32),
+            block in 0u16..2,
+        ) {
+            let mut world = world_with(&cells);
+            let pos = WorldPos { x: edit.0, y: edit.1, z: edit.2 };
+            let touched = chunks_to_remesh(pos);
+            let chunks: Vec<_> = (-1..=1)
+                .flat_map(|x| (-1..=1).flat_map(move |y| (-1..=1).map(move |z| ChunkPos { x, y, z })))
+                .collect();
+            let before: Vec<_> = chunks.iter().map(|&chunk| mesh_chunk(&world, chunk)).collect();
+
+            let event = Event::BlockSet { pos, old: world.block_at(pos), new: BlockId(block) };
+            prop_assert_eq!(world.apply(&event), Ok(()));
+
+            prop_assert!(touched.contains(&pos.split().0));
+            for (chunk, old_mesh) in chunks.iter().zip(&before) {
+                if !touched.contains(chunk) {
+                    prop_assert_eq!(&mesh_chunk(&world, *chunk), old_mesh);
+                }
             }
         }
     }

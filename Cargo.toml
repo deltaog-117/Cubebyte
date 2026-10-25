@@ -33,6 +33,10 @@ harness = false
 name = "meshing"
 harness = false
 
+[[bench]]
+name = "raycast"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 

@@ -20,6 +20,7 @@
 | 2026-10-25 | Terrain generation | Perlin heightmap, inserted without events | ✅ Confirmed |
 | 2026-10-25 | Chunk meshing | Culled faces, one quad per exposed face | ✅ Confirmed |
 | 2026-10-25 | Basic renderer | Vertical slice: `wgpu` + `winit` + `glam`, pure camera | ✅ Confirmed |
+| 2026-10-25 | Block placing and breaking | Exact voxel ray cast; meshes keyed per chunk, only affected chunks rebuilt | ✅ Confirmed |
 
 ---
 
@@ -285,6 +286,45 @@ Terrain generation and meshing existed but nothing could be seen. Block editing 
 - Lighting is baked into vertex colour on the CPU (block colour times a fixed per-face shade), so the shader only interpolates.
 - The chunk grid is fixed (9×9 columns around the origin) and one buffer pair per chunk is created at start. Open for chunk streaming: replace it with load and unload around the camera, and reuse buffers.
 - Not checked on screen by the assistant: the app ran 8 s on Wayland without errors, but the picture itself was not inspected.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Block Placing and Breaking
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+The world could be flown over but not changed. Placing and breaking blocks is the first playable loop, and the first real producer of events for the log that rewind will depend on.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Exact voxel ray cast (DDA) and per-chunk mesh replacement | Exact block and face; small re-mesh cost; reusable for streaming | Changes `Renderer`; border-neighbour logic | Medium |
+| B: Fixed-step ray march | Simplest to write | Can skip blocks at grazing angles; face is approximate | Small |
+| C: DDA, then re-mesh every chunk per edit | Smallest diff | About 729 chunks rebuilt per click; thrown away by streaming | Small |
+
+#### Decision & Rationale
+**Chosen Option:** A. The face the ray crosses decides where a block is placed, and the DDA gives it exactly. Keyed meshes are also what chunk streaming needs.
+
+**Trade-offs accepted:** `Renderer::add_mesh` became `set_mesh(chunk, ..)`, a change to a public function that A required. The window path (clicks, GPU upload) is verified by hand, not by `scripts/check`.
+
+#### Implementation Notes
+- `building::raycast::cast` is pure maths over `World::block_at`. It returns the hit block and the cell before it (`None` when the ray starts inside the block), and refuses a zero or non-finite direction, a non-finite reach and an origin beyond one million blocks, so cell arithmetic cannot overflow.
+- The ray cast is tested against a slab-test search that shares no code with it. Full-reach miss costs about 81 ns (`--quick` run), the baseline for the 5% gate.
+- `building::service` applies the event to the world first and logs it only if the world accepted it, so the log never holds a rejected edit. `SolidBlock` makes placing air unrepresentable.
+- Placing is refused in the cell of the viewer's eye. There is no player body yet, so a fuller collision rule waits for physics.
+- `chunks_to_remesh(pos)` is the chunk of the block plus the chunks of its six face neighbours. A property test confirms every other chunk's mesh is unchanged by the edit.
+- Open for chunk streaming: placing next to an unloaded chunk writes into it through `World::apply`, and `insert_generated` would later refuse that chunk. Streaming must merge generated terrain under existing edits.
+- Open for the block registry: hotbar keys 1 to 3 and the block colours are fixed constants.
+- Not checked on screen by the assistant: clicking and the picture were not inspected.
 
 #### Review / Update Log
 

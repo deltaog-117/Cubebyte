@@ -7,17 +7,20 @@ use glam::Vec3;
 use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::error::{EventLoopError, OsError};
-use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::building::model::{EditError, SolidBlock};
+use crate::building::service::{break_block, place_block};
+use crate::events::log::EventLog;
 use crate::player::input::MoveKeys;
 use crate::rendering::camera::Camera;
-use crate::rendering::meshing::mesh_chunk;
+use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::gpu_mesh;
-use crate::shared::voxel::{CHUNK_SIZE, ChunkPos};
+use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 
@@ -54,6 +57,7 @@ pub fn run() -> Result<(), AppError> {
     let mut app = App {
         running: None,
         keys: MoveKeys::default(),
+        selected: SolidBlock::STONE,
         failure: None,
     };
     event_loop.run_app(&mut app)?;
@@ -65,11 +69,15 @@ struct Running {
     renderer: Renderer,
     camera: Camera,
     last_frame: Instant,
+    world: World,
+    log: EventLog,
 }
 
 struct App {
     running: Option<Running>,
     keys: MoveKeys,
+    /// The block a right click places.
+    selected: SolidBlock,
     /// Why the loop was stopped early, handed back by [`run`].
     failure: Option<AppError>,
 }
@@ -96,9 +104,7 @@ impl App {
         let terrain = TerrainGenerator::new(SEED);
         let world = load_world(&terrain);
         for pos in chunk_grid() {
-            let mesh = mesh_chunk(&world, pos);
-            let (vertices, indices) = gpu_mesh(&mesh, pos);
-            renderer.add_mesh(&vertices, &indices);
+            remesh(&mut renderer, &world, pos);
         }
 
         let eye_height = terrain.height_at(0, 0) as f32 + 6.0;
@@ -107,6 +113,8 @@ impl App {
             renderer,
             camera: Camera::new(Vec3::new(0.0, eye_height, 0.0)),
             last_frame: Instant::now(),
+            world,
+            log: EventLog::new(),
         })
     }
 
@@ -127,8 +135,40 @@ impl App {
             KeyCode::KeyD => self.keys.right = down,
             KeyCode::Space => self.keys.up = down,
             KeyCode::ShiftLeft => self.keys.down = down,
+            KeyCode::Digit1 if down => self.selected = SolidBlock::STONE,
+            KeyCode::Digit2 if down => self.selected = SolidBlock::DIRT,
+            KeyCode::Digit3 if down => self.selected = SolidBlock::GRASS,
             KeyCode::Escape if down => event_loop.exit(),
             _ => {}
+        }
+    }
+
+    /// Left click breaks the block under the crosshair, right click places the selected
+    /// block against it.
+    fn click(&mut self, button: MouseButton) {
+        let selected = self.selected;
+        let Some(running) = self.running.as_mut() else {
+            return;
+        };
+        let (origin, direction) = (running.camera.position, running.camera.forward());
+        let edit = match button {
+            MouseButton::Left => {
+                break_block(&mut running.world, &mut running.log, origin, direction)
+            }
+            MouseButton::Right => place_block(
+                &mut running.world,
+                &mut running.log,
+                origin,
+                direction,
+                selected,
+            ),
+            _ => return,
+        };
+        match edit {
+            Ok(pos) => running.remesh_around(pos),
+            // Clicking at empty air is normal, not a fault.
+            Err(EditError::NothingInReach | EditError::NoFace | EditError::Occupied) => {}
+            Err(error) => tracing::warn!(%error, "edit rejected"),
         }
     }
 
@@ -143,6 +183,15 @@ impl App {
         running.last_frame = now;
         running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
         running.renderer.render(&running.camera)
+    }
+}
+
+impl Running {
+    /// Rebuilds the meshes an edit at `pos` can have changed.
+    fn remesh_around(&mut self, pos: WorldPos) {
+        for chunk in chunks_to_remesh(pos) {
+            remesh(&mut self.renderer, &self.world, chunk);
+        }
     }
 }
 
@@ -166,6 +215,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.set_key(event_loop, &event),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => self.click(button),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.redraw() {
                     self.fail(event_loop, error.into());
@@ -198,6 +252,11 @@ fn chunk_grid() -> impl Iterator<Item = ChunkPos> {
         (-LOAD_RADIUS..=LOAD_RADIUS)
             .flat_map(move |z| (low..=high).map(move |y| ChunkPos { x, y, z }))
     })
+}
+
+fn remesh(renderer: &mut Renderer, world: &World, pos: ChunkPos) {
+    let (vertices, indices) = gpu_mesh(&mesh_chunk(world, pos), pos);
+    renderer.set_mesh(pos, &vertices, &indices);
 }
 
 fn load_world(terrain: &TerrainGenerator) -> World {

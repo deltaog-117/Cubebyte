@@ -3,12 +3,15 @@
 //! This is the only module that talks to the GPU. It takes any window handle through
 //! `wgpu::SurfaceTarget`, so it does not depend on `winit`.
 
+use std::collections::HashMap;
+
 use glam::Mat4;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::camera::Camera;
 use crate::rendering::vertex::GpuVertex;
+use crate::shared::voxel::ChunkPos;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SKY: wgpu::Color = wgpu::Color {
@@ -73,7 +76,7 @@ pub struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
-    meshes: Vec<GpuMesh>,
+    meshes: HashMap<ChunkPos, GpuMesh>,
 }
 
 impl Renderer {
@@ -182,17 +185,19 @@ impl Renderer {
             camera_buffer,
             camera_group,
             depth_view,
-            meshes: Vec::new(),
+            meshes: HashMap::new(),
         })
     }
 
-    /// Adds one chunk mesh to the scene. An empty mesh is skipped.
-    pub fn add_mesh(&mut self, vertices: &[GpuVertex], indices: &[u32]) {
+    /// Shows `chunk` with this mesh, replacing whatever it showed before. An empty mesh
+    /// removes the chunk from the scene.
+    pub fn set_mesh(&mut self, chunk: ChunkPos, vertices: &[GpuVertex], indices: &[u32]) {
         let Ok(index_count) = u32::try_from(indices.len()) else {
             tracing::error!(len = indices.len(), "mesh has too many indices to draw");
             return;
         };
         if index_count == 0 {
+            self.meshes.remove(&chunk);
             return;
         }
         let vertex_buffer = self
@@ -209,11 +214,14 @@ impl Renderer {
                 contents: bytemuck::cast_slice(indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        self.meshes.push(GpuMesh {
-            vertices: vertex_buffer,
-            indices: index_buffer,
-            index_count,
-        });
+        self.meshes.insert(
+            chunk,
+            GpuMesh {
+                vertices: vertex_buffer,
+                indices: index_buffer,
+                index_count,
+            },
+        );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -282,7 +290,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_group, &[]);
-            for mesh in &self.meshes {
+            for mesh in self.meshes.values() {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);

@@ -41,3 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rendering::pipeline::Renderer`: `wgpu` surface, depth buffer, one pipeline and one draw per chunk mesh; reconfigures a lost or outdated surface
 - `app::run`: `winit` window and game loop that generates a fixed 9×9 column of chunks, meshes them and lets the player fly around (WASD, mouse, Space, Left Shift, Esc to quit)
 - Dependencies: `wgpu`, `winit`, `glam`, `bytemuck`, `pollster`
+- `building::raycast::cast`: voxel ray cast (Amanatides-Woo) returning the first solid block within reach and the empty cell before it; property tests check it against an independent slab-test search
+- `building::service::{break_block, place_block}`: edits applied to the world and then logged as `Event::BlockSet`, with a 5-block reach; placing is refused inside the viewer's own cell and from inside a block
+- `building::model::SolidBlock` (a block that is never air) and `EditError`
+- `rendering::meshing::chunks_to_remesh`: the chunks an edit can change (its own, plus neighbours across a border); a property test checks every other mesh stays identical
+- Left click breaks and right click places a block in the window; `1`, `2` and `3` select stone, dirt or grass
+- Tests that any run of edits replays and undoes exactly, on a block of stone and on generated terrain
+- Criterion benchmark for a full-reach ray cast (about 81 ns)
+
+### Changed
+- `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed
