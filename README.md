@@ -12,7 +12,7 @@ This is a Minecraft-style sandbox: build, craft, fight and manage resources. It 
 
 Both depend on a deterministic simulation. Every edit to the world is a logged event, so the same log always rebuilds the same world. That is why the project uses no game engine: it owns its game loop, world, meshing and random numbers.
 
-**Status:** early development. The world model, event log, seeded random numbers and fixed-timestep clock exist. There is no window or renderer yet. See the [roadmap](ROADMAP.md).
+**Status:** early development. The world model, event log, seeded random numbers and fixed-timestep clock exist. Terrain generation, chunk meshing and a basic renderer exist: `cargo run` opens a window where you fly over generated terrain with WASD, the mouse, Space and Left Shift (Esc quits). Nothing can be placed or broken yet. See the [roadmap](ROADMAP.md).
 
 ---
 
@@ -35,7 +35,7 @@ Both depend on a deterministic simulation. Every edit to the world is a logged e
 | Engine | None |
 | Targets | Native first, WASM possible later |
 
-`wgpu` and `winit` are added when rendering starts. The reasoning is in [DIARY.md](DIARY.md).
+`wgpu`, `winit` and `glam` drive the renderer. The reasoning is in [DIARY.md](DIARY.md).
 
 ---
 

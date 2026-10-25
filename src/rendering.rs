@@ -3,3 +3,4 @@
 pub mod camera;
 pub mod meshing;
 pub mod pipeline;
+pub mod vertex;

@@ -35,3 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Face`, `Vertex` and `MeshData` types: vertices hold chunk-local positions, the face and the block type, and the mesh always holds whole quads with in-range indices
 - Tests that check the quad count against an independent count, that indices and positions are in range, and that every triangle faces along its face normal
 - Criterion benchmark for meshing a surface chunk and a sky chunk
+- `rendering::camera::Camera`: free-flying camera with clamped pitch and a `wgpu`-ready (depth `0..1`) view-projection matrix; property tests for the pitch limit, orthonormal view basis and fly round-trip
+- `player::input::MoveKeys`: held movement keys reduced to a normalized direction, so diagonals are not faster
+- `rendering::vertex::GpuVertex` and `gpu_mesh`: converts a chunk mesh to world-space vertices with a flat block colour and a fixed per-face shade baked in
+- `rendering::pipeline::Renderer`: `wgpu` surface, depth buffer, one pipeline and one draw per chunk mesh; reconfigures a lost or outdated surface
+- `app::run`: `winit` window and game loop that generates a fixed 9×9 column of chunks, meshes them and lets the player fly around (WASD, mouse, Space, Left Shift, Esc to quit)
+- Dependencies: `wgpu`, `winit`, `glam`, `bytemuck`, `pollster`

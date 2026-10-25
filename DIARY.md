@@ -19,6 +19,7 @@
 | 2026-10-25 | Simulation clock | Integer fixed timestep with capped catch-up | ✅ Confirmed |
 | 2026-10-25 | Terrain generation | Perlin heightmap, inserted without events | ✅ Confirmed |
 | 2026-10-25 | Chunk meshing | Culled faces, one quad per exposed face | ✅ Confirmed |
+| 2026-10-25 | Basic renderer | Vertical slice: `wgpu` + `winit` + `glam`, pure camera | ✅ Confirmed |
 
 ---
 
@@ -247,6 +248,43 @@ The renderer needs vertex data for each chunk. Meshing should be testable withou
 - The main property test compares the quad count with a count built from `block_at` alone, which shares no code with the mesher's neighbour lookup.
 - Open for chunk streaming: when a chunk loads, its loaded neighbours must be remeshed, because their border faces were drawn against air.
 - Benchmarks (`--quick` run): about 302 µs per surface chunk and 26 ns per sky chunk. These are the baseline for the 5% gate.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Basic Renderer
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Terrain generation and meshing existed but nothing could be seen. Block editing and chunk streaming both need a visible world and a camera to aim with.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Camera maths first, GPU later | Fully testable, small diffs | Nothing on screen for a cycle | Medium |
+| B: Vertical slice: window, pipeline, fly camera | Terrain on screen in one cycle | Largest diff; GPU code not unit-testable | Hard |
+| C: Headless offscreen render with golden pixels | GPU path verified without a display | Needs a software adapter that may not exist | Hard |
+
+#### Decision & Rationale
+**Chosen Option:** B, with the camera kept as pure tested code. It is the only option that gives something to look at, which block editing and streaming both need.
+
+**Trade-offs accepted:** The window, surface and draw calls are verified by hand, not by `scripts/check`. Only the camera, input and vertex conversion are covered by tests.
+
+#### Implementation Notes
+- `wgpu` 27 and `winit` 0.30 with `glam` for matrices, `bytemuck` for vertex upload and `pollster` to block on adapter setup. `unsafe_code = "forbid"` still holds, since `bytemuck` derives compile under it.
+- `Camera` and `MoveKeys` use only `glam` types. `Renderer::new` takes any `wgpu::SurfaceTarget`, so `rendering` does not import `winit`; `app` is the only place that joins window, input, world and renderer.
+- glam 0.34 moved matrix helpers to `glam::camera::rh`; `proj::directx::perspective` gives depth in `0..1` with Y up, which is what `wgpu` clip space expects.
+- Lighting is baked into vertex colour on the CPU (block colour times a fixed per-face shade), so the shader only interpolates.
+- The chunk grid is fixed (9×9 columns around the origin) and one buffer pair per chunk is created at start. Open for chunk streaming: replace it with load and unload around the camera, and reuse buffers.
+- Not checked on screen by the assistant: the app ran 8 s on Wayland without errors, but the picture itself was not inspected.
 
 #### Review / Update Log
 

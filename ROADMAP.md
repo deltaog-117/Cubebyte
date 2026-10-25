@@ -19,6 +19,7 @@ Items are organized by priority, not by timeline.
 - ✅ `README.md` recording the tech stack (Rust + `wgpu` + `winit`)
 - ✅ Seeded terrain generation: Perlin heightmap with grass, dirt and stone layers, inserted into the world without logging events
 - ✅ Chunk meshing: one quad per exposed block face, as plain vertex and index data with no `wgpu` types
+- ✅ Basic renderer: `wgpu` pipeline with depth buffer, free-flying camera (WASD, mouse, Space/Shift) and a `winit` window drawing a fixed grid of terrain chunks
 
 ---
 
@@ -26,7 +27,6 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Chunk streaming** – Loading and unloading chunks around the player, using the terrain generator.
-- **Basic renderer** – A `wgpu` pipeline, camera and window that draw the chunk meshes.
 - **Event replay wiring** – Rebuild a world from the log through `app`, and persist the log.
 - **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only, so replays always match.
 - **Building** – Place and break blocks, with a block registry.
@@ -66,8 +66,8 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
-2. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
+1. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log. Needs a ray cast from the camera.
+2. **Chunk streaming** – Replace the fixed 9×9 chunk grid in `app` with loading and unloading around the camera, and remesh loaded neighbours.
 
 ---
 
