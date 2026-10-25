@@ -25,6 +25,7 @@ Items are organized by priority, not by timeline.
 - ✅ Event replay wiring: the event log is saved to `world.mcel` on exit and loaded at startup in a versioned binary format; chunks rebuild from it as they stream in
 - ✅ Block registry: `blocks::registry` holds each block's name, colour and solidity in one table indexed by `BlockId`; the renderer and `SolidBlock` read from it
 - ✅ Simulation tick loop: `simulation::model::Simulation` owns the `FixedClock` and forks per-system `Rng` streams by key; `app` advances it each frame
+- ✅ Resource management: an item registry, a 27-slot stack inventory saved to `inventory.mcin`, breaking yields and placing spends items, and health and hunger meters stepped by the simulation (shown in the window title)
 
 ---
 
@@ -32,8 +33,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop is in place; physics and mob AI must run on it and draw from `Simulation::stream` only, so replays always match.
-- **Resource management** – Inventory, item stacks, gathering and basic survival stats.
-- **Crafting** – Recipe system and crafting interface.
+- **Crafting** – Recipe system and crafting interface; needs food items so hunger can be refilled.
 - **Combat** – Health, damage, basic hostile mobs and weapons.
 
 ---
@@ -68,7 +68,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Resource management** – Inventory, item stacks, gathering and basic survival stats; builds on the block registry.
+1. **Crafting** – Recipe system and crafting interface, built on the item registry and inventory. It should also add food, since hunger currently only drains.
 
 ---
 

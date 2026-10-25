@@ -72,6 +72,9 @@ src/
 ├── world/       # chunked world and terrain generation
 ├── events/      # event log, replay and save format
 ├── building/    # placing and breaking blocks
+├── items/       # item table: names, stack limits, what they place
+├── inventory/   # stacks, gathering and placing with items, save format
+├── survival/    # health and hunger
 ├── player/      # player model and input
 ├── rendering/   # camera, meshing, pipeline
 ├── shared/      # voxel types, events, rng, clock

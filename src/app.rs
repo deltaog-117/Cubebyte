@@ -16,10 +16,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
-use crate::building::service::{break_block, place_block};
 use crate::events::log::EventLog;
 use crate::events::persist::{self, LoadError};
 use crate::events::replay::replay_chunk;
+use crate::inventory::model::Inventory;
+use crate::inventory::persist as inventory_persist;
+use crate::inventory::service::{StockError, gather_block, place_from_stock};
+use crate::items::registry::{self, ItemId};
 use crate::player::input::MoveKeys;
 use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
@@ -28,6 +31,7 @@ use crate::rendering::vertex::gpu_mesh;
 use crate::shared::clock::{ClockError, FixedClock};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::model::Simulation;
+use crate::survival::model::Stats;
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -36,6 +40,9 @@ const SEED: u64 = 117;
 
 /// Where the event log is kept, relative to the working directory.
 const SAVE_PATH: &str = "world.mcel";
+
+/// Where the inventory snapshot is kept, relative to the working directory.
+const INVENTORY_PATH: &str = "inventory.mcin";
 
 /// Chunks kept loaded in each horizontal direction around the camera.
 const LOAD_RADIUS: u8 = 4;
@@ -71,6 +78,10 @@ pub enum AppError {
     SeedMismatch { found: u64, expected: u64 },
     #[error("cannot save the world")]
     Save(#[source] io::Error),
+    #[error("cannot load the saved inventory")]
+    LoadInventory(#[from] inventory_persist::LoadError),
+    #[error("cannot save the inventory")]
+    SaveInventory(#[source] io::Error),
 }
 
 /// Opens the window and runs until it is closed.
@@ -78,8 +89,8 @@ pub enum AppError {
 /// # Errors
 ///
 /// Fails if the event loop, window or graphics device cannot be set up, if the saved world
-/// cannot be read or does not match the seed, if drawing a frame fails for good, or if the
-/// world cannot be saved on exit.
+/// cannot be read or does not match the seed, if the saved inventory is damaged, if drawing
+/// a frame fails for good, or if the world or inventory cannot be saved on exit.
 pub fn run() -> Result<(), AppError> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -101,6 +112,10 @@ struct Running {
     simulation: Simulation,
     world: World,
     log: EventLog,
+    inventory: Inventory,
+    /// Whether the inventory differs from what is on disk, so exit knows to save it.
+    inventory_dirty: bool,
+    stats: Stats,
     terrain: TerrainGenerator,
     streamer: Streamer,
 }
@@ -134,6 +149,7 @@ impl App {
             pollster::block_on(Renderer::new(window.clone(), (size.width, size.height)))?;
 
         let log = open_log(Path::new(SAVE_PATH))?;
+        let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
         let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
         let eye_height = terrain.height_at(0, 0) as f32 + 6.0;
@@ -146,6 +162,9 @@ impl App {
             simulation: Simulation::new(SEED, clock),
             world: World::default(),
             log,
+            inventory,
+            inventory_dirty: false,
+            stats: Stats::default(),
             terrain,
             streamer: Streamer::new(
                 LOAD_RADIUS,
@@ -154,6 +173,7 @@ impl App {
         };
         // Show the whole starting area at once instead of growing it over several frames.
         running.stream(usize::MAX);
+        running.refresh_title();
         Ok(running)
     }
 
@@ -182,8 +202,8 @@ impl App {
         }
     }
 
-    /// Left click breaks the block under the crosshair, right click places the selected
-    /// block against it.
+    /// Left click breaks the block under the crosshair and keeps what it yields, right
+    /// click places the selected block against it, spending one from the inventory.
     fn click(&mut self, button: MouseButton) {
         let selected = self.selected;
         let Some(running) = self.running.as_mut() else {
@@ -191,12 +211,17 @@ impl App {
         };
         let (origin, direction) = (running.camera.position, running.camera.forward());
         let edit = match button {
-            MouseButton::Left => {
-                break_block(&mut running.world, &mut running.log, origin, direction)
-            }
-            MouseButton::Right => place_block(
+            MouseButton::Left => gather_block(
                 &mut running.world,
                 &mut running.log,
+                &mut running.inventory,
+                origin,
+                direction,
+            ),
+            MouseButton::Right => place_from_stock(
+                &mut running.world,
+                &mut running.log,
+                &mut running.inventory,
                 origin,
                 direction,
                 selected,
@@ -204,9 +229,20 @@ impl App {
             _ => return,
         };
         match edit {
-            Ok(pos) => running.remesh_around(pos),
-            // Clicking at empty air is normal, not a fault.
-            Err(EditError::NothingInReach | EditError::NoFace | EditError::Occupied) => {}
+            Ok(pos) => {
+                running.inventory_dirty = true;
+                running.remesh_around(pos);
+                running.refresh_title();
+            }
+            // Clicking at empty air, with nothing to place, or with a full pack is normal,
+            // not a fault.
+            Err(
+                StockError::Edit(
+                    EditError::NothingInReach | EditError::NoFace | EditError::Occupied,
+                )
+                | StockError::Full
+                | StockError::Missing,
+            ) => {}
             Err(error) => tracing::warn!(%error, "edit rejected"),
         }
     }
@@ -219,8 +255,17 @@ impl App {
         let elapsed = now - running.last_frame;
         let seconds = elapsed.as_secs_f32().min(MAX_FRAME_SECONDS);
         running.last_frame = now;
-        // No system runs on the steps yet; later ones read the tick and draw from streams.
-        running.simulation.advance(elapsed);
+        // Later systems read the tick and draw from streams; survival needs neither.
+        let steps = running.simulation.advance(elapsed);
+        if steps > 0 {
+            let shown = (running.stats.health(), running.stats.hunger());
+            for _ in 0..steps {
+                running.stats.step();
+            }
+            if (running.stats.health(), running.stats.hunger()) != shown {
+                running.refresh_title();
+            }
+        }
         running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
         running.stream(MAX_LOADS_PER_FRAME);
         running.renderer.render(&running.camera)
@@ -266,6 +311,21 @@ impl Running {
                 remesh(&mut self.renderer, &self.world, pos);
             }
         }
+    }
+
+    /// Shows health, hunger and the carried items in the window title until there is a HUD.
+    fn refresh_title(&self) {
+        let mut title = format!(
+            "minecraft-clone | health {} hunger {} |",
+            self.stats.health().value(),
+            self.stats.hunger().value(),
+        );
+        for id in [ItemId::STONE, ItemId::DIRT, ItemId::GRASS] {
+            if let Some(def) = registry::get(id) {
+                title.push_str(&format!(" {} {}", def.name, self.inventory.count_of(id)));
+            }
+        }
+        self.window.set_title(&title);
     }
 
     /// Rebuilds the meshes an edit at `pos` can have changed.
@@ -323,11 +383,16 @@ impl ApplicationHandler for App {
             return;
         };
         // An empty log was never edited, so there is nothing worth writing.
-        if running.log.is_empty() {
-            return;
-        }
-        if let Err(error) = persist::save(Path::new(SAVE_PATH), SEED, &running.log) {
+        if !running.log.is_empty()
+            && let Err(error) = persist::save(Path::new(SAVE_PATH), SEED, &running.log)
+        {
             self.failure.get_or_insert(AppError::Save(error));
+        }
+        if running.inventory_dirty
+            && let Err(error) =
+                inventory_persist::save(Path::new(INVENTORY_PATH), &running.inventory)
+        {
+            self.failure.get_or_insert(AppError::SaveInventory(error));
         }
     }
 

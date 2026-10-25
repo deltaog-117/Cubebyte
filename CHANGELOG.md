@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Property test that every `u16` ID has a displayable colour, and a test that the `BlockId` constants match their table entries
 - `simulation::model::Simulation`: owns the `FixedClock` and a never-drawn root `Rng`, with `advance(elapsed)`, `tick()` and `stream(key)` for per-system random streams
 - Property test that splitting the same real time into different frames gives the same tick and the same random stream
+- `items::registry`: one table of item names, stack limits and the block each item places, with `drop_of(block)` for what breaking a block yields
+- `inventory::model`: `Stack` (1 to the item's limit, checked on construction) and a 27-slot `Inventory` with `add`, `take`, `count_of` and `room_for`
+- `inventory::persist`: a versioned `MCIN` snapshot, written atomically to `inventory.mcin` and checked slot by slot on load
+- `inventory::service`: `gather_block` and `place_from_stock`, which pair each block edit with its inventory change and refuse before touching the world
+- `survival::model`: `Stats` with health and hunger meters stepped by the simulation; hunger drops every 30 seconds and starvation lowers health to a floor of 1
+- Property tests for inventory conservation, stack limits, `room_for` against `add`, save round trips and the stats ranges
 
 ### Changed
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
@@ -67,3 +73,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The renderer reads block colours from `blocks::registry` instead of its own `match`
 - `app` advances a `Simulation` every frame (20 steps per second, at most 5 per frame); nothing runs on a step yet
 - `SolidBlock::try_new` accepts only defined solid blocks, so an ID with no definition is no longer placeable (it used to be accepted when not air)
+- Left click now keeps the broken block's item, right click needs one of the selected block in the inventory, and a full inventory leaves the block standing
+- `app` loads `inventory.mcin` at startup, saves it on exit when it changed, and shows health, hunger and item counts in the window title

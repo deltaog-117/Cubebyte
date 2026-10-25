@@ -24,6 +24,7 @@
 | 2026-10-25 | Chunk streaming | Unload everything; reload as generated terrain plus the chunk's logged events | ✅ Confirmed |
 | 2026-10-25 | Block registry | Static `const` table indexed by `BlockId` | ✅ Confirmed |
 | 2026-10-25 | Simulation tick loop | `Simulation` owns the `FixedClock` and forks per-system `Rng` streams; no systems yet | ✅ Confirmed |
+| 2026-10-25 | Resource management | Item registry plus a snapshot-saved inventory; block events unchanged; stats on the sim step | ✅ Confirmed |
 
 ---
 
@@ -474,6 +475,43 @@ Block data was spread over `BlockId` constants, a colour `match` in the renderer
 - `app` runs at 20 steps per second with at most 5 steps per frame. `Instant` stays in `app` as the source of elapsed time; the camera and streaming still use the variable frame time.
 - A property test shows that splitting the same real time into different frames gives the same tick and the same stream for a key.
 - Not run in the window by the assistant: the change has no visible effect.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Resource Management
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Blocks could be broken and placed for free. Crafting and combat both need items that are not blocks (tools, drops, food), and survival needs something to spend and to lose, so items, a pack to hold them and basic stats had to exist first.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Inventory as plain `player` state, counts adjusted beside the edit | Smallest change; no save-format change | Not in the log; items are just blocks | Small |
+| B: Inventory changes as events in the log | Rewind and replay restore items | Inventory events have no chunk, which the per-chunk log index assumes; log format bump | High |
+| C: Item registry plus inventory state saved as a snapshot beside the log | Items separate from blocks; log and block events untouched | Inventory and world can drift apart on rewind until snapshots are tied to log positions | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** C. Crafting and combat need items that are not blocks, so the registry was needed anyway, and C avoids B's chunk-less events. Event-sourcing the inventory is left to the rewind milestone, where snapshots will be designed on purpose.
+
+**Trade-offs accepted:** after a crash the world log and the inventory snapshot may disagree, since the inventory is written only on a clean exit. A player can also lose or gain items relative to the world if either file is deleted alone.
+
+#### Implementation Notes
+- `items::registry` mirrors `blocks::registry`: a `const` table, append-only IDs, with `ItemId(0)` meaning no item. Each item names the block it places, and `drop_of(block)` is the reverse lookup.
+- `Stack` can only be built with 1 to the item's limit, so an empty or overfull stack is unrepresentable. `Inventory` fills lowest slots first and tops up a partial stack before opening a slot, so the layout depends only on the order of the adds.
+- `gather_block` and `place_from_stock` check everything that can refuse (no room, no item) before the world changes, so a refused edit leaves the world, log and pack as they were. Placing spends the item only after the placement succeeded.
+- Health and hunger step once per simulation step from a step counter, with no randomness and no wall-clock time. Starvation stops at 1 health because nothing can heal or kill the player yet.
+- Stats are not saved yet; a restart gives full meters. There is no HUD, so the window title shows the stats and the counts.
+- Hunger only drains: there is no food until crafting. The new files are covered by property tests; the window itself was not run by the assistant.
 
 #### Review / Update Log
 
