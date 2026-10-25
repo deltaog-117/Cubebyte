@@ -7,4 +7,5 @@ pub mod events;
 pub mod player;
 pub mod rendering;
 pub mod shared;
+pub mod simulation;
 pub mod world;

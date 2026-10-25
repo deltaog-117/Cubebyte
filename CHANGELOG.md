@@ -57,10 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration test that saves a log, restores it, and checks every chunk replays to the edited world
 - `blocks::registry`: one table of block name, colour and solidity indexed by `BlockId`, with `get`, `color` and `is_solid`; undefined IDs have no entry and draw magenta
 - Property test that every `u16` ID has a displayable colour, and a test that the `BlockId` constants match their table entries
+- `simulation::model::Simulation`: owns the `FixedClock` and a never-drawn root `Rng`, with `advance(elapsed)`, `tick()` and `stream(key)` for per-system random streams
+- Property test that splitting the same real time into different frames gives the same tick and the same random stream
 
 ### Changed
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
 - `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed
 - `app` loads `world.mcel` at startup and saves it on exit when the world was edited; a save made with another seed stops the game instead of being overwritten
 - The renderer reads block colours from `blocks::registry` instead of its own `match`
+- `app` advances a `Simulation` every frame (20 steps per second, at most 5 per frame); nothing runs on a step yet
 - `SolidBlock::try_new` accepts only defined solid blocks, so an ID with no definition is no longer placeable (it used to be accepted when not air)

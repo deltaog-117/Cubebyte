@@ -23,6 +23,7 @@
 | 2026-10-25 | Block placing and breaking | Exact voxel ray cast; meshes keyed per chunk, only affected chunks rebuilt | ✅ Confirmed |
 | 2026-10-25 | Chunk streaming | Unload everything; reload as generated terrain plus the chunk's logged events | ✅ Confirmed |
 | 2026-10-25 | Block registry | Static `const` table indexed by `BlockId` | ✅ Confirmed |
+| 2026-10-25 | Simulation tick loop | `Simulation` owns the `FixedClock` and forks per-system `Rng` streams; no systems yet | ✅ Confirmed |
 
 ---
 
@@ -438,6 +439,41 @@ Block data was spread over `BlockId` constants, a colour `match` in the renderer
 - Behaviour change: `SolidBlock::try_new` used to accept any non-air ID and now accepts only defined solid blocks.
 - The 1/2/3 key bindings in `app` still name `SolidBlock` constants directly; they move when the inventory arrives.
 - Not run in the window by the assistant: colours are covered by tests, not by looking at the screen.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Simulation Tick Loop
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+`FixedClock` and `Rng` existed and were tested, but the game loop used only `Instant` and a variable frame time. Physics, mobs and rewind all need one place that owns simulation time and randomness, before any of them exist.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: `Simulation` with clock and forked streams | Smallest change; no behaviour change; the hook later systems plug into | Nothing runs on a step yet | Small |
+| B: A plus an ordered pipeline of system functions | System order fixed explicitly | An abstraction with zero systems is speculative | Medium |
+| C: A plus a fixed-rate camera with render interpolation | Player motion becomes replayable | Adds render state and changes how the camera feels | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** A. It meets the roadmap item without designing structure we cannot validate until a real system exists. When there are two systems to order, the step becomes a pipeline (B).
+
+**Trade-offs accepted:** the tick advances but nothing reads it yet, so the wiring is covered by tests rather than by visible behaviour.
+
+#### Implementation Notes
+- `simulation/model.rs` holds `Simulation { clock, root }`. `root` is only ever forked, never drawn from, so `stream(key)` depends on the key alone and not on call order.
+- `app` runs at 20 steps per second with at most 5 steps per frame. `Instant` stays in `app` as the source of elapsed time; the camera and streaming still use the variable frame time.
+- A property test shows that splitting the same real time into different frames gives the same tick and the same stream for a key.
+- Not run in the window by the assistant: the change has no visible effect.
 
 #### Review / Update Log
 

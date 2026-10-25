@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use thiserror::Error;
@@ -25,7 +25,9 @@ use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::gpu_mesh;
+use crate::shared::clock::{ClockError, FixedClock};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
+use crate::simulation::model::Simulation;
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -47,10 +49,18 @@ const FLY_SPEED: f32 = 14.0;
 /// Longest frame step, so a stall does not throw the camera across the map.
 const MAX_FRAME_SECONDS: f32 = 0.1;
 
+/// Length of one simulation step: 20 steps per second.
+const TICK_STEP: Duration = Duration::from_millis(50);
+
+/// Most steps run after one slow frame; the rest of the backlog is dropped.
+const MAX_STEPS_PER_FRAME: u32 = 5;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("cannot start the event loop")]
     EventLoop(#[from] EventLoopError),
+    #[error("cannot set up the simulation clock")]
+    Clock(#[from] ClockError),
     #[error("cannot create the window")]
     Window(#[from] OsError),
     #[error("rendering failed")]
@@ -88,6 +98,7 @@ struct Running {
     renderer: Renderer,
     camera: Camera,
     last_frame: Instant,
+    simulation: Simulation,
     world: World,
     log: EventLog,
     terrain: TerrainGenerator,
@@ -123,6 +134,7 @@ impl App {
             pollster::block_on(Renderer::new(window.clone(), (size.width, size.height)))?;
 
         let log = open_log(Path::new(SAVE_PATH))?;
+        let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
         let eye_height = terrain.height_at(0, 0) as f32 + 6.0;
         let size = i32::from(CHUNK_SIZE);
@@ -131,6 +143,7 @@ impl App {
             renderer,
             camera: Camera::new(Vec3::new(0.0, eye_height, 0.0)),
             last_frame: Instant::now(),
+            simulation: Simulation::new(SEED, clock),
             world: World::default(),
             log,
             terrain,
@@ -203,10 +216,11 @@ impl App {
             return Ok(());
         };
         let now = Instant::now();
-        let seconds = (now - running.last_frame)
-            .as_secs_f32()
-            .min(MAX_FRAME_SECONDS);
+        let elapsed = now - running.last_frame;
+        let seconds = elapsed.as_secs_f32().min(MAX_FRAME_SECONDS);
         running.last_frame = now;
+        // No system runs on the steps yet; later ones read the tick and draw from streams.
+        running.simulation.advance(elapsed);
         running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
         running.stream(MAX_LOADS_PER_FRAME);
         running.renderer.render(&running.camera)

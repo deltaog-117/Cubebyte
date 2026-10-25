@@ -24,13 +24,14 @@ Items are organized by priority, not by timeline.
 - ✅ Block placing and breaking: voxel ray cast, `building/service` edits routed through the event log, and per-chunk mesh replacement (left click breaks, right click places, 1/2/3 pick stone, dirt or grass)
 - ✅ Event replay wiring: the event log is saved to `world.mcel` on exit and loaded at startup in a versioned binary format; chunks rebuild from it as they stream in
 - ✅ Block registry: `blocks::registry` holds each block's name, colour and solidity in one table indexed by `BlockId`; the renderer and `SolidBlock` read from it
+- ✅ Simulation tick loop: `simulation::model::Simulation` owns the `FixedClock` and forks per-system `Rng` streams by key; `app` advances it each frame
 
 ---
 
 ## 🔥 High Priority (Critical)
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
-- **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only, so replays always match.
+- **Deterministic simulation** – The tick loop is in place; physics and mob AI must run on it and draw from `Simulation::stream` only, so replays always match.
 - **Resource management** – Inventory, item stacks, gathering and basic survival stats.
 - **Crafting** – Recipe system and crafting interface.
 - **Combat** – Health, damage, basic hostile mobs and weapons.
@@ -67,8 +68,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only.
-2. **Resource management** – Inventory, item stacks, gathering and basic survival stats; builds on the block registry.
+1. **Resource management** – Inventory, item stacks, gathering and basic survival stats; builds on the block registry.
 
 ---
 
