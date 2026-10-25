@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Left click breaks and right click places a block in the window; `1`, `2` and `3` select stone, dirt or grass
 - Tests that any run of edits replays and undoes exactly, on a block of stone and on generated terrain
 - Criterion benchmark for a full-reach ray cast (about 81 ns)
+- `world::streaming::Streamer`: plans which chunk columns to load (nearest first) and unload around the camera, with one chunk of margin so a camera on a border does not thrash; property tests check the plans settle on exactly the square around the centre
+- `EventLog::chunk_events`: a per-chunk index into the log, so one chunk's edits replay in log order without scanning everything
+- `events::replay::replay_chunk` and `World::unload`: drop a chunk and bring it back as generated terrain plus its logged edits
+- `Event::chunk`
+- Integration test that unloads and reloads every chunk after random edits and checks the world is unchanged
 
 ### Changed
+- `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
 - `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed

@@ -110,6 +110,12 @@ impl World {
         Ok(())
     }
 
+    /// Drops the chunk at `pos`, edits included. The edits survive in the event log, which
+    /// replays them when the chunk streams back in.
+    pub fn unload(&mut self, pos: ChunkPos) {
+        self.chunks.remove(&pos);
+    }
+
     /// # Errors
     ///
     /// Returns [`ApplyError::StaleEvent`] if the block at the event's position is not the

@@ -1,7 +1,7 @@
 //! Events: the only way the world changes. Lives in `shared` so `world` and `events`
 //! can both use it without depending on each other.
 
-use super::voxel::{BlockId, WorldPos};
+use super::voxel::{BlockId, ChunkPos, WorldPos};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -14,6 +14,13 @@ pub enum Event {
 }
 
 impl Event {
+    /// The chunk this event changes.
+    pub fn chunk(self) -> ChunkPos {
+        match self {
+            Self::BlockSet { pos, .. } => pos.split().0,
+        }
+    }
+
     /// The event that undoes this one.
     pub fn inverse(self) -> Self {
         match self {
@@ -44,6 +51,16 @@ mod tests {
                 new: BlockId(new),
             };
             prop_assert_eq!(event.inverse().inverse(), event);
+        }
+
+        #[test]
+        fn an_event_and_its_inverse_change_the_same_chunk(
+            x in any::<i32>(), y in any::<i32>(), z in any::<i32>(),
+        ) {
+            let pos = WorldPos { x, y, z };
+            let event = Event::BlockSet { pos, old: BlockId(0), new: BlockId(1) };
+            prop_assert_eq!(event.chunk(), pos.split().0);
+            prop_assert_eq!(event.inverse().chunk(), event.chunk());
         }
     }
 }

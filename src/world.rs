@@ -2,3 +2,4 @@
 
 pub mod generation;
 pub mod model;
+pub mod streaming;

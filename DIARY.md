@@ -21,6 +21,7 @@
 | 2026-10-25 | Chunk meshing | Culled faces, one quad per exposed face | ✅ Confirmed |
 | 2026-10-25 | Basic renderer | Vertical slice: `wgpu` + `winit` + `glam`, pure camera | ✅ Confirmed |
 | 2026-10-25 | Block placing and breaking | Exact voxel ray cast; meshes keyed per chunk, only affected chunks rebuilt | ✅ Confirmed |
+| 2026-10-25 | Chunk streaming | Unload everything; reload as generated terrain plus the chunk's logged events | ✅ Confirmed |
 
 ---
 
@@ -325,6 +326,43 @@ The world could be flown over but not changed. Placing and breaking blocks is th
 - Open for chunk streaming: placing next to an unloaded chunk writes into it through `World::apply`, and `insert_generated` would later refuse that chunk. Streaming must merge generated terrain under existing edits.
 - Open for the block registry: hotbar keys 1 to 3 and the block colours are fixed constants.
 - Not checked on screen by the assistant: clicking and the picture were not inspected.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Chunk Streaming
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+The window drew a fixed 9×9 grid of chunks. Streaming loads and unloads chunks around the camera. The open question was what happens to a player's edits in a chunk that unloads: `insert_generated` refuses to overwrite a stored chunk, so edits cannot simply be regenerated over.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Never unload edited chunks | Smallest change; no edit can be lost | Memory grows with edits; edited chunks stay loaded far away | Small |
+| B: Park edited chunks in a side store | Bounded loaded set; fast reload | A second copy of the truth beside the log; rewind must patch it | Medium |
+| C: Unload all; reload by generating, then replaying the chunk's events | World stays terrain plus events; no extra state; replay and rewind build on it | Needs a per-chunk log index; reload cost grows with that chunk's edits | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** C. The world is defined as terrain (a pure function of the seed) plus the event log, and C is the only option that keeps that true. It also covers most of the next roadmap item, event replay wiring.
+
+**Trade-offs accepted:** reload cost grows with the number of edits in one chunk. Snapshots, already planned under time rewind, are the fix if it ever matters.
+
+#### Implementation Notes
+- `Streamer` only tracks positions. It keeps its own loaded set because `World` never stores an all-air chunk, so "loaded but empty" and "not loaded" look the same there.
+- Distance is square (largest horizontal chunk offset). A chunk unloads one chunk past the load radius, and the starting area loads in full at startup.
+- Each `BlockSet` touches one block, so replaying a single chunk's events gives the same blocks the live world held. An integration test unloads and reloads every chunk after random edits and compares the worlds.
+- A newly loaded chunk remeshes its loaded neighbours so border faces update. Unloading does not remesh neighbours, so the outer ring keeps hidden faces toward the gap until the chunk reloads.
+- Placing a block into an unloaded chunk would log a wrong `old` block. Reach (5 blocks) is far below the load radius (64 blocks), so it cannot happen yet.
+- Generation runs on the main thread, capped at 8 chunks per frame. Not checked on screen by the assistant: the streaming picture was not inspected.
 
 #### Review / Update Log
 

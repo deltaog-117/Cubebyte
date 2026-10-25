@@ -1,5 +1,6 @@
 //! Wiring only: window, game loop and handing each feature what it needs.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +16,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::{break_block, place_block};
 use crate::events::log::EventLog;
+use crate::events::replay::replay_chunk;
 use crate::player::input::MoveKeys;
 use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
@@ -23,11 +25,15 @@ use crate::rendering::vertex::gpu_mesh;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
+use crate::world::streaming::Streamer;
 
 const SEED: u64 = 117;
 
-/// Chunks loaded in each horizontal direction around the origin. Streaming replaces this.
-const LOAD_RADIUS: i32 = 4;
+/// Chunks kept loaded in each horizontal direction around the camera.
+const LOAD_RADIUS: u8 = 4;
+
+/// Most chunks generated in one frame, so crossing into new terrain does not stall.
+const MAX_LOADS_PER_FRAME: usize = 8;
 
 /// Blocks per second.
 const FLY_SPEED: f32 = 14.0;
@@ -71,6 +77,8 @@ struct Running {
     last_frame: Instant,
     world: World,
     log: EventLog,
+    terrain: TerrainGenerator,
+    streamer: Streamer,
 }
 
 struct App {
@@ -98,24 +106,28 @@ impl App {
         window.set_cursor_visible(false);
 
         let size = window.inner_size();
-        let mut renderer =
+        let renderer =
             pollster::block_on(Renderer::new(window.clone(), (size.width, size.height)))?;
 
         let terrain = TerrainGenerator::new(SEED);
-        let world = load_world(&terrain);
-        for pos in chunk_grid() {
-            remesh(&mut renderer, &world, pos);
-        }
-
         let eye_height = terrain.height_at(0, 0) as f32 + 6.0;
-        Ok(Running {
+        let size = i32::from(CHUNK_SIZE);
+        let mut running = Running {
             window,
             renderer,
             camera: Camera::new(Vec3::new(0.0, eye_height, 0.0)),
             last_frame: Instant::now(),
-            world,
+            world: World::default(),
             log: EventLog::new(),
-        })
+            terrain,
+            streamer: Streamer::new(
+                LOAD_RADIUS,
+                MIN_HEIGHT.div_euclid(size)..=MAX_HEIGHT.div_euclid(size),
+            ),
+        };
+        // Show the whole starting area at once instead of growing it over several frames.
+        running.stream(usize::MAX);
+        Ok(running)
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: AppError) {
@@ -182,11 +194,52 @@ impl App {
             .min(MAX_FRAME_SECONDS);
         running.last_frame = now;
         running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
+        running.stream(MAX_LOADS_PER_FRAME);
         running.renderer.render(&running.camera)
     }
 }
 
 impl Running {
+    /// Unloads chunks that fell out of range and loads up to `budget` of the nearest
+    /// missing ones, then rebuilds the meshes that changed.
+    fn stream(&mut self, budget: usize) {
+        let camera = self.camera.position.floor().as_ivec3();
+        let centre = WorldPos {
+            x: camera.x,
+            y: camera.y,
+            z: camera.z,
+        }
+        .split()
+        .0;
+        let plan = self.streamer.plan(centre.x, centre.z);
+
+        for pos in plan.unload {
+            self.world.unload(pos);
+            self.streamer.mark_unloaded(pos);
+            self.renderer.set_mesh(pos, &[], &[]);
+        }
+
+        // A new chunk also changes the border faces of the chunks next to it.
+        let mut stale = HashSet::new();
+        for &pos in plan.load.iter().take(budget) {
+            load_chunk(&mut self.world, &self.log, &self.terrain, pos);
+            self.streamer.mark_loaded(pos);
+            stale.insert(pos);
+            for [dx, dy, dz] in NEIGHBOURS {
+                stale.insert(ChunkPos {
+                    x: pos.x.saturating_add(dx),
+                    y: pos.y.saturating_add(dy),
+                    z: pos.z.saturating_add(dz),
+                });
+            }
+        }
+        for pos in stale {
+            if self.streamer.is_loaded(pos) {
+                remesh(&mut self.renderer, &self.world, pos);
+            }
+        }
+    }
+
     /// Rebuilds the meshes an edit at `pos` can have changed.
     fn remesh_around(&mut self, pos: WorldPos) {
         for chunk in chunks_to_remesh(pos) {
@@ -244,27 +297,28 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Every chunk of the fixed grid shown for now.
-fn chunk_grid() -> impl Iterator<Item = ChunkPos> {
-    let size = i32::from(CHUNK_SIZE);
-    let (low, high) = (MIN_HEIGHT.div_euclid(size), MAX_HEIGHT.div_euclid(size));
-    (-LOAD_RADIUS..=LOAD_RADIUS).flat_map(move |x| {
-        (-LOAD_RADIUS..=LOAD_RADIUS)
-            .flat_map(move |z| (low..=high).map(move |y| ChunkPos { x, y, z }))
-    })
-}
+/// Chunk offsets that share a face with a chunk.
+const NEIGHBOURS: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
 
 fn remesh(renderer: &mut Renderer, world: &World, pos: ChunkPos) {
     let (vertices, indices) = gpu_mesh(&mesh_chunk(world, pos), pos);
     renderer.set_mesh(pos, &vertices, &indices);
 }
 
-fn load_world(terrain: &TerrainGenerator) -> World {
-    let mut world = World::default();
-    for pos in chunk_grid() {
-        if let Err(error) = world.insert_generated(pos, terrain.generate_chunk(pos)) {
-            tracing::error!(?pos, %error, "cannot load generated chunk");
-        }
+/// Installs the generated terrain for `pos`, then the player's edits to it from the log.
+fn load_chunk(world: &mut World, log: &EventLog, terrain: &TerrainGenerator, pos: ChunkPos) {
+    if let Err(error) = world.insert_generated(pos, terrain.generate_chunk(pos)) {
+        tracing::error!(?pos, %error, "cannot load generated chunk");
+        return;
     }
-    world
+    if let Err(error) = replay_chunk(world, log, pos) {
+        tracing::error!(?pos, %error, "cannot replay edits onto chunk");
+    }
 }
