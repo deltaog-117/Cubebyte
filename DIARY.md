@@ -15,6 +15,8 @@
 | 2026-10-25 | Chunk storage | Flat `BlockId` array behind a `Chunk` API | ✅ Confirmed |
 | 2026-10-25 | World mutation | Event-only (`World::apply`) | ✅ Confirmed |
 | 2026-10-25 | Module layout and tests | 2024-style `name.rs` files; unit tests in-file | ✅ Confirmed |
+| 2026-10-25 | Random number generator | Own xoshiro256++ with SplitMix64 seeding | ✅ Confirmed |
+| 2026-10-25 | Simulation clock | Integer fixed timestep with capped catch-up | ✅ Confirmed |
 
 ---
 
@@ -126,6 +128,44 @@ The scaffold started with `mod.rs` files and empty `tests/unit/` folders mirrori
 - **Integration entry:** `tests/integration/main.rs`, because Cargo resolves `mod` files in a `tests/*.rs` entry relative to `tests/`, not to a matching subfolder.
 
 **Trade-offs accepted:** the empty `tests/unit/` folders are unused for now.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Deterministic RNG and Fixed Clock
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Replay, rewind and seeded terrain only work if the same seed and the same tick count always produce the same results, in every future build.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Own SplitMix64 + xoshiro256++ | Stream fixed forever; no dependency; same on native and WASM | We write and test it ourselves | Easy |
+| B: `rand_chacha` or `rand_pcg` | Proven, documented stable stream | Dependency tree for little use | Easy |
+| C: `rand` `StdRng` | Most convenient | Algorithm may change between versions and silently break saves | Easy |
+
+#### Decision & Rationale
+**Chosen Option:** A.
+
+A change to the stream would invalidate every saved world and replay, so it must be impossible to change by accident. The generator is about 40 lines, and tests pin its output for known seeds against vectors from an independent implementation.
+
+**Trade-offs accepted:** no ready-made distributions or shuffles. We add helpers when something needs them.
+
+#### Implementation Notes
+- `below(bound)` rejects the biased low range, so results are uniform.
+- `fork(key)` takes `&self` and does not advance the parent. Fork from a generator that is never drawn from, keyed by something stable such as a chunk position, so a result never depends on generation order.
+- `FixedClock` uses integer nanoseconds, so there is no floating-point drift. Simulation state depends only on the tick count, never on wall time or frame rate.
+- Catch-up is capped per advance. After a long stall the extra backlog is dropped and the game runs slow instead of spiralling. A dropped backlog is logged with `tracing::warn!`.
+- Benchmarks: about 1.1 ns per `next_u64` and 11 ns per `below`.
 
 #### Review / Update Log
 

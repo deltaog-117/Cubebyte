@@ -15,6 +15,7 @@ Items are organized by priority, not by timeline.
 - ✅ 16×16×16 flat-array `Chunk` and `World` that changes only by applying events
 - ✅ `Event::BlockSet` with its inverse, and an append-only `EventLog`
 - ✅ Property tests (positions, chunk contents, undo, replay) and a hot-path benchmark
+- ✅ Seeded `Rng` (xoshiro256++ with a pinned output stream and per-key forks) and a `FixedClock` with a catch-up cap
 
 ---
 
@@ -24,7 +25,7 @@ Items are organized by priority, not by timeline.
 - **Terrain generation and chunk streaming** – Seeded generation, and loading and unloading chunks around the player.
 - **Meshing and a basic renderer** – Chunk meshes and a `wgpu` pipeline.
 - **Event replay wiring** – Rebuild a world from the log through `app`, and persist the log.
-- **Deterministic simulation** – Fixed timestep and seeded RNG for physics, mob AI and world generation, so replays always match.
+- **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only, so replays always match.
 - **Building** – Place and break blocks, with a block registry.
 - **Resource management** – Inventory, item stacks, gathering and basic survival stats.
 - **Crafting** – Recipe system and crafting interface.
@@ -63,11 +64,10 @@ Items are organized by priority, not by timeline.
 ## 🎯 Next Actions (Immediate)
 
 1. **Record the tech stack** – Rust + `wgpu` + `winit`, in the README.
-2. **Fixed-timestep clock and seeded RNG** – `shared/clock` and `shared/rng`, the base for deterministic replay.
-3. **Terrain generation** – `world/generation`, seeded and deterministic.
-4. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
-5. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
-6. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
+2. **Terrain generation** – `world/generation`, seeded and deterministic, forking one `Rng` per chunk position.
+3. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
+4. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
+5. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
 
 ---
 

@@ -18,5 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::log::EventLog`, an append-only event log
 - Property tests for position splitting, chunk contents, undo of every event, and replay of a log into an equal world
 - Criterion benchmarks for chunk reads and for placing and removing a block
+- `shared::rng::Rng`: seeded xoshiro256++ (SplitMix64 seeding) with unbiased `below(bound)` and `fork(key)` for independent per-key streams
+- Tests that pin the generator's output for known seeds, so any change to the stream fails loudly
+- `shared::clock::FixedClock` and `Tick`: integer-time fixed timestep with carry-over and a cap on catch-up steps per advance
+- Property tests for the clock (frame splitting never changes the tick count) and the generator (determinism, bounds, fork independence)
+- Criterion benchmark for `Rng::next_u64` and `Rng::below`
 
 ---

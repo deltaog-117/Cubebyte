@@ -16,6 +16,10 @@ proptest = "1"
 name = "chunk"
 harness = false
 
+[[bench]]
+name = "rng"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 
