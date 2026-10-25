@@ -56,7 +56,18 @@ pub enum ApplyError {
     },
 }
 
-/// The world's blocks. Changes only through [`World::apply`].
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum InsertError {
+    /// Inserting would overwrite blocks that may carry player edits.
+    #[error("chunk {pos:?} is already loaded")]
+    AlreadyLoaded { pos: ChunkPos },
+}
+
+/// The world's blocks. Player edits change it only through [`World::apply`].
+///
+/// Generated terrain is the baseline those events are recorded against. It is a pure
+/// function of the seed, so it enters through [`World::insert_generated`] and stays out
+/// of the event log.
 ///
 /// All-air chunks are never stored, so two worlds with the same blocks compare equal.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,6 +90,24 @@ impl World {
 
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Installs a freshly generated chunk as the baseline for `pos`.
+    ///
+    /// An all-air chunk is accepted but not stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InsertError::AlreadyLoaded`] if a chunk is stored at `pos`, so generation
+    /// can never overwrite edited blocks. The world is left unchanged.
+    pub fn insert_generated(&mut self, pos: ChunkPos, chunk: Chunk) -> Result<(), InsertError> {
+        if self.chunks.contains_key(&pos) {
+            return Err(InsertError::AlreadyLoaded { pos });
+        }
+        if !chunk.is_empty() {
+            self.chunks.insert(pos, chunk);
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -231,6 +260,51 @@ mod tests {
         let mut world = World::default();
         let event = set_event(&world, WorldPos { x: 0, y: 0, z: 0 }, BlockId::AIR);
         assert_eq!(world.apply(&event), Ok(()));
+        assert_eq!(world.chunk_count(), 0);
+    }
+
+    fn stone_chunk() -> Chunk {
+        let mut chunk = Chunk::default();
+        chunk.set(local(0), STONE);
+        chunk
+    }
+
+    #[test]
+    fn generated_chunk_is_readable_and_editable_through_events() {
+        let mut world = World::default();
+        let chunk_pos = ChunkPos { x: -1, y: 0, z: 2 };
+        assert_eq!(world.insert_generated(chunk_pos, stone_chunk()), Ok(()));
+
+        let pos = WorldPos {
+            x: -16,
+            y: 0,
+            z: 32,
+        };
+        assert_eq!(world.block_at(pos), STONE);
+
+        let dig = set_event(&world, pos, BlockId::AIR);
+        assert_eq!(world.apply(&dig), Ok(()));
+        assert_eq!(world.block_at(pos), BlockId::AIR);
+    }
+
+    #[test]
+    fn insert_generated_refuses_to_overwrite_a_loaded_chunk() {
+        let mut world = World::default();
+        let chunk_pos = ChunkPos { x: 0, y: 0, z: 0 };
+        assert_eq!(world.insert_generated(chunk_pos, stone_chunk()), Ok(()));
+        let before = world.clone();
+        assert_eq!(
+            world.insert_generated(chunk_pos, Chunk::default()),
+            Err(InsertError::AlreadyLoaded { pos: chunk_pos })
+        );
+        assert_eq!(world, before);
+    }
+
+    #[test]
+    fn insert_generated_does_not_store_an_all_air_chunk() {
+        let mut world = World::default();
+        let chunk_pos = ChunkPos { x: 3, y: 3, z: 3 };
+        assert_eq!(world.insert_generated(chunk_pos, Chunk::default()), Ok(()));
         assert_eq!(world.chunk_count(), 0);
     }
 

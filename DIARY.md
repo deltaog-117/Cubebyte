@@ -174,3 +174,42 @@ A change to the stream would invalidate every saved world and replay, so it must
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Terrain Generation
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+The world needs seeded terrain that is the same on every run and every platform, and that fits the rule that the world changes only through events.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: 2D heightmap from value noise | No dependency, tiny | Blocky look, no caves | Easy |
+| B: 2D heightmap from Perlin noise | Smooth hills, no dependency, can grow into C | More code than A, no caves | Medium |
+| C: 3D density noise | Caves and overhangs | About 16× the samples per chunk, more tuning | Hard |
+
+#### Decision & Rationale
+**Chosen Option:** B, with generated chunks inserted directly through `World::insert_generated` and kept out of the event log.
+
+Terrain is a pure function of the seed, so logging about 4096 events per chunk would bloat the log and make rewind heavy for no gain. Events are deltas on top of the generated baseline.
+
+**Trade-offs accepted:** `World` is no longer changed *only* by events. Generated chunks are the baseline, and `insert_generated` refuses to overwrite a loaded chunk so edits cannot be lost.
+
+#### Implementation Notes
+- The roadmap planned one forked `Rng` per chunk position. Heights must be continuous across chunk borders, so the noise is instead hashed per lattice point from the world seed. `Rng::fork` derives one salt per octave, and the per-chunk fork stays reserved for features such as trees.
+- Floats use only `+ - * /` and `round`, which are exactly specified, so results match across platforms. Wavelengths are powers of two so the position inside a cell is exact.
+- Heights are clamped to `MIN_HEIGHT..=MAX_HEIGHT` (-8..=40); chunks fully above that return without sampling any noise.
+- The tests that pin heights for seeds 0 and 42 are regression pins from this implementation, not independent reference values.
+- Benchmarks: about 34 µs per surface chunk and 110 ns per sky chunk.
+- Open for replay wiring: replay must regenerate the baseline chunks before applying logged events, since events record the block they replaced.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |

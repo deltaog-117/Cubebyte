@@ -12,7 +12,10 @@ pub struct Rng {
 }
 
 /// One SplitMix64 step: advances `state` and returns the next output.
-fn splitmix64(state: &mut u64) -> u64 {
+///
+/// Also serves as a stable integer hash for code that needs a value per lattice point
+/// instead of a stream (terrain noise).
+pub(crate) fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

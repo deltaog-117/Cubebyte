@@ -14,6 +14,10 @@ pub struct BlockId(pub u16);
 
 impl BlockId {
     pub const AIR: Self = Self(0);
+    // Fixed IDs until the block registry exists; saved worlds depend on them.
+    pub const STONE: Self = Self(1);
+    pub const DIRT: Self = Self(2);
+    pub const GRASS: Self = Self(3);
 
     pub const fn is_air(self) -> bool {
         self.0 == 0
@@ -74,6 +78,16 @@ impl LocalPos {
 
     pub const fn z(self) -> u8 {
         self.z
+    }
+
+    /// Every position in a chunk, in increasing [`LocalPos::index`] order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        (0..CHUNK_SIZE).flat_map(|y| {
+            (0..CHUNK_SIZE).flat_map(move |z| {
+                // Each axis is below `CHUNK_SIZE` by construction, so `ok()` never drops one.
+                (0..CHUNK_SIZE).filter_map(move |x| Self::try_new(x, y, z).ok())
+            })
+        })
     }
 
     /// Index into a chunk's flat block array. Always below [`CHUNK_VOLUME`].
@@ -157,6 +171,12 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), CHUNK_VOLUME);
+    }
+
+    #[test]
+    fn all_yields_every_position_in_index_order() {
+        let indices: Vec<_> = LocalPos::all().map(LocalPos::index).collect();
+        assert!(indices.iter().copied().eq(0..CHUNK_VOLUME));
     }
 
     #[test]

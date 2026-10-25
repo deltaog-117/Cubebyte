@@ -17,13 +17,14 @@ Items are organized by priority, not by timeline.
 - ✅ Property tests (positions, chunk contents, undo, replay) and a hot-path benchmark
 - ✅ Seeded `Rng` (xoshiro256++ with a pinned output stream and per-key forks) and a `FixedClock` with a catch-up cap
 - ✅ `README.md` recording the tech stack (Rust + `wgpu` + `winit`)
+- ✅ Seeded terrain generation: Perlin heightmap with grass, dirt and stone layers, inserted into the world without logging events
 
 ---
 
 ## 🔥 High Priority (Critical)
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
-- **Terrain generation and chunk streaming** – Seeded generation, and loading and unloading chunks around the player.
+- **Chunk streaming** – Loading and unloading chunks around the player, using the terrain generator.
 - **Meshing and a basic renderer** – Chunk meshes and a `wgpu` pipeline.
 - **Event replay wiring** – Rebuild a world from the log through `app`, and persist the log.
 - **Deterministic simulation** – Make physics, mob AI and world generation use `FixedClock` and forked `Rng` streams only, so replays always match.
@@ -64,10 +65,9 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Terrain generation** – `world/generation`, seeded and deterministic, forking one `Rng` per chunk position.
-2. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
-3. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
-4. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
+1. **Meshing** – `rendering/meshing`, turning chunks into vertex data.
+2. **Renderer and camera** – `rendering/pipeline` and `rendering/camera`, plus the window in `app`.
+3. **Block placing and breaking** – `building/service`, the first playable loop, routed through the event log.
 
 ---
 

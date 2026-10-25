@@ -24,5 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Property tests for the clock (frame splitting never changes the tick count) and the generator (determinism, bounds, fork independence)
 - Criterion benchmark for `Rng::next_u64` and `Rng::below`
 - `README.md` with the project description, status, tech stack (Rust + `wgpu` + `winit`), structure and test commands
+- `world::generation::TerrainGenerator`: seeded, deterministic terrain from hand-written 2D Perlin noise (four octaves), with grass, three dirt blocks and stone below; heights stay within `MIN_HEIGHT..=MAX_HEIGHT`
+- `World::insert_generated` and `InsertError`: install generated chunks as the baseline without logging events, and refuse to overwrite a loaded chunk
+- `BlockId::STONE`, `DIRT` and `GRASS` constants, and `LocalPos::all()` to iterate a chunk in index order
+- Tests that pin terrain heights for known seeds, check there are no cliffs between neighbouring columns, and check chunk layers across chunk borders
+- Criterion benchmark for generating a surface chunk and a sky chunk
 
 ---
