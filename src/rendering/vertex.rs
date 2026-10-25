@@ -3,8 +3,9 @@
 //! Kept apart from the pipeline so the conversion from [`MeshData`] is tested without a
 //! device.
 
+use crate::blocks::registry;
 use crate::rendering::meshing::{Face, MeshData};
-use crate::shared::voxel::{BlockId, CHUNK_SIZE, ChunkPos};
+use crate::shared::voxel::{CHUNK_SIZE, ChunkPos};
 
 /// A corner in world space with its final colour. Lighting is baked in here, so the shader
 /// only interpolates.
@@ -18,16 +19,6 @@ pub struct GpuVertex {
 impl GpuVertex {
     pub const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-}
-
-/// Flat colour of a block type; magenta marks a block the renderer has no colour for.
-fn block_color(block: BlockId) -> [f32; 3] {
-    match block {
-        BlockId::GRASS => [0.30, 0.65, 0.20],
-        BlockId::DIRT => [0.45, 0.30, 0.18],
-        BlockId::STONE => [0.50, 0.50, 0.52],
-        _ => [1.0, 0.0, 1.0],
-    }
 }
 
 /// Fixed light from above: tops are brightest, bottoms darkest, so faces stay readable
@@ -53,7 +44,7 @@ pub fn gpu_mesh(mesh: &MeshData, chunk: ChunkPos) -> (Vec<GpuVertex>, Vec<u32>) 
             let shade = face_shade(vertex.face);
             GpuVertex {
                 position: std::array::from_fn(|axis| vertex.position[axis] + origin[axis]),
-                color: block_color(vertex.block).map(|channel| channel * shade),
+                color: registry::color(vertex.block).map(|channel| channel * shade),
             }
         })
         .collect();
@@ -64,7 +55,7 @@ pub fn gpu_mesh(mesh: &MeshData, chunk: ChunkPos) -> (Vec<GpuVertex>, Vec<u32>) 
 mod tests {
     use super::*;
     use crate::rendering::meshing::mesh_chunk;
-    use crate::shared::voxel::{LocalPos, WorldPos};
+    use crate::shared::voxel::{BlockId, LocalPos, WorldPos};
     use crate::world::model::{Chunk, World};
 
     fn single_block_world() -> World {
@@ -106,7 +97,11 @@ mod tests {
             for face in Face::ALL {
                 let shade = face_shade(face);
                 assert!((0.0..=1.0).contains(&shade));
-                assert!(block_color(block).iter().all(|c| (0.0..=1.0).contains(c)));
+                assert!(
+                    registry::color(block)
+                        .iter()
+                        .all(|c| (0.0..=1.0).contains(c))
+                );
                 assert!(shade <= face_shade(Face::PosY));
             }
         }

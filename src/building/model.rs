@@ -2,16 +2,17 @@
 
 use thiserror::Error;
 
+use crate::blocks::registry;
 use crate::shared::voxel::BlockId;
 use crate::world::model::ApplyError;
 
-/// A block that can be placed. Never air, so "placing air" cannot be written; clearing a
+/// A block that can be placed. Always a defined solid block, never air, so "placing air" cannot be written; clearing a
 /// cell is breaking it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SolidBlock(BlockId);
 
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("air cannot be placed; break the block instead")]
+#[error("only defined solid blocks can be placed; break the block to clear it")]
 pub struct NotSolid;
 
 impl SolidBlock {
@@ -21,12 +22,12 @@ impl SolidBlock {
 
     /// # Errors
     ///
-    /// Returns [`NotSolid`] for air.
+    /// Returns [`NotSolid`] for air and for IDs with no block definition.
     pub fn try_new(block: BlockId) -> Result<Self, NotSolid> {
-        if block.is_air() {
-            Err(NotSolid)
-        } else {
+        if registry::is_solid(block) {
             Ok(Self(block))
+        } else {
+            Err(NotSolid)
         }
     }
 

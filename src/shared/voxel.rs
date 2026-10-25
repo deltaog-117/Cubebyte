@@ -14,7 +14,7 @@ pub struct BlockId(pub u16);
 
 impl BlockId {
     pub const AIR: Self = Self(0);
-    // Fixed IDs until the block registry exists; saved worlds depend on them.
+    // Saved worlds store these IDs; they must match the positions in `blocks::registry`.
     pub const STONE: Self = Self(1);
     pub const DIRT: Self = Self(2);
     pub const GRASS: Self = Self(3);

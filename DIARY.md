@@ -22,6 +22,7 @@
 | 2026-10-25 | Basic renderer | Vertical slice: `wgpu` + `winit` + `glam`, pure camera | ✅ Confirmed |
 | 2026-10-25 | Block placing and breaking | Exact voxel ray cast; meshes keyed per chunk, only affected chunks rebuilt | ✅ Confirmed |
 | 2026-10-25 | Chunk streaming | Unload everything; reload as generated terrain plus the chunk's logged events | ✅ Confirmed |
+| 2026-10-25 | Block registry | Static `const` table indexed by `BlockId` | ✅ Confirmed |
 
 ---
 
@@ -400,6 +401,43 @@ Edits lived only in memory, so closing the window lost them. Per-chunk replay al
 - The save is written on exit only. A crash or kill loses the edits since the last clean exit.
 - The path is relative to the working directory (`world.mcel`). The repo has no `.gitignore` yet, so that file shows up as untracked after a run.
 - Not run in the window by the assistant: save and restart were checked through tests only (round trip, truncation, bad magic, bad version, unknown tag, arbitrary bytes, and a restart simulated from the bytes).
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Block Registry
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Block data was spread over `BlockId` constants, a colour `match` in the renderer, `SolidBlock` and the key bindings. Crafting and inventory will need more per-block properties, so they needed one place to live.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Static `const` table | No dependency; no allocation; saved IDs and the `.mcel` format unchanged | New block means editing Rust | Small |
+| B: Runtime `BlockRegistry` | Open to data-driven blocks | IDs depend on registration order; passed through many call sites | Medium |
+| C: `blocks.toml` loaded at startup | No recompiling to add a block | New dependencies, load failures, save-format change | Large |
+
+#### Decision & Rationale
+**Chosen Option:** A. It removes the scattered data without touching the save format. `world.mcel` already stores raw IDs, so the ID stays the stable key. The lookup API (`get`, `color`, `is_solid`) has the shape a runtime or file-backed registry would need, so upgrading later does not change callers.
+
+**Trade-offs accepted:** adding a block is a code change and a recompile; modding is out of scope for now.
+
+#### Implementation Notes
+- `blocks/registry.rs` holds `BLOCKS`; an ID is its index. New blocks are only appended, because reordering would change what saved worlds mean.
+- `shared` cannot import a feature, so the `BlockId::STONE`-style constants stay in `shared::voxel`. A test checks each one against its table entry.
+- An ID outside the table has no definition: `get` returns `None`, `color` returns magenta and `is_solid` is false.
+- Behaviour change: `SolidBlock::try_new` used to accept any non-air ID and now accepts only defined solid blocks.
+- The 1/2/3 key bindings in `app` still name `SolidBlock` constants directly; they move when the inventory arrives.
+- Not run in the window by the assistant: colours are covered by tests, not by looking at the screen.
 
 #### Review / Update Log
 

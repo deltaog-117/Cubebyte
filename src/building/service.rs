@@ -183,8 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn air_is_not_a_solid_block() {
+    fn air_and_undefined_ids_are_not_solid_blocks() {
         assert_eq!(SolidBlock::try_new(BlockId::AIR), Err(NotSolid));
+        assert_eq!(SolidBlock::try_new(BlockId(999)), Err(NotSolid));
         assert_eq!(SolidBlock::try_new(BlockId::STONE), Ok(SolidBlock::STONE));
     }
 

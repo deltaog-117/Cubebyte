@@ -1,6 +1,7 @@
 //! A voxel sandbox with event-sourced world edits, time rewind and scripted gameplay.
 
 pub mod app;
+pub mod blocks;
 pub mod building;
 pub mod events;
 pub mod player;
