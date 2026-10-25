@@ -17,6 +17,8 @@
 | 2026-10-25 | Module layout and tests | 2024-style `name.rs` files; unit tests in-file | ✅ Confirmed |
 | 2026-10-25 | Random number generator | Own xoshiro256++ with SplitMix64 seeding | ✅ Confirmed |
 | 2026-10-25 | Simulation clock | Integer fixed timestep with capped catch-up | ✅ Confirmed |
+| 2026-10-25 | Terrain generation | Perlin heightmap, inserted without events | ✅ Confirmed |
+| 2026-10-25 | Chunk meshing | Culled faces, one quad per exposed face | ✅ Confirmed |
 
 ---
 
@@ -207,6 +209,44 @@ Terrain is a pure function of the seed, so logging about 4096 events per chunk w
 - The tests that pin heights for seeds 0 and 42 are regression pins from this implementation, not independent reference values.
 - Benchmarks: about 34 µs per surface chunk and 110 ns per sky chunk.
 - Open for replay wiring: replay must regenerate the baseline chunks before applying logged events, since events record the block they replaced.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Chunk Meshing
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+The renderer needs vertex data for each chunk. Meshing should be testable without a window or a GPU, and should not tie the world to `wgpu`.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Culled faces, one quad per exposed face | Simple, easy to prove, per-face data is easy to add | Most vertices | Easy |
+| B: Greedy meshing | Far fewer vertices | Conflicts with per-vertex AO, lighting and per-face textures; harder to prove | Hard |
+| C: Culled faces behind a `Mesher` trait | Cheap to swap later | An abstraction with one implementation | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** A. Chunks are only 16³, so the vertex count is not a bottleneck yet, and greedy meshing would have to be reworked once AO or lighting arrives. A trait can be added if a benchmark ever shows meshing or draw cost matters.
+
+**Trade-offs accepted:** More vertices than greedy meshing would produce. Flat terrain costs one quad per exposed block face.
+
+#### Implementation Notes
+- `mesh_chunk(world, pos) -> MeshData` is a pure function. `MeshData` holds `Vec`s of `Vertex` and `u32` indices with no `wgpu` types, and its fields are private so every mesh is whole quads with in-range indices.
+- Vertex positions are relative to the chunk origin (`0.0..=16.0`), which keeps `f32` exact far from the world origin. The renderer adds the chunk offset.
+- A border face reads the neighbouring chunk through `World::block_at`. An unloaded neighbour reads as air, so those faces are drawn until it loads. Inside the chunk the array is read directly. Coordinates use checked arithmetic, so a chunk at the edge of the representable world cannot overflow.
+- Winding is counter-clockwise from outside. A property test checks that every triangle's cross product equals its face normal.
+- The main property test compares the quad count with a count built from `block_at` alone, which shares no code with the mesher's neighbour lookup.
+- Open for chunk streaming: when a chunk loads, its loaded neighbours must be remeshed, because their border faces were drawn against air.
+- Benchmarks (`--quick` run): about 302 µs per surface chunk and 26 ns per sky chunk. These are the baseline for the 5% gate.
 
 #### Review / Update Log
 

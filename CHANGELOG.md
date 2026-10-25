@@ -31,3 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Criterion benchmark for generating a surface chunk and a sky chunk
 
 ---
+- `rendering::meshing::mesh_chunk`: turns a chunk into `MeshData` with one quad per block face that touches air; border faces read the neighbouring chunk through the world, and an unloaded neighbour counts as air
+- `Face`, `Vertex` and `MeshData` types: vertices hold chunk-local positions, the face and the block type, and the mesh always holds whole quads with in-range indices
+- Tests that check the quad count against an independent count, that indices and positions are in range, and that every triangle faces along its face normal
+- Criterion benchmark for meshing a surface chunk and a sky chunk

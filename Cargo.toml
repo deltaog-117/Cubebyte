@@ -24,6 +24,10 @@ harness = false
 name = "generation"
 harness = false
 
+[[bench]]
+name = "meshing"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 
