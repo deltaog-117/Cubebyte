@@ -70,7 +70,7 @@ cargo bench
 ```
 src/
 ├── world/       # chunked world and terrain generation
-├── events/      # event log and replay
+├── events/      # event log, replay and save format
 ├── building/    # placing and breaking blocks
 ├── player/      # player model and input
 ├── rendering/   # camera, meshing, pipeline

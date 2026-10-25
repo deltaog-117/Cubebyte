@@ -53,7 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::replay::replay_chunk` and `World::unload`: drop a chunk and bring it back as generated terrain plus its logged edits
 - `Event::chunk`
 - Integration test that unloads and reloads every chunk after random edits and checks the world is unchanged
+- `events::persist`: a versioned binary save format for the event log (magic, version, seed, then 17-byte records), with `encode`, `decode`, `save` and `load`; `save` writes a sibling file and renames it, so a crash never leaves a half-written save
+- Integration test that saves a log, restores it, and checks every chunk replays to the edited world
 
 ### Changed
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
 - `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed
+- `app` loads `world.mcel` at startup and saves it on exit when the world was edited; a save made with another seed stops the game instead of being overwritten

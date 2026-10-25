@@ -369,3 +369,40 @@ The window drew a fixed 9×9 grid of chunks. Streaming loads and unloads chunks 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Event Replay Wiring
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Edits lived only in memory, so closing the window lost them. Per-chunk replay already rebuilt a chunk from terrain plus its logged events, so the missing piece was getting the log to disk and back through `app`.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Hand-rolled binary file | No dependency; compact; format fully pinned | Encode, decode and corruption handling are ours | Medium |
+| B: Plain-text lines | Human-readable and diffable | Larger; slower to parse; strict parsing needed | Small |
+| C: `serde` + `bincode` | Least code | Extra dependencies; format not pinned by us | Small |
+
+#### Decision & Rationale
+**Chosen Option:** A. Replay has to stay deterministic, and the project already pins its own random stream for the same reason. An event is small, and the seed in the header catches a save made on different terrain.
+
+**Trade-offs accepted:** the format is ours to maintain; a layout change needs a version bump and a migration.
+
+#### Implementation Notes
+- Layout: magic `MCEL`, version `u16`, seed `u64`, then 17-byte records, little-endian. There is no stored count: records run to the end of the file, so a file cut mid-record is rejected instead of silently dropping the last edit.
+- `save` writes `world.mcel.tmp` and renames it over `world.mcel`, so a crash cannot leave a half-written save.
+- `app` loads the log before the first chunk streams in. A save with a different seed is an error, not overwritten. The log is written on exit, but only if it is non-empty.
+- The save is written on exit only. A crash or kill loses the edits since the last clean exit.
+- The path is relative to the working directory (`world.mcel`). The repo has no `.gitignore` yet, so that file shows up as untracked after a run.
+- Not run in the window by the assistant: save and restart were checked through tests only (round trip, truncation, bad magic, bad version, unknown tag, arbitrary bytes, and a restart simulated from the bytes).
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |
