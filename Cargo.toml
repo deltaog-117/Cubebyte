@@ -1,0 +1,24 @@
+[package]
+name = "minecraft_clone"
+version = "0.1.0"
+edition = "2024"
+authors = ["deltaog-117"]
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1"
+
+[[bench]]
+name = "chunk"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

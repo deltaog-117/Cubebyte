@@ -1,0 +1,1 @@
+//! Small generic math helpers.
