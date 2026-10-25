@@ -26,6 +26,7 @@ Items are organized by priority, not by timeline.
 - ✅ Block registry: `blocks::registry` holds each block's name, colour and solidity in one table indexed by `BlockId`; the renderer and `SolidBlock` read from it
 - ✅ Simulation tick loop: `simulation::model::Simulation` owns the `FixedClock` and forks per-system `Rng` streams by key; `app` advances it each frame
 - ✅ Resource management: an item registry, a 27-slot stack inventory saved to `inventory.mcin`, breaking yields and placing spends items, and health and hunger meters stepped by the simulation (shown in the window title)
+- ✅ Crafting: a shapeless recipe table with an all-or-nothing `craft`, food items and `eat`; keys R, C and E, with the window title standing in for a UI
 
 ---
 
@@ -33,7 +34,6 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop is in place; physics and mob AI must run on it and draw from `Simulation::stream` only, so replays always match.
-- **Crafting** – Recipe system and crafting interface; needs food items so hunger can be refilled.
 - **Combat** – Health, damage, basic hostile mobs and weapons.
 
 ---
@@ -53,6 +53,8 @@ Items are organized by priority, not by timeline.
 
 - **Shareable blueprints** – Export a build or script as a text blob that others can import and watch build step by step.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
+- **Crafting interface** – An on-screen recipe list and crafting panel; needs a 2D and text pass in the renderer.
+- **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
 - **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
 
 ---
@@ -68,7 +70,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Crafting** – Recipe system and crafting interface, built on the item registry and inventory. It should also add food, since hunger currently only drains.
+1. **Deterministic physics** – Player gravity and collision on the simulation tick, a base for mobs and combat.
 
 ---
 

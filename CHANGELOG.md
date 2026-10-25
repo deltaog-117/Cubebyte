@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `inventory::service`: `gather_block` and `place_from_stock`, which pair each block edit with its inventory change and refuse before touching the world
 - `survival::model`: `Stats` with health and hunger meters stepped by the simulation; hunger drops every 30 seconds and starvation lowers health to a floor of 1
 - Property tests for inventory conservation, stack limits, `room_for` against `add`, save round trips and the stats ranges
+- `crafting::registry`: a `const` table of shapeless recipes (bread from 3 grass, stew from 4 grass and 2 dirt) with append-only `RecipeId`s
+- `crafting::service::craft`: spends a recipe's inputs and adds its output on a copy of the inventory, so a short input or a full pack changes nothing
+- Food items `bread` and `stew`, and `ItemDef::restores_hunger`, which marks an item as food
+- `survival::service::eat` and `Stats::restore_hunger`: eating spends one food item, refills hunger up to the maximum, and refuses when hunger is already full
+- Keys `R` (next recipe), `C` (craft) and `E` (eat); the window title shows every item count and the selected recipe
+- Property test that a craft either changes nothing or moves counts by exactly the recipe, and that the result survives a save and load
 
 ### Changed
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
@@ -75,3 +81,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SolidBlock::try_new` accepts only defined solid blocks, so an ID with no definition is no longer placeable (it used to be accepted when not air)
 - Left click now keeps the broken block's item, right click needs one of the selected block in the inventory, and a full inventory leaves the block standing
 - `app` loads `inventory.mcin` at startup, saves it on exit when it changed, and shows health, hunger and item counts in the window title
+- `items::registry::ItemDef` gains `restores_hunger`, and `items::registry::ids()` lists every item; the window title lists all items instead of a fixed three

@@ -14,6 +14,8 @@ impl ItemId {
     pub const STONE: Self = Self(1);
     pub const DIRT: Self = Self(2);
     pub const GRASS: Self = Self(3);
+    pub const BREAD: Self = Self(4);
+    pub const STEW: Self = Self(5);
 }
 
 /// What the game knows about one item type.
@@ -24,24 +26,41 @@ pub struct ItemDef {
     pub stack_limit: u8,
     /// The block this item places, if it places one.
     pub places: Option<BlockId>,
+    /// Hunger points eating this item restores, if it is food.
+    pub restores_hunger: Option<u8>,
 }
 
 /// Indexed by `ItemId - 1`. The `ItemId` constants must match these positions.
-const ITEMS: [ItemDef; 3] = [
+const ITEMS: [ItemDef; 5] = [
     ItemDef {
         name: "stone",
         stack_limit: 64,
         places: Some(BlockId::STONE),
+        restores_hunger: None,
     },
     ItemDef {
         name: "dirt",
         stack_limit: 64,
         places: Some(BlockId::DIRT),
+        restores_hunger: None,
     },
     ItemDef {
         name: "grass",
         stack_limit: 64,
         places: Some(BlockId::GRASS),
+        restores_hunger: None,
+    },
+    ItemDef {
+        name: "bread",
+        stack_limit: 64,
+        places: None,
+        restores_hunger: Some(4),
+    },
+    ItemDef {
+        name: "stew",
+        stack_limit: 16,
+        places: None,
+        restores_hunger: Some(8),
     },
 ];
 
@@ -49,6 +68,11 @@ const ITEMS: [ItemDef; 3] = [
 pub fn get(id: ItemId) -> Option<&'static ItemDef> {
     let index = usize::from(id.0.checked_sub(1)?);
     ITEMS.get(index)
+}
+
+/// Every defined item, in ID order.
+pub fn ids() -> impl Iterator<Item = ItemId> {
+    (1..=ITEMS.len() as u16).map(ItemId)
 }
 
 /// The item breaking `block` yields, or `None` when it yields nothing (air, or an
@@ -68,6 +92,8 @@ mod tests {
         assert_eq!(get(ItemId::STONE).map(|def| def.name), Some("stone"));
         assert_eq!(get(ItemId::DIRT).map(|def| def.name), Some("dirt"));
         assert_eq!(get(ItemId::GRASS).map(|def| def.name), Some("grass"));
+        assert_eq!(get(ItemId::BREAD).map(|def| def.name), Some("bread"));
+        assert_eq!(get(ItemId::STEW).map(|def| def.name), Some("stew"));
     }
 
     #[test]
@@ -82,9 +108,26 @@ mod tests {
     }
 
     #[test]
+    fn ids_lists_every_item_once() {
+        let ids: Vec<_> = ids().collect();
+        assert_eq!(ids.len(), ITEMS.len());
+        assert!(ids.iter().all(|&id| get(id).is_some()));
+    }
+
+    #[test]
+    fn food_restores_something_and_is_not_placeable() {
+        for def in &ITEMS {
+            if let Some(restored) = def.restores_hunger {
+                assert!(restored > 0, "{} restores nothing", def.name);
+                assert_eq!(def.places, None, "{} is food and a block", def.name);
+            }
+        }
+    }
+
+    #[test]
     fn every_placed_block_is_a_solid_block() {
         for def in &ITEMS {
-            let block = def.places.unwrap();
+            let Some(block) = def.places else { continue };
             assert!(
                 blocks::is_solid(block),
                 "{} places a non-solid block",

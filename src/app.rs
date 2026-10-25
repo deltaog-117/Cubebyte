@@ -16,13 +16,15 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
+use crate::crafting::registry::{self as recipes, RecipeId};
+use crate::crafting::service::craft;
 use crate::events::log::EventLog;
 use crate::events::persist::{self, LoadError};
 use crate::events::replay::replay_chunk;
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_block, place_from_stock};
-use crate::items::registry::{self, ItemId};
+use crate::items::registry;
 use crate::player::input::MoveKeys;
 use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
@@ -32,6 +34,7 @@ use crate::shared::clock::{ClockError, FixedClock};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::model::Simulation;
 use crate::survival::model::Stats;
+use crate::survival::service::eat;
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -116,6 +119,8 @@ struct Running {
     /// Whether the inventory differs from what is on disk, so exit knows to save it.
     inventory_dirty: bool,
     stats: Stats,
+    /// The recipe the craft key makes.
+    recipe: RecipeId,
     terrain: TerrainGenerator,
     streamer: Streamer,
 }
@@ -165,6 +170,7 @@ impl App {
             inventory,
             inventory_dirty: false,
             stats: Stats::default(),
+            recipe: RecipeId::FIRST,
             terrain,
             streamer: Streamer::new(
                 LOAD_RADIUS,
@@ -197,8 +203,20 @@ impl App {
             KeyCode::Digit1 if down => self.selected = SolidBlock::STONE,
             KeyCode::Digit2 if down => self.selected = SolidBlock::DIRT,
             KeyCode::Digit3 if down => self.selected = SolidBlock::GRASS,
+            KeyCode::KeyR if down => self.with_running(|running| {
+                running.recipe = recipes::next(running.recipe);
+                running.refresh_title();
+            }),
+            KeyCode::KeyC if down => self.with_running(Running::craft_selected),
+            KeyCode::KeyE if down => self.with_running(Running::eat_food),
             KeyCode::Escape if down => event_loop.exit(),
             _ => {}
+        }
+    }
+
+    fn with_running(&mut self, act: impl FnOnce(&mut Running)) {
+        if let Some(running) = self.running.as_mut() {
+            act(running);
         }
     }
 
@@ -313,17 +331,41 @@ impl Running {
         }
     }
 
-    /// Shows health, hunger and the carried items in the window title until there is a HUD.
+    /// Crafts the selected recipe once. Missing ingredients or a full pack are normal, not
+    /// a fault.
+    fn craft_selected(&mut self) {
+        if craft(&mut self.inventory, self.recipe).is_ok() {
+            self.inventory_dirty = true;
+            self.refresh_title();
+        }
+    }
+
+    /// Eats one food item. Being full or having no food is normal, not a fault.
+    fn eat_food(&mut self) {
+        if eat(&mut self.inventory, &mut self.stats).is_ok() {
+            self.inventory_dirty = true;
+            self.refresh_title();
+        }
+    }
+
+    /// Shows health, hunger, the carried items and the selected recipe in the window title
+    /// until there is a HUD.
     fn refresh_title(&self) {
         let mut title = format!(
             "minecraft-clone | health {} hunger {} |",
             self.stats.health().value(),
             self.stats.hunger().value(),
         );
-        for id in [ItemId::STONE, ItemId::DIRT, ItemId::GRASS] {
+        for id in registry::ids() {
             if let Some(def) = registry::get(id) {
                 title.push_str(&format!(" {} {}", def.name, self.inventory.count_of(id)));
             }
+        }
+        if let Some(recipe) = recipes::get(self.recipe) {
+            title.push_str(&format!(
+                " | recipe {} (R next, C craft, E eat)",
+                recipe.name
+            ));
         }
         self.window.set_title(&title);
     }

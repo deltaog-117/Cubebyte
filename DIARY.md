@@ -518,3 +518,39 @@ Blocks could be broken and placed for free. Crafting and combat both need items 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-25 | Initial entry | deltaog-117 |
+
+---
+
+### Crafting
+
+**Date:** 2026-10-25
+**Status:** Confirmed
+
+#### Context / Background
+Hunger only drained, and the only items were the blocks themselves. Crafting needed items that are not blocks, a way to turn one set of items into another, and a food source so the hunger meter has a purpose.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Recipe table with hotkey crafting | Same shape as the registries; no GUI; easy to test | No on-screen recipe list; shapeless recipes only | Small |
+| B: Recipe table plus an in-window crafting panel | Matches "crafting interface" | The renderer has no 2D or text pass yet, so it is a large detour | High |
+| C: Recipe table plus a shaped 2x2 or 3x3 grid | Closest to Minecraft; position-dependent recipes | Needs a grid model, a matcher and a UI | High |
+
+#### Decision & Rationale
+**Chosen Option:** A. It delivers the recipe system and the food in the smallest change that fits the existing structure. C is on the roadmap for later, once there is a UI pass to build it on.
+
+**Trade-offs accepted:** the player works from the window title instead of a recipe list, and recipes cannot depend on layout.
+
+#### Implementation Notes
+- `crafting::registry` is a `const` table like the item and block registries; a recipe's ID is its position, so new recipes are only appended.
+- `craft` works on a clone of the inventory and replaces it on success, so a short input or a full pack leaves the inventory exactly as it was. The output may use a slot the inputs just freed.
+- Food is `ItemDef::restores_hunger`. `eat` takes the first food item in the lowest slot, and refuses when hunger is full so nothing is wasted.
+- The first recipes use only what the terrain gives: grass makes bread, grass and dirt make stew. Values are placeholders to tune by play.
+- Keys: `R` next recipe, `C` craft, `E` eat. The window itself was not run by the assistant; the logic is covered by unit and property tests.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-25 | Initial entry | deltaog-117 |

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod blocks;
 pub mod building;
+pub mod crafting;
 pub mod events;
 pub mod inventory;
 pub mod items;

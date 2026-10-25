@@ -44,6 +44,11 @@ impl Meter {
         self.0
     }
 
+    /// Raises the meter by `amount`, stopping at [`METER_MAX`].
+    fn fill(self, amount: u8) -> Self {
+        Self(self.0.saturating_add(amount).min(METER_MAX))
+    }
+
     /// Lowers the meter by one, stopping at `floor`.
     fn drain(self, floor: u8) -> Self {
         Self(self.0.saturating_sub(1).max(floor.min(self.0)))
@@ -74,6 +79,11 @@ impl Stats {
 
     pub const fn hunger(self) -> Meter {
         self.hunger
+    }
+
+    /// Refills hunger by `amount`, up to the maximum.
+    pub fn restore_hunger(&mut self, amount: u8) {
+        self.hunger = self.hunger.fill(amount);
     }
 
     /// Advances one simulation step.
@@ -130,6 +140,15 @@ mod tests {
         let stats = run(HUNGER_PERIOD * u64::from(METER_MAX) + STARVE_PERIOD * 200);
         assert_eq!(stats.hunger().value(), 0);
         assert_eq!(stats.health().value(), STARVE_FLOOR);
+    }
+
+    #[test]
+    fn restoring_hunger_stops_at_the_maximum() {
+        let mut stats = run(HUNGER_PERIOD * 5);
+        stats.restore_hunger(2);
+        assert_eq!(stats.hunger().value(), METER_MAX - 3);
+        stats.restore_hunger(u8::MAX);
+        assert_eq!(stats.hunger(), Meter::FULL);
     }
 
     proptest! {
