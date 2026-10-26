@@ -71,8 +71,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `survival::service::eat` and `Stats::restore_hunger`: eating spends one food item, refills hunger up to the maximum, and refuses when hunger is already full
 - Keys `R` (next recipe), `C` (craft) and `E` (eat); the window title shows every item count and the selected recipe
 - Property test that a craft either changes nothing or moves counts by exactly the recipe, and that the result survives a save and load
+- `player::model::Player`: a walking box (0.6 wide, 1.8 tall, eyes at 1.62) whose position is finite by construction and changes only through `step`
+- `player::service::step`: gravity, jump from the ground, and per-axis swept collision against solid blocks, so the player slides along walls and cannot tunnel through a floor at terminal speed
+- `player::service::collides` and `Intent`: the overlap test and the per-tick request (walk direction and jump); a non-finite request counts as standing still
+- `FixedClock::alpha` and `Simulation::alpha`, the fraction of the next step already elapsed, so the view can blend between the last two steps
+- `MoveKeys::walk` and `Camera::level_forward` for ground movement; key `F` toggles between walking and free flight
+- Property tests that the player never ends a step inside a block or below the floor, and that the same start and inputs give an identical player; a benchmark for one step
 
 ### Changed
+- `app` starts the player walking on the terrain and moves it on the simulation tick; the camera follows its eyes and Space jumps. Free flight remains on `F`
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
 - `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed
 - `app` loads `world.mcel` at startup and saves it on exit when the world was edited; a save made with another seed stops the game instead of being overwritten

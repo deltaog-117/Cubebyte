@@ -56,6 +56,12 @@ impl FixedClock {
         self.tick
     }
 
+    /// How far real time is into the next step, from 0 up to 1, so rendering can blend
+    /// between the last two steps.
+    pub fn alpha(&self) -> f32 {
+        (self.remainder_nanos as f64 / self.step_nanos as f64) as f32
+    }
+
     /// Adds `elapsed` real time and returns how many simulation steps are now due.
     ///
     /// If more than the cap are due, the extra backlog is dropped and the game runs slow
@@ -114,7 +120,28 @@ mod tests {
         assert_eq!(clock.advance(Duration::ZERO), 0);
     }
 
+    #[test]
+    fn alpha_is_the_fraction_of_the_next_step_already_elapsed() {
+        let mut clock = clock(50, 10);
+        assert_eq!(clock.alpha(), 0.0);
+        clock.advance(Duration::from_millis(25));
+        assert_eq!(clock.alpha(), 0.5);
+        clock.advance(Duration::from_millis(50));
+        assert_eq!(clock.alpha(), 0.5);
+    }
+
     proptest! {
+        #[test]
+        fn alpha_stays_within_zero_and_one(
+            frames in prop::collection::vec(0u64..5_000, 0..50),
+        ) {
+            let mut clock = clock(10, 5);
+            for ms in frames {
+                clock.advance(Duration::from_millis(ms));
+                prop_assert!((0.0..=1.0).contains(&clock.alpha()));
+            }
+        }
+
         #[test]
         fn how_time_is_split_into_frames_does_not_change_the_tick_count(
             step_ms in 1u64..50,

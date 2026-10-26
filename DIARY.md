@@ -25,6 +25,7 @@
 | 2026-10-25 | Block registry | Static `const` table indexed by `BlockId` | ✅ Confirmed |
 | 2026-10-25 | Simulation tick loop | `Simulation` owns the `FixedClock` and forks per-system `Rng` streams; no systems yet | ✅ Confirmed |
 | 2026-10-25 | Resource management | Item registry plus a snapshot-saved inventory; block events unchanged; stats on the sim step | ✅ Confirmed |
+| 2026-10-26 | Player physics | `f32` swept box on the tick, stopping a skin short of blocks; player only | ✅ Confirmed |
 
 ---
 
@@ -554,3 +555,39 @@ Hunger only drained, and the only items were the blocks themselves. Crafting nee
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-25 | Initial entry | deltaog-117 |
+
+### Player Physics
+
+**Date:** 2026-10-26
+**Status:** Confirmed
+
+#### Context / Background
+The player was a free-flying camera moved by frame time. Combat and mobs need a body that falls, lands and is stopped by blocks, and replay and rewind need it to move only on the simulation tick.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: `f32` player box | Smallest change, reuses `World` and the block registry | Decimal maths; yaw trigonometry can differ between machines | Small |
+| B: Fixed-point player box | Exact positions on every machine | New type and conversions; yaw still needs quantizing | Medium |
+| C: General body list | Mobs reuse the step | Entity ordering designed before a second entity exists | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** A, with `step` working on the box and a plain `Intent`, so it can grow into C when mobs arrive. Basic `f32` arithmetic is deterministic in practice; the real weak spot, the yaw trigonometry, is the same in B.
+
+**Trade-offs accepted:** the world is walkable only within 8192 blocks of the origin (beyond it the player stops, because `f32` can no longer resolve the collision gap); `Intent` carries a world-space direction made from yaw by the app, so a saved replay will have to record it as whole numbers first. Fixed-point (B) is the way out of both.
+
+#### Implementation Notes
+- The box moves along Y, then X, then Z, each clipped to the nearest solid cell in its path, so it slides along walls and a 2.5-block fall step cannot skip a layer.
+- It stops 0.005 short of a face. Rounding could otherwise leave it a hair inside, where the next sweep would no longer see the block and the player would fall through.
+- Cells are tested with open spans, so a box resting exactly on a face does not overlap the block beside it.
+- A box already inside a block (a block placed on the player, or landing from flight inside terrain) is not pushed out but can move out.
+- Unloaded chunks read as air, so the player falls through terrain that has not streamed in yet; the start area is loaded up front.
+- `Player::eye(alpha)` blends the last two steps, with `alpha` from `Simulation::alpha`, so 20 steps per second do not make the view stutter.
+- The window was not run by the assistant; the logic is covered by unit and property tests. One step costs about 210 ns on terrain.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-26 | Initial entry | deltaog-117 |

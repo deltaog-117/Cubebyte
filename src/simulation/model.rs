@@ -27,6 +27,11 @@ impl Simulation {
         self.clock.tick()
     }
 
+    /// How far real time is into the next step, from 0 up to 1. For rendering only.
+    pub fn alpha(&self) -> f32 {
+        self.clock.alpha()
+    }
+
     /// Adds `elapsed` real time and returns how many simulation steps are now due.
     pub fn advance(&mut self, elapsed: Duration) -> u32 {
         self.clock.advance(elapsed)

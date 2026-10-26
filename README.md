@@ -12,7 +12,7 @@ This is a Minecraft-style sandbox: build, craft, fight and manage resources. It 
 
 Both depend on a deterministic simulation. Every edit to the world is a logged event, so the same log always rebuilds the same world. That is why the project uses no game engine: it owns its game loop, world, meshing and random numbers.
 
-**Status:** early development. The world model, event log, seeded random numbers and fixed-timestep clock exist. Terrain generation, chunk meshing and a basic renderer exist: `cargo run` opens a window where you fly over generated terrain with WASD, the mouse, Space and Left Shift (Esc quits). Left click breaks the block under the crosshair, right click places the selected block (1 stone, 2 dirt, 3 grass); every edit goes through the event log. See the [roadmap](ROADMAP.md).
+**Status:** early development. The world model, event log, seeded random numbers and fixed-timestep clock exist. Terrain generation, chunk meshing and a basic renderer exist: `cargo run` opens a window where you walk over generated terrain with WASD, the mouse and Space to jump (`F` switches to free flight with Space and Left Shift; Esc quits). Left click breaks the block under the crosshair, right click places the selected block (1 stone, 2 dirt, 3 grass); every edit goes through the event log. See the [roadmap](ROADMAP.md).
 
 ---
 

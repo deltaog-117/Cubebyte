@@ -37,6 +37,10 @@ harness = false
 name = "raycast"
 harness = false
 
+[[bench]]
+name = "player"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
 

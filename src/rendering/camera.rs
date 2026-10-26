@@ -62,6 +62,12 @@ impl Camera {
         Vec3::new(cos_yaw, 0.0, -sin_yaw)
     }
 
+    /// Unit vector the camera faces, level with the ground, for walking.
+    pub fn level_forward(&self) -> Vec3 {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        Vec3::new(-sin_yaw, 0.0, -cos_yaw)
+    }
+
     /// Moves by `axis` (x = right, y = up, z = forward) scaled by `distance`.
     ///
     /// Forward and right follow the view direction, up is world up, so looking down and
@@ -123,6 +129,20 @@ mod tests {
             prop_assert!((camera.forward().length() - 1.0).abs() < EPSILON);
             prop_assert!((camera.right().length() - 1.0).abs() < EPSILON);
             prop_assert!(camera.forward().dot(camera.right()).abs() < EPSILON);
+        }
+
+        #[test]
+        fn the_level_forward_is_a_horizontal_unit_vector_under_the_view(
+            dx in -5000.0f32..5000.0,
+            dy in -5000.0f32..5000.0,
+        ) {
+            let mut camera = Camera::new(Vec3::ZERO);
+            camera.look(dx, dy);
+            let level = camera.level_forward();
+            prop_assert_eq!(level.y, 0.0);
+            prop_assert!((level.length() - 1.0).abs() < EPSILON);
+            prop_assert!(level.dot(camera.right()).abs() < EPSILON);
+            prop_assert!(level.dot(camera.forward()) > 0.0);
         }
 
         #[test]

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use thiserror::Error;
 use winit::application::ApplicationHandler;
 use winit::error::{EventLoopError, OsError};
@@ -26,6 +26,8 @@ use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_block, place_from_stock};
 use crate::items::registry;
 use crate::player::input::MoveKeys;
+use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
+use crate::player::service::{Intent, step};
 use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
@@ -71,6 +73,8 @@ pub enum AppError {
     EventLoop(#[from] EventLoopError),
     #[error("cannot set up the simulation clock")]
     Clock(#[from] ClockError),
+    #[error("cannot place the player")]
+    Spawn(#[from] PlayerError),
     #[error("cannot create the window")]
     Window(#[from] OsError),
     #[error("rendering failed")]
@@ -111,6 +115,9 @@ struct Running {
     window: Arc<Window>,
     renderer: Renderer,
     camera: Camera,
+    player: Player,
+    /// Whether the camera flies freely instead of following the walking player.
+    flying: bool,
     last_frame: Instant,
     simulation: Simulation,
     world: World,
@@ -157,12 +164,16 @@ impl App {
         let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
         let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
-        let eye_height = terrain.height_at(0, 0) as f32 + 6.0;
+        // Two blocks above the surface, so the player drops onto the ground.
+        let spawn = Vec3::new(0.5, terrain.height_at(0, 0) as f32 + 2.0, 0.5);
+        let player = Player::try_new(spawn)?;
         let size = i32::from(CHUNK_SIZE);
         let mut running = Running {
             window,
             renderer,
-            camera: Camera::new(Vec3::new(0.0, eye_height, 0.0)),
+            camera: Camera::new(player.eye(1.0)),
+            player,
+            flying: false,
             last_frame: Instant::now(),
             simulation: Simulation::new(SEED, clock),
             world: World::default(),
@@ -203,6 +214,7 @@ impl App {
             KeyCode::Digit1 if down => self.selected = SolidBlock::STONE,
             KeyCode::Digit2 if down => self.selected = SolidBlock::DIRT,
             KeyCode::Digit3 if down => self.selected = SolidBlock::GRASS,
+            KeyCode::KeyF if down => self.with_running(Running::toggle_flying),
             KeyCode::KeyR if down => self.with_running(|running| {
                 running.recipe = recipes::next(running.recipe);
                 running.refresh_title();
@@ -284,7 +296,26 @@ impl App {
                 running.refresh_title();
             }
         }
-        running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
+        if running.flying {
+            running.camera.fly(self.keys.axis(), FLY_SPEED * seconds);
+        } else {
+            let walk = self.keys.walk();
+            let direction =
+                running.camera.right() * walk.x + running.camera.level_forward() * walk.y;
+            let intent = Intent {
+                walk: Vec2::new(direction.x, direction.z),
+                jump: self.keys.up,
+            };
+            for _ in 0..steps {
+                step(
+                    &mut running.player,
+                    intent,
+                    &running.world,
+                    TICK_STEP.as_secs_f32(),
+                );
+            }
+            running.camera.position = running.player.eye(running.simulation.alpha());
+        }
         running.stream(MAX_LOADS_PER_FRAME);
         running.renderer.render(&running.camera)
     }
@@ -328,6 +359,17 @@ impl Running {
             if self.streamer.is_loaded(pos) {
                 remesh(&mut self.renderer, &self.world, pos);
             }
+        }
+    }
+
+    /// Switches between walking and free flight. Landing from a flight stands the player
+    /// where the camera is, even if that is inside a block; the player can walk out of it.
+    fn toggle_flying(&mut self) {
+        self.flying = !self.flying;
+        if !self.flying
+            && let Ok(player) = Player::try_new(self.camera.position - Vec3::Y * EYE_HEIGHT)
+        {
+            self.player = player;
         }
     }
 
