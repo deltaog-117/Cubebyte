@@ -14,10 +14,6 @@ pub const HUNGER_PERIOD: u64 = 600;
 /// Simulation steps between health losses while starving: 5 seconds.
 pub const STARVE_PERIOD: u64 = 100;
 
-/// Starvation never takes health below this, because nothing can heal or kill the player
-/// yet. Lower it to 0 when combat adds death.
-pub const STARVE_FLOOR: u8 = 1;
-
 /// A value in `0..=METER_MAX`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Meter(u8);
@@ -49,9 +45,9 @@ impl Meter {
         Self(self.0.saturating_add(amount).min(METER_MAX))
     }
 
-    /// Lowers the meter by one, stopping at `floor`.
-    fn drain(self, floor: u8) -> Self {
-        Self(self.0.saturating_sub(1).max(floor.min(self.0)))
+    /// Lowers the meter by `amount`, stopping at 0.
+    fn drain(self, amount: u8) -> Self {
+        Self(self.0.saturating_sub(amount))
     }
 }
 
@@ -86,14 +82,24 @@ impl Stats {
         self.hunger = self.hunger.fill(amount);
     }
 
+    /// Takes `amount` health, stopping at 0.
+    pub fn hurt(&mut self, amount: u8) {
+        self.health = self.health.drain(amount);
+    }
+
+    /// Whether health has run out.
+    pub const fn is_dead(self) -> bool {
+        self.health.0 == 0
+    }
+
     /// Advances one simulation step.
     pub fn step(&mut self) {
         self.steps += 1;
         if self.steps.is_multiple_of(HUNGER_PERIOD) {
-            self.hunger = self.hunger.drain(0);
+            self.hunger = self.hunger.drain(1);
         }
         if self.hunger.value() == 0 && self.steps.is_multiple_of(STARVE_PERIOD) {
-            self.health = self.health.drain(STARVE_FLOOR);
+            self.health = self.health.drain(1);
         }
     }
 }
@@ -136,10 +142,22 @@ mod tests {
     }
 
     #[test]
-    fn starving_drains_health_down_to_the_floor_and_stops() {
+    fn starving_drains_health_to_zero_and_stops_there() {
         let stats = run(HUNGER_PERIOD * u64::from(METER_MAX) + STARVE_PERIOD * 200);
         assert_eq!(stats.hunger().value(), 0);
-        assert_eq!(stats.health().value(), STARVE_FLOOR);
+        assert_eq!(stats.health().value(), 0);
+        assert!(stats.is_dead());
+    }
+
+    #[test]
+    fn hurting_takes_health_and_stops_at_zero() {
+        let mut stats = Stats::default();
+        stats.hurt(7);
+        assert_eq!(stats.health().value(), METER_MAX - 7);
+        assert!(!stats.is_dead());
+        stats.hurt(u8::MAX);
+        assert_eq!(stats.health().value(), 0);
+        assert!(stats.is_dead());
     }
 
     #[test]
@@ -157,7 +175,19 @@ mod tests {
             let stats = run(steps);
             prop_assert!(stats.hunger().value() <= METER_MAX);
             prop_assert!(stats.health().value() <= METER_MAX);
-            prop_assert!(stats.health().value() >= STARVE_FLOOR);
+        }
+
+        #[test]
+        fn hurting_never_raises_health_and_death_means_zero(
+            hits in prop::collection::vec(0u8..=u8::MAX, 0..20),
+        ) {
+            let mut stats = Stats::default();
+            for hit in hits {
+                let before = stats.health().value();
+                stats.hurt(hit);
+                prop_assert_eq!(stats.health().value(), before.saturating_sub(hit));
+                prop_assert_eq!(stats.is_dead(), stats.health().value() == 0);
+            }
         }
 
         #[test]

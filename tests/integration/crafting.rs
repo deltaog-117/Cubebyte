@@ -8,7 +8,7 @@ use minecraft_clone::survival::service::eat;
 use proptest::prelude::*;
 
 fn any_item() -> impl Strategy<Value = ItemId> {
-    (1u16..=5).prop_map(ItemId)
+    (1u16..=6).prop_map(ItemId)
 }
 
 proptest! {

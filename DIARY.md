@@ -26,6 +26,7 @@
 | 2026-10-25 | Simulation tick loop | `Simulation` owns the `FixedClock` and forks per-system `Rng` streams; no systems yet | ✅ Confirmed |
 | 2026-10-25 | Resource management | Item registry plus a snapshot-saved inventory; block events unchanged; stats on the sim step | ✅ Confirmed |
 | 2026-10-26 | Player physics | `f32` swept box on the tick, stopping a skin short of blocks; player only | ✅ Confirmed |
+| 2026-10-27 | Combat rules | Damage, death and respawn first, hostile mobs in a separate iteration | ✅ Confirmed |
 
 ---
 
@@ -591,3 +592,38 @@ The player was a free-flying camera moved by frame time. Combat and mobs need a 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-26 | Initial entry | deltaog-117 |
+
+---
+
+### Combat Rules
+
+**Date:** 2026-10-27
+**Status:** Confirmed
+
+#### Context / Background
+Combat is too big for one iteration: it needs damage rules, something to fight and a way to fight it. Health could not reach zero, because starvation stopped at 1 until death existed.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Rules only (damage, death, respawn, sword) | Small, fully property-testable, nothing renderer-side | Nothing to fight; only starvation can kill | Medium |
+| B: Rules plus one hostile mob | Playable fight; proves deterministic mob AI | About 3x the code; touches physics, ray cast and renderer | Hard |
+
+#### Decision & Rationale
+**Chosen Option:** A first, then B as the next iteration. B needs the same damage and death rules, and splitting keeps the risky part (mob AI on the tick) in its own change.
+
+**Trade-offs accepted:** the only way to die for now is starvation, and the sword exists but cannot be obtained until a recipe or the mob drops add one.
+
+#### Implementation Notes
+- New `combat` feature: `Damage` (never 0), `hit` (reports `Survived` or `Died`), `respawn` and `strike` (best weapon held, else a fist).
+- `Stats::hurt` saturates at 0 and `Stats::is_dead` is health 0; `STARVE_FLOOR` was removed, so starvation kills.
+- Death resets the stats and empties the inventory, which is saved on exit as empty. The player returns to the spawn point and leaves free flight; the window title counts deaths.
+- The sword is appended to the item table (ID 6), so saved inventories stay valid.
+- The window was not run by the assistant; the logic is covered by unit and property tests.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-27 | Initial entry | deltaog-117 |

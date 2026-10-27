@@ -16,6 +16,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
+use crate::combat::service::respawn;
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft;
 use crate::events::log::EventLog;
@@ -116,6 +117,10 @@ struct Running {
     renderer: Renderer,
     camera: Camera,
     player: Player,
+    /// Where the player starts, and returns to after dying.
+    spawn: Player,
+    /// How many times the player has died this session.
+    deaths: u32,
     /// Whether the camera flies freely instead of following the walking player.
     flying: bool,
     last_frame: Instant,
@@ -173,6 +178,8 @@ impl App {
             renderer,
             camera: Camera::new(player.eye(1.0)),
             player,
+            spawn: player,
+            deaths: 0,
             flying: false,
             last_frame: Instant::now(),
             simulation: Simulation::new(SEED, clock),
@@ -292,7 +299,9 @@ impl App {
             for _ in 0..steps {
                 running.stats.step();
             }
-            if (running.stats.health(), running.stats.hunger()) != shown {
+            if running.stats.is_dead() {
+                running.die();
+            } else if (running.stats.health(), running.stats.hunger()) != shown {
                 running.refresh_title();
             }
         }
@@ -373,6 +382,17 @@ impl Running {
         }
     }
 
+    /// Starts the player over at the spawn point with full meters and an empty pack.
+    fn die(&mut self) {
+        respawn(&mut self.stats, &mut self.inventory);
+        self.inventory_dirty = true;
+        self.deaths += 1;
+        self.player = self.spawn;
+        self.flying = false;
+        self.camera.position = self.player.eye(1.0);
+        self.refresh_title();
+    }
+
     /// Crafts the selected recipe once. Missing ingredients or a full pack are normal, not
     /// a fault.
     fn craft_selected(&mut self) {
@@ -394,9 +414,10 @@ impl Running {
     /// until there is a HUD.
     fn refresh_title(&self) {
         let mut title = format!(
-            "minecraft-clone | health {} hunger {} |",
+            "minecraft-clone | health {} hunger {} deaths {} |",
             self.stats.health().value(),
             self.stats.hunger().value(),
+            self.deaths,
         );
         for id in registry::ids() {
             if let Some(def) = registry::get(id) {

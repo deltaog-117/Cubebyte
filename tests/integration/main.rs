@@ -1,4 +1,5 @@
 mod building;
+mod combat;
 mod crafting;
 mod events;
 mod inventory;

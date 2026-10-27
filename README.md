@@ -76,6 +76,7 @@ src/
 ├── inventory/   # stacks, gathering and placing with items, save format
 ├── crafting/    # recipe table and crafting
 ├── survival/    # health, hunger and eating
+├── combat/      # damage, death, respawning and weapon strength
 ├── player/      # player model and input
 ├── rendering/   # camera, meshing, pipeline
 ├── shared/      # voxel types, events, rng, clock

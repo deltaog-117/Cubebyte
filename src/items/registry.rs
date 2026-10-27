@@ -16,6 +16,7 @@ impl ItemId {
     pub const GRASS: Self = Self(3);
     pub const BREAD: Self = Self(4);
     pub const STEW: Self = Self(5);
+    pub const SWORD: Self = Self(6);
 }
 
 /// What the game knows about one item type.
@@ -28,39 +29,53 @@ pub struct ItemDef {
     pub places: Option<BlockId>,
     /// Hunger points eating this item restores, if it is food.
     pub restores_hunger: Option<u8>,
+    /// Damage one hit deals while this item is held, if it is a weapon.
+    pub damage: Option<u8>,
 }
 
 /// Indexed by `ItemId - 1`. The `ItemId` constants must match these positions.
-const ITEMS: [ItemDef; 5] = [
+const ITEMS: [ItemDef; 6] = [
     ItemDef {
         name: "stone",
         stack_limit: 64,
         places: Some(BlockId::STONE),
         restores_hunger: None,
+        damage: None,
     },
     ItemDef {
         name: "dirt",
         stack_limit: 64,
         places: Some(BlockId::DIRT),
         restores_hunger: None,
+        damage: None,
     },
     ItemDef {
         name: "grass",
         stack_limit: 64,
         places: Some(BlockId::GRASS),
         restores_hunger: None,
+        damage: None,
     },
     ItemDef {
         name: "bread",
         stack_limit: 64,
         places: None,
         restores_hunger: Some(4),
+        damage: None,
     },
     ItemDef {
         name: "stew",
         stack_limit: 16,
         places: None,
         restores_hunger: Some(8),
+        damage: None,
+    },
+    ItemDef {
+        name: "sword",
+        stack_limit: 1,
+        places: None,
+        restores_hunger: None,
+        damage: Some(4),
     },
 ];
 
@@ -94,6 +109,7 @@ mod tests {
         assert_eq!(get(ItemId::GRASS).map(|def| def.name), Some("grass"));
         assert_eq!(get(ItemId::BREAD).map(|def| def.name), Some("bread"));
         assert_eq!(get(ItemId::STEW).map(|def| def.name), Some("stew"));
+        assert_eq!(get(ItemId::SWORD).map(|def| def.name), Some("sword"));
     }
 
     #[test]
@@ -121,6 +137,20 @@ mod tests {
                 assert!(restored > 0, "{} restores nothing", def.name);
                 assert_eq!(def.places, None, "{} is food and a block", def.name);
             }
+        }
+    }
+
+    #[test]
+    fn a_weapon_hurts_and_is_neither_food_nor_a_block() {
+        for def in &ITEMS {
+            let Some(damage) = def.damage else { continue };
+            assert!(damage > 0, "{} deals no damage", def.name);
+            assert_eq!(
+                def.restores_hunger, None,
+                "{} is food and a weapon",
+                def.name
+            );
+            assert_eq!(def.places, None, "{} is a block and a weapon", def.name);
         }
     }
 

@@ -77,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FixedClock::alpha` and `Simulation::alpha`, the fraction of the next step already elapsed, so the view can blend between the last two steps
 - `MoveKeys::walk` and `Camera::level_forward` for ground movement; key `F` toggles between walking and free flight
 - Property tests that the player never ends a step inside a block or below the floor, and that the same start and inputs give an identical player; a benchmark for one step
+- `combat::model::Damage`: a hit's size, at least 1 by construction, with `FIST` for bare hands
+- `combat::service`: `hit` takes health and reports `Survived` or `Died`, `respawn` restores full meters and empties the inventory, and `strike` gives the best weapon's damage in the pack
+- `Stats::hurt` and `Stats::is_dead`; health can now reach 0
+- A sword item (`ItemId::SWORD`, damage 4, stack of 1) and `ItemDef::damage`; it cannot be crafted or found yet
+- Property tests that health stays in range under any mix of hits, starvation and respawns, and that a sword always out-hits a fist
 
 ### Changed
 - `app` starts the player walking on the terrain and moves it on the simulation tick; the camera follows its eyes and Space jumps. Free flight remains on `F`
@@ -88,4 +93,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SolidBlock::try_new` accepts only defined solid blocks, so an ID with no definition is no longer placeable (it used to be accepted when not air)
 - Left click now keeps the broken block's item, right click needs one of the selected block in the inventory, and a full inventory leaves the block standing
 - `app` loads `inventory.mcin` at startup, saves it on exit when it changed, and shows health, hunger and item counts in the window title
+- Starvation now kills: the old floor of 1 health is gone, and dying in `app` respawns the player at the start with full meters and an empty pack; the window title counts deaths
 - `items::registry::ItemDef` gains `restores_hunger`, and `items::registry::ids()` lists every item; the window title lists all items instead of a fixed three

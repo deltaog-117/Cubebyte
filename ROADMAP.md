@@ -28,6 +28,7 @@ Items are organized by priority, not by timeline.
 - ✅ Resource management: an item registry, a 27-slot stack inventory saved to `inventory.mcin`, breaking yields and placing spends items, and health and hunger meters stepped by the simulation (shown in the window title)
 - ✅ Crafting: a shapeless recipe table with an all-or-nothing `craft`, food items and `eat`; keys R, C and E, with the window title standing in for a UI
 - ✅ Deterministic player physics: gravity, jumping and swept box collision stepped on the simulation tick, with the view blended between ticks; `F` toggles the old free flight
+- ✅ Combat rules: a `Damage` type, health that can reach zero, death and respawn (full meters, empty pack), and a sword item that sets how hard the player hits
 
 ---
 
@@ -35,7 +36,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop and player physics are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match. Record movement intent per tick as whole numbers before replays are saved.
-- **Combat** – Health, damage, basic hostile mobs and weapons.
+- **Combat: hostile mobs** – One hostile mob (a "zombie") that chases and hits the player on the tick, drawn as a box, hit back with the held weapon. Needs the player's box stepping generalised, entity hits in the ray cast, and a way to get a sword (a recipe).
 
 ---
 
@@ -71,7 +72,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Combat** – Damage, basic hostile mobs and weapons, built on the physics step.
+1. **Combat: hostile mobs** – The first hostile mob, on top of the damage and death rules now in place.
 
 ---
 
