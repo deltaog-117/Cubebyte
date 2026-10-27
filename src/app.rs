@@ -16,7 +16,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
-use crate::combat::service::respawn;
+use crate::building::service::REACH;
+use crate::combat::service::{Outcome, hit, respawn, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft;
 use crate::events::log::EventLog;
@@ -26,13 +27,15 @@ use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_block, place_from_stock};
 use crate::items::registry;
+use crate::mobs::model::Zombie;
+use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
 use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
 use crate::player::service::{Intent, step};
 use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
-use crate::rendering::vertex::gpu_mesh;
+use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::shared::clock::{ClockError, FixedClock};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::model::Simulation;
@@ -67,6 +70,14 @@ const TICK_STEP: Duration = Duration::from_millis(50);
 
 /// Most steps run after one slow frame; the rest of the backlog is dropped.
 const MAX_STEPS_PER_FRAME: u32 = 5;
+
+/// Key of the random stream that places zombies; the tick is mixed in so each differs.
+const ZOMBIE_STREAM: u64 = 0x5a0b_1e00;
+
+/// Steps between a zombie's death, or the player's, and the next one appearing: 10 seconds.
+const ZOMBIE_DELAY_STEPS: u32 = 200;
+
+const ZOMBIE_COLOR: [f32; 3] = [0.25, 0.55, 0.25];
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -131,6 +142,10 @@ struct Running {
     /// Whether the inventory differs from what is on disk, so exit knows to save it.
     inventory_dirty: bool,
     stats: Stats,
+    /// The one hostile mob, if it is alive.
+    zombie: Option<Zombie>,
+    /// Steps left before the next zombie appears.
+    zombie_timer: u32,
     /// The recipe the craft key makes.
     recipe: RecipeId,
     terrain: TerrainGenerator,
@@ -188,6 +203,8 @@ impl App {
             inventory,
             inventory_dirty: false,
             stats: Stats::default(),
+            zombie: None,
+            zombie_timer: ZOMBIE_DELAY_STEPS,
             recipe: RecipeId::FIRST,
             terrain,
             streamer: Streamer::new(
@@ -247,6 +264,9 @@ impl App {
             return;
         };
         let (origin, direction) = (running.camera.position, running.camera.forward());
+        if button == MouseButton::Left && running.hit_zombie(origin, direction) {
+            return;
+        }
         let edit = match button {
             MouseButton::Left => gather_block(
                 &mut running.world,
@@ -298,6 +318,7 @@ impl App {
             let shown = (running.stats.health(), running.stats.hunger());
             for _ in 0..steps {
                 running.stats.step();
+                running.step_zombie();
             }
             if running.stats.is_dead() {
                 running.die();
@@ -326,6 +347,7 @@ impl App {
             running.camera.position = running.player.eye(running.simulation.alpha());
         }
         running.stream(MAX_LOADS_PER_FRAME);
+        running.show_zombie();
         running.renderer.render(&running.camera)
     }
 }
@@ -387,10 +409,69 @@ impl Running {
         respawn(&mut self.stats, &mut self.inventory);
         self.inventory_dirty = true;
         self.deaths += 1;
+        self.zombie = None;
+        self.zombie_timer = ZOMBIE_DELAY_STEPS;
         self.player = self.spawn;
         self.flying = false;
         self.camera.position = self.player.eye(1.0);
         self.refresh_title();
+    }
+
+    /// Moves the zombie one step and lets it hit the player, or counts down to the next one.
+    fn step_zombie(&mut self) {
+        let target = self.player.position();
+        let Some(zombie) = self.zombie.as_mut() else {
+            self.zombie_timer = self.zombie_timer.saturating_sub(1);
+            if self.zombie_timer == 0 {
+                self.spawn_zombie(target);
+            }
+            return;
+        };
+        if mobs::despawns(zombie, target) {
+            self.zombie = None;
+            self.zombie_timer = ZOMBIE_DELAY_STEPS;
+        } else if let Some(damage) =
+            mobs::step(zombie, target, &self.world, TICK_STEP.as_secs_f32())
+        {
+            hit(&mut self.stats, damage);
+        }
+    }
+
+    fn spawn_zombie(&mut self, target: Vec3) {
+        let mut rng = self
+            .simulation
+            .stream(ZOMBIE_STREAM ^ self.simulation.tick().0);
+        let at = mobs::spawn_point(&mut rng, target, |x, z| self.terrain.height_at(x, z));
+        match Zombie::try_new(at) {
+            Ok(zombie) => self.zombie = Some(zombie),
+            Err(error) => tracing::warn!(%error, "cannot place a zombie"),
+        }
+    }
+
+    /// Hits the zombie if the crosshair is on it, with the best weapon in the pack. Returns
+    /// whether it was, so the click does not also break the block behind it.
+    fn hit_zombie(&mut self, origin: Vec3, direction: Vec3) -> bool {
+        let alpha = self.simulation.alpha();
+        let Some(zombie) = self.zombie.as_mut() else {
+            return false;
+        };
+        if !mobs::aimed_at(zombie, &self.world, origin, direction, REACH, alpha) {
+            return false;
+        }
+        if mobs::strike(zombie, strike(&self.inventory)) == Outcome::Died {
+            self.zombie = None;
+            self.zombie_timer = ZOMBIE_DELAY_STEPS;
+        }
+        true
+    }
+
+    /// Draws the zombie as a green box, or nothing when there is none.
+    fn show_zombie(&mut self) {
+        let (vertices, indices) = self.zombie.map_or_else(Default::default, |zombie| {
+            let (min, max) = zombie.bounds(self.simulation.alpha());
+            box_mesh(min, max, ZOMBIE_COLOR)
+        });
+        self.renderer.set_entities(&vertices, &indices);
     }
 
     /// Crafts the selected recipe once. Missing ingredients or a full pack are normal, not

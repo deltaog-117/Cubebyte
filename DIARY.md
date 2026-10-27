@@ -27,6 +27,7 @@
 | 2026-10-25 | Resource management | Item registry plus a snapshot-saved inventory; block events unchanged; stats on the sim step | ✅ Confirmed |
 | 2026-10-26 | Player physics | `f32` swept box on the tick, stopping a skin short of blocks; player only | ✅ Confirmed |
 | 2026-10-27 | Combat rules | Damage, death and respawn first, hostile mobs in a separate iteration | ✅ Confirmed |
+| 2026-10-27 | Hostile mobs | One zombie on a shared walking body that takes its solid test as a closure | ✅ Confirmed |
 
 ---
 
@@ -621,6 +622,43 @@ Combat is too big for one iteration: it needs damage rules, something to fight a
 - Death resets the stats and empties the inventory, which is saved on exit as empty. The player returns to the spawn point and leaves free flight; the window title counts deaths.
 - The sword is appended to the item table (ID 6), so saved inventories stay valid.
 - The window was not run by the assistant; the logic is covered by unit and property tests.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-27 | Initial entry | deltaog-117 |
+
+---
+
+### Hostile Mobs
+
+**Date:** 2026-10-27
+**Status:** Confirmed
+
+#### Context / Background
+The zombie needs a body that falls, walks and stops at blocks, as the player's does. The question was where that movement code lives.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Separate mover for mobs | Fastest, no edits to existing code | Duplicate collision code that can drift from the player's | Small |
+| B: Shared body module | One tested set of rules, clean boundaries, more mobs cost a size | Refactors tested player code | Hard |
+| C: Zombie is a `Player` | Same physics, no refactor | Mobs import `player` (breaks the Delete Test); every mob is player-sized | Small |
+
+#### Decision & Rationale
+**Chosen Option:** B. Correctness and fit with existing code decide it: the collision rules are subtle and already property-tested, and `shared` must not import a feature, so the body takes the solid test as a closure instead of a `World`.
+
+**Trade-offs accepted:** `Player` now wraps a `Body`, so one more layer sits between the player and its position. The player's own unit tests did not change, and a step still costs about 181 ns (181.1 before, 181.8 after).
+
+#### Implementation Notes
+- `shared::body` holds `Body`, `Intent`, `step` and `collides`; `player::service` re-exports `Intent` and the speed constants, so its public paths are unchanged.
+- The zombie draws no random numbers while it lives. Only its spawn point comes from a stream forked with the tick mixed into the key, so each spawn differs and a replay repeats them.
+- It walks straight at the player with no path finding, jumps when a block is in front of its knees, and is dropped when 48 blocks away or below the world, since distant chunks unload and read as air.
+- Hits use `ray_box` against the zombie's drawn box, and count only if no block is nearer. A hit does not knock the zombie back.
+- Free flight leaves the walking player where it was, so the zombie still chases that spot.
+- The window was not run by the assistant; the logic is covered by unit, property and integration tests.
 
 #### Review / Update Log
 

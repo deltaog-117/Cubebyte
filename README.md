@@ -77,9 +77,10 @@ src/
 ├── crafting/    # recipe table and crafting
 ├── survival/    # health, hunger and eating
 ├── combat/      # damage, death, respawning and weapon strength
+├── mobs/        # the zombie: chasing, hitting, spawning
 ├── player/      # player model and input
 ├── rendering/   # camera, meshing, pipeline
-├── shared/      # voxel types, events, rng, clock
+├── shared/      # voxel types, events, rng, clock, walking body
 ├── app.rs       # wiring
 └── main.rs      # entry point
 tests/integration/   # cross-feature tests

@@ -82,8 +82,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Stats::hurt` and `Stats::is_dead`; health can now reach 0
 - A sword item (`ItemId::SWORD`, damage 4, stack of 1) and `ItemDef::damage`; it cannot be crafted or found yet
 - Property tests that health stays in range under any mix of hits, starvation and respawns, and that a sword always out-hits a fist
+- `shared::body`: the walking box (gravity, jumping, swept collision against solid cells) split out of the player so any body of any size moves by the same rules; it takes the solid test as a closure and imports no feature
+- `mobs` feature with one hostile `Zombie` (20 health): it walks at half the player's speed towards the player within 24 blocks, jumps one-block steps, and hits for 2 once a second within 1.2 blocks. `mobs::service::strike` takes hits, `aimed_at` says whether the crosshair is on it before any block, and `spawn_point` and `despawns` place and drop it
+- `shared::math::ray_box`, a ray against a box, used for entity hits
+- `rendering::vertex::box_mesh` and `Renderer::set_entities`: the zombie is drawn as a green box
+- A sword recipe (6 stone and 2 dirt), so the sword can now be crafted
+- Tests: shared-body properties for bodies of any size, zombie chase, hit, climb, strike, aim and spawn tests, and an integration test of a zombie killing the player and a crafted sword killing a zombie
 
 ### Changed
+- `player::model::Player` wraps a `shared::body::Body`; `player::service::step`, `collides`, `Intent` and the speed constants keep their paths and behaviour. A step still costs about 181 ns
+- `app` spawns a zombie 12 to 20 blocks away ten seconds after the start, after each kill and after each death; a left click on the zombie hits it instead of breaking the block behind it. Free flight does not stop it
 - `app` starts the player walking on the terrain and moves it on the simulation tick; the camera follows its eyes and Space jumps. Free flight remains on `F`
 - `app::run` streams chunks around the camera (radius 4, at most 8 loaded per frame) instead of generating a fixed 9×9 grid; edited chunks come back with their edits replayed from the log
 - `Renderer::add_mesh` is now `Renderer::set_mesh(chunk, ..)`: meshes are kept per chunk, so one chunk can be replaced or removed

@@ -1,46 +1,13 @@
-//! Player movement: gravity, jumping and collision with solid blocks, one tick at a time.
+//! Player movement: the shared walking-body rules, fed from the player's world.
 //!
-//! Only `+ - * /` and comparisons touch positions, with no trigonometry, and nothing reads
-//! wall-clock time, so the same start and the same [`Intent`]s always give the same result.
-
-use glam::Vec2;
+//! The same start and the same [`Intent`]s always give the same result.
 
 use crate::blocks::registry::is_solid;
 use crate::player::model::Player;
+use crate::shared::body;
+pub use crate::shared::body::{GRAVITY, Intent, JUMP_SPEED, TERMINAL_SPEED, WALK_SPEED};
 use crate::shared::voxel::WorldPos;
 use crate::world::model::World;
-
-/// Blocks per second on level ground.
-pub const WALK_SPEED: f32 = 4.3;
-
-/// Blocks per second squared.
-pub const GRAVITY: f32 = 28.0;
-
-/// Upward speed of a jump: about 1.4 blocks of height, enough to climb one block.
-pub const JUMP_SPEED: f32 = 9.0;
-
-/// Fastest fall, in blocks per second. At 20 steps per second it is 2.5 blocks a step.
-pub const TERMINAL_SPEED: f32 = 50.0;
-
-/// Gap kept between the box and a block it stops against.
-///
-/// Rounding can place the box a hair inside the face it was stopped at. Inside a block, the
-/// next sweep would no longer see it and the player would fall through. Stopping short by
-/// more than the rounding error rules that out.
-const SKIN: f32 = 0.005;
-
-/// Beyond this distance from the origin `f32` can no longer resolve [`SKIN`], so the player
-/// stops moving instead of risking a fall through the floor.
-const COORD_LIMIT: f32 = 8192.0;
-
-/// What the player asks for in one tick.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Intent {
-    /// Wanted horizontal direction in world space as x and z. A length above 1 is cut to 1,
-    /// and a non-finite value counts as standing still.
-    pub walk: Vec2,
-    pub jump: bool,
-}
 
 /// Moves `player` through one tick of `dt` seconds.
 ///
@@ -48,84 +15,12 @@ pub struct Intent {
 /// blocks, so it slides along walls. A jump starts only from the ground. A box that already
 /// overlaps a block, for example one placed on top of the player, can still move out of it.
 pub fn step(player: &mut Player, intent: Intent, world: &World, dt: f32) {
-    player.previous = player.position;
-    if !(dt.is_finite() && dt > 0.0) || player.position.abs().max_element() > COORD_LIMIT {
-        return;
-    }
-
-    let walk = if intent.walk.is_finite() {
-        intent.walk.clamp_length_max(1.0)
-    } else {
-        Vec2::ZERO
-    };
-    let mut velocity = player.velocity;
-    velocity.x = walk.x * WALK_SPEED;
-    velocity.z = walk.y * WALK_SPEED;
-    if intent.jump && player.on_ground {
-        velocity.y = JUMP_SPEED;
-    }
-    velocity.y = (velocity.y - GRAVITY * dt).max(-TERMINAL_SPEED);
-
-    player.on_ground = false;
-    for axis in [1, 0, 2] {
-        let wanted = velocity[axis] * dt;
-        let allowed = clip(world, player, axis, wanted);
-        player.position[axis] += allowed;
-        if allowed != wanted {
-            velocity[axis] = 0.0;
-            player.on_ground |= axis == 1 && wanted < 0.0;
-        }
-    }
-    player.velocity = velocity;
+    body::step(&mut player.body, intent, &|cell| solid(world, cell), dt);
 }
 
 /// Whether the player's box overlaps a solid block.
 pub fn collides(player: &Player, world: &World) -> bool {
-    let (min, max) = player.bounds();
-    cell_range(min.x, max.x).any(|x| {
-        cell_range(min.y, max.y).any(|y| cell_range(min.z, max.z).any(|z| solid(world, [x, y, z])))
-    })
-}
-
-/// How far the box can move along `axis` towards `delta` before touching a solid block,
-/// never more than `delta` and never in the opposite direction.
-fn clip(world: &World, player: &Player, axis: usize, delta: f32) -> f32 {
-    let (min, max) = player.bounds();
-    let (first, second) = ((axis + 1) % 3, (axis + 2) % 3);
-    let blocked = |cell: i32| {
-        cell_range(min[first], max[first]).any(|a| {
-            cell_range(min[second], max[second]).any(|b| {
-                let mut at = [0; 3];
-                at[axis] = cell;
-                at[first] = a;
-                at[second] = b;
-                solid(world, at)
-            })
-        })
-    };
-
-    if delta > 0.0 {
-        // Cells whose near face lies at or beyond the front of the box.
-        let mut cells = max[axis].ceil() as i32..=(max[axis] + delta).floor() as i32;
-        cells.find(|&cell| blocked(cell)).map_or(delta, |cell| {
-            (cell as f32 - max[axis] - SKIN).clamp(0.0, delta)
-        })
-    } else if delta < 0.0 {
-        // Cells whose near face lies at or behind the back of the box, nearest first.
-        let mut cells =
-            ((min[axis] + delta).ceil() as i32 - 1..=min[axis].floor() as i32 - 1).rev();
-        cells.find(|&cell| blocked(cell)).map_or(delta, |cell| {
-            ((cell + 1) as f32 - min[axis] + SKIN).clamp(delta, 0.0)
-        })
-    } else {
-        0.0
-    }
-}
-
-/// The cells a span from `low` to `high` overlaps. A span that only touches a cell's face
-/// does not overlap it.
-fn cell_range(low: f32, high: f32) -> std::ops::RangeInclusive<i32> {
-    low.floor() as i32..=high.ceil() as i32 - 1
+    body::collides(&player.body, &|cell| solid(world, cell))
 }
 
 fn solid(world: &World, [x, y, z]: [i32; 3]) -> bool {
@@ -135,9 +30,10 @@ fn solid(world: &World, [x, y, z]: [i32; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::body::SKIN;
     use crate::shared::event::Event;
     use crate::shared::voxel::BlockId;
-    use glam::Vec3;
+    use glam::{Vec2, Vec3};
 
     const DT: f32 = 0.05;
 

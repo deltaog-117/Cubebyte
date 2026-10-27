@@ -22,7 +22,7 @@ pub struct Recipe {
     pub output: (ItemId, u8),
 }
 
-const RECIPES: [Recipe; 2] = [
+const RECIPES: [Recipe; 3] = [
     Recipe {
         name: "bread",
         inputs: &[(ItemId::GRASS, 3)],
@@ -32,6 +32,11 @@ const RECIPES: [Recipe; 2] = [
         name: "stew",
         inputs: &[(ItemId::GRASS, 4), (ItemId::DIRT, 2)],
         output: (ItemId::STEW, 2),
+    },
+    Recipe {
+        name: "sword",
+        inputs: &[(ItemId::STONE, 6), (ItemId::DIRT, 2)],
+        output: (ItemId::SWORD, 1),
     },
 ];
 

@@ -3,6 +3,8 @@
 use glam::Vec3;
 use thiserror::Error;
 
+use crate::shared::body::Body;
+
 /// Half the width of the player's box, which is as deep as it is wide.
 pub const HALF_WIDTH: f32 = 0.3;
 
@@ -18,18 +20,13 @@ pub enum PlayerError {
     NonFinite,
 }
 
-/// A walking body: a box standing at `position` (the middle of its feet) with a velocity.
+/// A walking body of the player's size, with an eye above the feet.
 ///
-/// The fields are private to the `player` feature, so only [`step`](super::service::step)
+/// The body is private to the `player` feature, so only [`step`](super::service::step)
 /// moves the player and the position is always finite.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Player {
-    pub(super) position: Vec3,
-    /// Where the player stood before the latest step, so the view can blend between the two.
-    pub(super) previous: Vec3,
-    /// Blocks per second.
-    pub(super) velocity: Vec3,
-    pub(super) on_ground: bool,
+    pub(super) body: Body,
 }
 
 impl Player {
@@ -39,44 +36,36 @@ impl Player {
     ///
     /// Returns [`PlayerError::NonFinite`] if any coordinate is NaN or infinite.
     pub fn try_new(position: Vec3) -> Result<Self, PlayerError> {
-        if !position.is_finite() {
-            return Err(PlayerError::NonFinite);
+        match Body::try_new(position, HALF_WIDTH, HEIGHT) {
+            Ok(body) => Ok(Self { body }),
+            // The size constants are valid, so only the position can be wrong.
+            Err(_) => Err(PlayerError::NonFinite),
         }
-        Ok(Self {
-            position,
-            previous: position,
-            velocity: Vec3::ZERO,
-            on_ground: false,
-        })
     }
 
     pub fn position(&self) -> Vec3 {
-        self.position
+        self.body.position()
     }
 
     pub fn velocity(&self) -> Vec3 {
-        self.velocity
+        self.body.velocity()
     }
 
     /// Whether the last step ended pressed against the floor, which is what allows a jump.
     pub fn on_ground(&self) -> bool {
-        self.on_ground
+        self.body.on_ground()
     }
 
     /// Where the eyes are, `alpha` of the way from the previous step to the latest one.
     ///
     /// Blending keeps the view smooth at the slower simulation rate.
     pub fn eye(&self, alpha: f32) -> Vec3 {
-        self.previous.lerp(self.position, alpha.clamp(0.0, 1.0)) + Vec3::Y * EYE_HEIGHT
+        self.body.blended(alpha) + Vec3::Y * EYE_HEIGHT
     }
 
     /// Opposite corners of the player's box.
     pub fn bounds(&self) -> (Vec3, Vec3) {
-        let half = Vec3::new(HALF_WIDTH, 0.0, HALF_WIDTH);
-        (
-            self.position - half,
-            self.position + half + Vec3::Y * HEIGHT,
-        )
+        self.body.bounds()
     }
 }
 

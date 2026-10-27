@@ -77,6 +77,8 @@ pub struct Renderer {
     camera_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     meshes: HashMap<ChunkPos, GpuMesh>,
+    /// Everything that moves, rebuilt every frame by [`Renderer::set_entities`].
+    entities: Option<GpuMesh>,
 }
 
 impl Renderer {
@@ -186,42 +188,57 @@ impl Renderer {
             camera_group,
             depth_view,
             meshes: HashMap::new(),
+            entities: None,
         })
     }
 
     /// Shows `chunk` with this mesh, replacing whatever it showed before. An empty mesh
     /// removes the chunk from the scene.
     pub fn set_mesh(&mut self, chunk: ChunkPos, vertices: &[GpuVertex], indices: &[u32]) {
+        match self.upload(vertices, indices) {
+            Some(mesh) => {
+                self.meshes.insert(chunk, mesh);
+            }
+            None => {
+                self.meshes.remove(&chunk);
+            }
+        }
+    }
+
+    /// Shows the moving things with this mesh, replacing the previous frame's. An empty mesh
+    /// shows none.
+    pub fn set_entities(&mut self, vertices: &[GpuVertex], indices: &[u32]) {
+        self.entities = self.upload(vertices, indices);
+    }
+
+    /// Copies a mesh to the GPU. `None` for an empty mesh, and for one too large to draw.
+    fn upload(&self, vertices: &[GpuVertex], indices: &[u32]) -> Option<GpuMesh> {
         let Ok(index_count) = u32::try_from(indices.len()) else {
             tracing::error!(len = indices.len(), "mesh has too many indices to draw");
-            return;
+            return None;
         };
         if index_count == 0 {
-            self.meshes.remove(&chunk);
-            return;
+            return None;
         }
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk vertices"),
+                label: Some("mesh vertices"),
                 contents: bytemuck::cast_slice(vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk indices"),
+                label: Some("mesh indices"),
                 contents: bytemuck::cast_slice(indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        self.meshes.insert(
-            chunk,
-            GpuMesh {
-                vertices: vertex_buffer,
-                indices: index_buffer,
-                index_count,
-            },
-        );
+        Some(GpuMesh {
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            index_count,
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -290,7 +307,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_group, &[]);
-            for mesh in self.meshes.values() {
+            for mesh in self.meshes.values().chain(&self.entities) {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);

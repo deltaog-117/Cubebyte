@@ -3,6 +3,8 @@
 //! Kept apart from the pipeline so the conversion from [`MeshData`] is tested without a
 //! device.
 
+use glam::Vec3;
+
 use crate::blocks::registry;
 use crate::rendering::meshing::{Face, MeshData};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos};
@@ -49,6 +51,38 @@ pub fn gpu_mesh(mesh: &MeshData, chunk: ChunkPos) -> (Vec<GpuVertex>, Vec<u32>) 
         })
         .collect();
     (vertices, mesh.indices().to_vec())
+}
+
+/// The six faces of an axis-aligned box as counter-clockwise quads seen from outside, with
+/// the same fixed shading as terrain.
+pub fn box_mesh(min: Vec3, max: Vec3, color: [f32; 3]) -> (Vec<GpuVertex>, Vec<u32>) {
+    let corner = |x: bool, y: bool, z: bool| {
+        Vec3::new(
+            if x { max.x } else { min.x },
+            if y { max.y } else { min.y },
+            if z { max.z } else { min.z },
+        )
+    };
+    let faces = [
+        (Face::PosX, [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)]),
+        (Face::NegX, [(0, 0, 1), (0, 1, 1), (0, 1, 0), (0, 0, 0)]),
+        (Face::PosY, [(0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0)]),
+        (Face::NegY, [(0, 0, 1), (0, 0, 0), (1, 0, 0), (1, 0, 1)]),
+        (Face::PosZ, [(1, 0, 1), (1, 1, 1), (0, 1, 1), (0, 0, 1)]),
+        (Face::NegZ, [(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)]),
+    ];
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (face, corners) in faces {
+        let first = vertices.len() as u32;
+        let shaded = color.map(|channel| channel * face_shade(face));
+        vertices.extend(corners.map(|(x, y, z)| GpuVertex {
+            position: corner(x == 1, y == 1, z == 1).to_array(),
+            color: shaded,
+        }));
+        indices.extend([0, 1, 2, 0, 2, 3].map(|offset| first + offset));
+    }
+    (vertices, indices)
 }
 
 #[cfg(test)]
@@ -103,6 +137,22 @@ mod tests {
                         .all(|c| (0.0..=1.0).contains(c))
                 );
                 assert!(shade <= face_shade(Face::PosY));
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_has_outward_facing_triangles_inside_its_bounds() {
+        let (min, max) = (Vec3::new(1.0, 2.0, 3.0), Vec3::new(2.0, 4.0, 5.0));
+        let (vertices, indices) = box_mesh(min, max, [0.5, 0.5, 0.5]);
+        assert_eq!((vertices.len(), indices.len()), (24, 36));
+        let centre = (min + max) / 2.0;
+        for triangle in indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(vertices[triangle[i] as usize].position));
+            let normal = (b - a).cross(c - a);
+            assert!(normal.dot(a - centre) > 0.0, "triangle faces inwards");
+            for point in [a, b, c] {
+                assert!(point.cmpge(min).all() && point.cmple(max).all());
             }
         }
     }

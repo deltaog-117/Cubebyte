@@ -3,6 +3,7 @@ mod combat;
 mod crafting;
 mod events;
 mod inventory;
+mod mobs;
 mod player;
 mod rendering;
 mod simulation;
