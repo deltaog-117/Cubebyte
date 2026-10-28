@@ -20,10 +20,12 @@ impl EventLog {
     }
 
     pub fn push(&mut self, event: Event) {
-        self.by_chunk
-            .entry(event.chunk())
-            .or_default()
-            .push(self.events.len());
+        if let Some(chunk) = event.chunk() {
+            self.by_chunk
+                .entry(chunk)
+                .or_default()
+                .push(self.events.len());
+        }
         self.events.push(event);
     }
 
@@ -54,6 +56,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::shared::event::Held;
     use crate::shared::voxel::{BlockId, WorldPos};
 
     proptest! {
@@ -95,8 +98,28 @@ mod tests {
             for event in &events {
                 log.push(*event);
             }
-            let expected = events.iter().filter(|event| event.chunk() == chunk);
+            let expected = events.iter().filter(|event| event.chunk() == Some(chunk));
             prop_assert!(log.chunk_events(chunk).eq(expected));
         }
+    }
+
+    #[test]
+    fn events_without_a_chunk_are_logged_but_never_replayed_per_chunk() {
+        let mut log = EventLog::new();
+        let block = Event::BlockSet {
+            pos: WorldPos { x: 1, y: 0, z: 0 },
+            old: BlockId::AIR,
+            new: BlockId::STONE,
+        };
+        log.push(Event::SlotSet {
+            slot: 0,
+            old: Held::EMPTY,
+            new: Held { item: 1, count: 5 },
+        });
+        log.push(block);
+
+        assert_eq!(log.len(), 2);
+        let chunk = ChunkPos { x: 0, y: 0, z: 0 };
+        assert!(log.chunk_events(chunk).eq([&block]));
     }
 }

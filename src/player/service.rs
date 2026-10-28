@@ -2,8 +2,10 @@
 //!
 //! The same start and the same [`Intent`]s always give the same result.
 
+use glam::Vec3;
+
 use crate::blocks::registry::is_solid;
-use crate::player::model::Player;
+use crate::player::model::{Player, PlayerError};
 use crate::shared::body;
 pub use crate::shared::body::{GRAVITY, Intent, JUMP_SPEED, TERMINAL_SPEED, WALK_SPEED};
 use crate::shared::voxel::WorldPos;
@@ -16,6 +18,18 @@ use crate::world::model::World;
 /// overlaps a block, for example one placed on top of the player, can still move out of it.
 pub fn step(player: &mut Player, intent: Intent, world: &World, dt: f32) {
     body::step(&mut player.body, intent, &|cell| solid(world, cell), dt);
+}
+
+/// Jumps the player to `feet`, standing still. It does not check the destination: a caller
+/// that cares whether the box fits there asks [`collides`] first.
+///
+/// # Errors
+///
+/// Returns [`PlayerError::NonFinite`] if any coordinate is NaN or infinite; the player stays
+/// where they were.
+pub fn teleport(player: &mut Player, feet: Vec3) -> Result<(), PlayerError> {
+    // A body refuses a position only for not being finite.
+    player.body.place(feet).map_err(|_| PlayerError::NonFinite)
 }
 
 /// Whether the player's box overlaps a solid block.
@@ -61,6 +75,32 @@ mod tests {
 
     fn player_at(x: f32, y: f32, z: f32) -> Player {
         Player::try_new(Vec3::new(x, y, z)).unwrap()
+    }
+
+    #[test]
+    fn teleporting_puts_the_player_there_standing_still() {
+        let mut player = player_at(0.5, 4.0, 0.5);
+        run(&mut player, Intent::default(), &floor(), 3);
+        assert_ne!(player.velocity(), Vec3::ZERO);
+
+        let to = Vec3::new(5.5, 1.0, -2.5);
+        assert_eq!(teleport(&mut player, to), Ok(()));
+
+        assert_eq!(player.position(), to);
+        assert_eq!(player.velocity(), Vec3::ZERO);
+        assert_eq!(player.eye(0.0), player.eye(1.0));
+    }
+
+    #[test]
+    fn teleporting_to_a_non_finite_spot_leaves_the_player_where_they_were() {
+        let mut player = player_at(1.0, 2.0, 3.0);
+        let before = player;
+
+        assert_eq!(
+            teleport(&mut player, Vec3::new(f32::NAN, 0.0, 0.0)),
+            Err(PlayerError::NonFinite)
+        );
+        assert_eq!(player, before);
     }
 
     fn run(player: &mut Player, intent: Intent, world: &World, steps: usize) {

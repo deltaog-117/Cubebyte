@@ -11,6 +11,7 @@ pub mod items;
 pub mod mobs;
 pub mod player;
 pub mod rendering;
+pub mod scripting;
 pub mod shared;
 pub mod simulation;
 pub mod survival;

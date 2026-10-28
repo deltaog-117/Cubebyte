@@ -29,6 +29,7 @@
 | 2026-10-27 | Combat rules | Damage, death and respawn first, hostile mobs in a separate iteration | ✅ Confirmed |
 | 2026-10-27 | Hostile mobs | One zombie on a shared walking body that takes its solid test as a closure | ✅ Confirmed |
 | 2026-10-28 | Movement intent | Bodies move by whole-number intent; per-actor in-memory log; no saving yet | ✅ Confirmed |
+| 2026-10-28 | World interface for scripts | Every script effect is an event in the one log; checked commands run behind permissions, range and a per-tick limit | ✅ Confirmed |
 
 ---
 
@@ -732,6 +733,44 @@ Crafting was driven by keys R, C and E with the window title as the only display
 - `can_craft` runs `craft` on a copy, so the panel and the real craft cannot disagree, including the full-pack case.
 - The sword recipe already existed, so no recipe was added. It is the last row, not the first: recipe IDs are table positions, and reordering was not worth the churn.
 - The window was not run by the assistant; the layout, font and overlay are covered by unit and property tests only.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-28 | Initial entry | deltaog-117 |
+
+### World Interface for Scripts
+
+**Date:** 2026-10-28
+**Status:** Confirmed
+
+#### Context / Background
+Scripts will be able to move the player, give items, set blocks and later spawn mobs. For rewind and replay to stay exact, each of those must be recorded. Only block edits were: the player, the one zombie and the inventory were loose fields in `app`, and the inventory was saved as a snapshot.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Command layer, only blocks logged | Fastest, no format change | Rewind and replay inexact for everything but blocks | Small |
+| B: Extend `Event`, one history | One exact history; supports undo and region rewind | Largest refactor; save format changes | Hard |
+| C: Separate per-tick command log | No change to the block log or file | Two rewind mechanisms; no undo of entities in a region | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** B, delivered in slices. A breaks the roadmap rule that every action is logged, and C would have left two ways to rewind. B is the only one that keeps one ordered history and can undo a single region later.
+
+**Trade-offs accepted:** a grant logs one event per slot it touches, so the log grows a little faster than one event per command. This slice covers only teleport, give item and set block. Mobs, reads, costs and the other event-less changes come in later slices, so rewind still cannot undo everything.
+
+#### Implementation Notes
+- `Event` gained `PlayerMoved` and `SlotSet`. Positions are stored as `f32` bits (`Spot`), which makes events `Eq` and makes undo restore the exact position. `Event::chunk` is now an `Option`, so events with no chunk stay out of the per-chunk index that streaming replays from.
+- Inventory changes first went in as "items added" and "items removed" with a count. A property test found that undo then restores the totals but not which slot holds what, and the shifted layout could make a later undo fail for lack of room. Replacing them with `SlotSet` (slot, old stack, new stack), the same shape as `BlockSet`, makes replay and undo exact. A grant that spans several slots is several events, applied all or none by `apply_all`.
+- `events::apply::apply` is the one door. It takes a `Stage` (world, player, inventory) and refuses a stale or impossible event without changing anything: a move from the wrong spot, a stack that does not fit whole, more removed than held.
+- `scripting::service::run` checks permission, then the per-tick limit, then range, builds the event, applies it, and only then logs it, so the log never holds a refused event. Denied commands count toward the limit, so they cannot be spammed for free. The range of 32 blocks stays inside the streamed area (radius 4 chunks), because an edit in an unloaded chunk would make streaming refuse to load its terrain later.
+- A teleport is checked with a body of the player's size, so it cannot land inside solid blocks, and it drops velocity so the player does not keep falling from where they were.
+- The file format is version 2 with a record per new event; version 1 files read unchanged, which keeps existing saves loading.
+- Known gap: the inventory is still saved as a snapshot, so replaying slot events at startup would apply a grant twice. Nothing in `app` produces these events yet, so nothing replays them.
+- No benchmark was added: there is no hot loop, since a script gets at most 8 commands per tick. `EventLog::push` gained one branch, and the existing chunk benchmarks are unaffected in kind.
+- The window was not run by the assistant: nothing in `app` calls the new feature yet. It is covered by unit, property and integration tests, including a save-and-replay of a scripted session.
 
 #### Review / Update Log
 

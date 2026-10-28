@@ -6,6 +6,7 @@ mod inventory;
 mod mobs;
 mod player;
 mod rendering;
+mod scripting;
 mod simulation;
 mod ui;
 mod world;

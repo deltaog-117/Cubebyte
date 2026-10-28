@@ -96,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Renderer::set_overlay` and `Renderer::size`, with a second pipeline that draws the interface over the scene without depth
 - `crafting::registry::ids` and `crafting::service::can_craft`, so the panel can list every recipe and mark the affordable ones
 - Property tests that panel rows fit the window without overlapping, that a click finds the row under it, and that the overlay's indices and colours are valid
+- `shared::event::Event` gains `PlayerMoved` and `SlotSet` (one inventory slot going from one stack to another), each with its inverse, plus `Spot`, a position kept as `f32` bits so undo restores the exact position, and `Held`, what a slot holds; `Event::chunk` is now an `Option`, because only block events belong to a chunk
+- `events::apply`: `Stage` (world, player, inventory) and `apply`, the one door that sends any event to the part of the game it changes, refusing a stale or impossible event without changing anything; `apply_all` applies several all or none, and `slot_events` lists the slot events between two inventories
+- `Body::place` and `player::service::teleport`: jump to a position, standing still and with no blend across the gap
+- `scripting` feature: `Command` (teleport, give item, set block), `Permissions`, `Limits` (range 32 blocks, 8 commands per tick) and `Denied`; `scripting::service::run` checks each command, applies its event and then logs it, and a denied command changes nothing
+- Property tests that any run of events, inventory layout included, undoes exactly in reverse and replays from the start, that every accepted script command is logged, and that a scripted session survives a save and replays to the same game
+- Event log file version 2 with records for the new events; version 1 files still read
 
 ### Changed
 - `shared::body::Intent` moved to `shared::intent` (still re-exported from `shared::body` and `player::service`) and its `walk` is now a `Walk` of whole numbers instead of a `Vec2`. Direction is rounded to about 0.45 degrees and speed to under 0.4%; a player step still costs about 180 ns
@@ -113,3 +119,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Starvation now kills: the old floor of 1 health is gone, and dying in `app` respawns the player at the start with full meters and an empty pack; the window title counts deaths
 - `items::registry::ItemDef` gains `restores_hunger`, and `items::registry::ids()` lists every item; the window title lists all items instead of a fixed three
 - Escape closes the crafting panel first and quits only when it is closed; the pointer is released while the panel is open and mouse look pauses
+- `EventLog` keeps the per-chunk index for block events only; `World::apply` ignores events that change no blocks, so a whole log can still be replayed into a world
+- `events::persist` writes version 2 and reads versions 1 and 2; records are no longer all the same length

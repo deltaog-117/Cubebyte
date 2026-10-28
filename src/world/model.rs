@@ -116,12 +116,16 @@ impl World {
         self.chunks.remove(&pos);
     }
 
+    /// An event that changes no blocks leaves the world alone, so a whole log can be
+    /// replayed into a world.
+    ///
     /// # Errors
     ///
     /// Returns [`ApplyError::StaleEvent`] if the block at the event's position is not the
     /// `old` block it was recorded against. The world is left unchanged.
     pub fn apply(&mut self, event: &Event) -> Result<(), ApplyError> {
         match *event {
+            Event::PlayerMoved { .. } | Event::SlotSet { .. } => Ok(()),
             Event::BlockSet { pos, old, new } => {
                 let found = self.block_at(pos);
                 if found != old {

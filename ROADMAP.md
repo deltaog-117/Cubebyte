@@ -32,6 +32,7 @@ Items are organized by priority, not by timeline.
 - ✅ Hostile mobs: a zombie that chases and hits on the tick, drawn as a box and hit back with the held weapon; it shares one walking-body module with the player, entity hits go through a ray-versus-box test, and a sword recipe exists
 - ✅ Whole-number movement intent: walking direction is two integers from -127 to 127, bodies move by exactly those numbers, and the player's and each zombie's intent is recorded per tick in an in-memory `IntentLog`; replaying a track reproduces the run bit for bit
 - ✅ Crafting interface: Tab opens an on-screen recipe panel (built-in pixel font, flat quads drawn over the scene); click a row to craft it, rows you cannot afford are greyed
+- ✅ World interface for scripts, first slice: `Event` gains player jumps and per-slot inventory changes, one `events::apply` door sends every event to the world, player or inventory, and `scripting` runs commands (teleport, give item, set block) behind permissions, a range and a per-tick limit; every accepted command is logged and replays and undoes exactly (the window does not run scripts yet)
 
 ---
 
@@ -48,11 +49,12 @@ Items are organized by priority, not by timeline.
 - **Time rewind** – Scrub backward through the event log to undo builds. Needs periodic snapshots with events in between to keep the log bounded.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
-- **World interface for scripts** – The fixed list of things a script may read (look, find, query) and do (move the player, spawn mobs, grant items, add or remove blocks). Built before the language, so the language can be swapped later. Every action must:
-  - produce a logged event, so rewind and replay stay exact (mobs, player position and inventory are not in the event log yet and need events);
-  - pass the same rules as a player action;
-  - carry a cost (fuel or energy), a range, a cooldown and a cap on effects per tick, so "craft from nowhere" cannot trivialize the game;
-  - be a permission a script is granted, because shared scripts are untrusted code.
+- **World interface for scripts** – First slice done (see Completed): teleport, give item and set block, each logged with its old value, checked for permission and range, and capped per tick. Still to do:
+  - spawning mobs, which needs mobs under the event log (today there is one `Option<Zombie>` in `app`);
+  - the other event-less changes: breaking a block still adds its item without an event, crafting and eating change the inventory without one, and walking and mob movement are not events, so rewind cannot yet undo them;
+  - reads (look, find, query);
+  - a cost per action (fuel or energy) and a cooldown, tied to time as a resource;
+  - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
 - **Code as gameplay (scripting)** – A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
@@ -87,7 +89,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **World interface for scripts** – Start with the reads and actions, their events, costs and limits, behind a trivial interpreter; the language comes after.
+1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the inventory and crafting under events. The language comes after.
 2. **Time rewind** – Every edit is already a logged event; add periodic snapshots to keep the log bounded.
 
 ---

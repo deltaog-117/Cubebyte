@@ -87,6 +87,25 @@ impl Body {
         self.position
     }
 
+    /// Jumps to `position`, standing still. The previous position moves too, so a view does
+    /// not blend across the gap, and velocity is dropped so the body does not keep falling or
+    /// sliding from where it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BodyError::NonFinite`] if any coordinate is NaN or infinite; the body is left
+    /// where it was.
+    pub fn place(&mut self, position: Vec3) -> Result<(), BodyError> {
+        if !position.is_finite() {
+            return Err(BodyError::NonFinite);
+        }
+        self.position = position;
+        self.previous = position;
+        self.velocity = Vec3::ZERO;
+        self.on_ground = false;
+        Ok(())
+    }
+
     pub fn velocity(&self) -> Vec3 {
         self.velocity
     }
@@ -236,6 +255,34 @@ mod tests {
                 Err(BodyError::BadSize)
             );
         }
+    }
+
+    #[test]
+    fn placing_a_body_moves_it_without_a_trail_or_leftover_speed() {
+        let mut falling = body(0.3, 1.8, 6.0, 5.0);
+        step(&mut falling, Intent::default(), &solid, DT);
+        assert_ne!(falling.velocity(), Vec3::ZERO);
+
+        let to = Vec3::new(40.0, 9.0, -7.5);
+        assert_eq!(falling.place(to), Ok(()));
+
+        assert_eq!(falling.position(), to);
+        assert_eq!(falling.blended(0.0), to);
+        assert_eq!(falling.velocity(), Vec3::ZERO);
+        assert!(!falling.on_ground());
+    }
+
+    #[test]
+    fn placing_a_body_at_a_non_finite_position_changes_nothing() {
+        let mut standing = body(0.3, 1.8, 4.0, 3.0);
+        let before = standing;
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                standing.place(Vec3::new(0.0, bad, 0.0)),
+                Err(BodyError::NonFinite)
+            );
+        }
+        assert_eq!(standing, before);
     }
 
     #[test]

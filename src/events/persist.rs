@@ -7,10 +7,17 @@
 //! | magic | 4 | `MCEL` |
 //! | version | 2 | [`VERSION`] |
 //! | seed | 8 | seed of the terrain the events were made on |
-//! | records | 17 each | tag (1), x, y, z (4 each), old (2), new (2) |
+//! | records | by tag | a tag byte, then the fields below |
+//!
+//! | Tag | Event | Fields |
+//! |---|---|---|
+//! | 1 | block set | x, y, z (4 each), old (2), new (2) |
+//! | 2 | player moved | old x, y, z bits (4 each), new x, y, z bits (4 each) |
+//! | 3 | slot set | slot (1), old item (2), old count (1), new item (2), new count (1) |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
-//! short mid-record is rejected instead of silently losing its last edit.
+//! short mid-record is rejected instead of silently losing its last event. Version 1 held
+//! only tag 1 and reads unchanged under version 2.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,19 +25,33 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::events::log::EventLog;
-use crate::shared::event::Event;
+use crate::shared::event::{Event, Held, Spot};
 use crate::shared::voxel::{BlockId, WorldPos};
 
 const MAGIC: [u8; 4] = *b"MCEL";
 
-/// Bump when the layout changes; older files are then refused, not guessed at.
-pub const VERSION: u16 = 1;
+/// The version written. Bump it when the layout changes.
+pub const VERSION: u16 = 2;
+
+/// The oldest version still read. A layout that cannot be read unchanged is refused, not
+/// guessed at.
+pub const MIN_VERSION: u16 = 1;
 
 const HEADER_LEN: usize = 4 + 2 + 8;
-const RECORD_LEN: usize = 1 + 3 * 4 + 2 + 2;
 
-/// Record tag of [`Event::BlockSet`].
+/// Record tags, one per [`Event`] variant.
 const TAG_BLOCK_SET: u8 = 1;
+const TAG_PLAYER_MOVED: u8 = 2;
+const TAG_SLOT_SET: u8 = 3;
+
+/// Bytes `event` takes in a file, tag included.
+const fn record_len(event: &Event) -> usize {
+    match event {
+        Event::BlockSet { .. } => 1 + 3 * 4 + 2 + 2,
+        Event::PlayerMoved { .. } => 1 + 6 * 4,
+        Event::SlotSet { .. } => 1 + 1 + 3 + 3,
+    }
+}
 
 /// A log read back from disk, with the seed its terrain must be regenerated from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +64,7 @@ pub struct SavedLog {
 pub enum DecodeError {
     #[error("not an event log file")]
     BadMagic,
-    #[error("event log version {0} is not supported (expected {VERSION})")]
+    #[error("event log version {0} is not supported (expected {MIN_VERSION} to {VERSION})")]
     UnsupportedVersion(u16),
     #[error("the file ends in the middle of the header or a record")]
     Truncated,
@@ -61,7 +82,8 @@ pub enum LoadError {
 
 /// Serialises `log` in the layout described in the module docs.
 pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(HEADER_LEN + log.len() * RECORD_LEN);
+    let len = log.iter().map(record_len).sum::<usize>();
+    let mut bytes = Vec::with_capacity(HEADER_LEN + len);
     bytes.extend_from_slice(&MAGIC);
     bytes.extend_from_slice(&VERSION.to_le_bytes());
     bytes.extend_from_slice(&seed.to_le_bytes());
@@ -74,6 +96,20 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
                 bytes.extend_from_slice(&pos.z.to_le_bytes());
                 bytes.extend_from_slice(&old.0.to_le_bytes());
                 bytes.extend_from_slice(&new.0.to_le_bytes());
+            }
+            Event::PlayerMoved { old, new } => {
+                bytes.push(TAG_PLAYER_MOVED);
+                for bits in old.to_bits().into_iter().chain(new.to_bits()) {
+                    bytes.extend_from_slice(&bits.to_le_bytes());
+                }
+            }
+            Event::SlotSet { slot, old, new } => {
+                bytes.push(TAG_SLOT_SET);
+                bytes.push(slot);
+                for held in [old, new] {
+                    bytes.extend_from_slice(&held.item.to_le_bytes());
+                    bytes.push(held.count);
+                }
             }
         }
     }
@@ -89,7 +125,7 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
         return Err(DecodeError::BadMagic);
     }
     let version = u16::from_le_bytes(reader.take()?);
-    if version != VERSION {
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return Err(DecodeError::UnsupportedVersion(version));
     }
     let seed = u64::from_le_bytes(reader.take()?);
@@ -107,6 +143,29 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 old: BlockId(u16::from_le_bytes(reader.take()?)),
                 new: BlockId(u16::from_le_bytes(reader.take()?)),
             }),
+            TAG_PLAYER_MOVED => {
+                let mut spot = || -> Result<Spot, DecodeError> {
+                    Ok(Spot::from_bits([
+                        u32::from_le_bytes(reader.take()?),
+                        u32::from_le_bytes(reader.take()?),
+                        u32::from_le_bytes(reader.take()?),
+                    ]))
+                };
+                let old = spot()?;
+                let new = spot()?;
+                log.push(Event::PlayerMoved { old, new });
+            }
+            TAG_SLOT_SET => {
+                let [slot] = reader.take()?;
+                let mut held = || -> Result<Held, DecodeError> {
+                    let item = u16::from_le_bytes(reader.take()?);
+                    let [count] = reader.take()?;
+                    Ok(Held { item, count })
+                };
+                let old = held()?;
+                let new = held()?;
+                log.push(Event::SlotSet { slot, old, new });
+            }
             other => return Err(DecodeError::UnknownEvent(other)),
         }
     }
@@ -161,19 +220,44 @@ mod tests {
     use super::*;
 
     fn event() -> impl Strategy<Value = Event> {
-        (
-            any::<i32>(),
-            any::<i32>(),
-            any::<i32>(),
-            any::<u16>(),
-            any::<u16>(),
-        )
-            .prop_map(|(x, y, z, old, new)| Event::BlockSet {
-                pos: WorldPos { x, y, z },
-                old: BlockId(old),
-                new: BlockId(new),
-            })
+        prop_oneof![
+            (
+                any::<i32>(),
+                any::<i32>(),
+                any::<i32>(),
+                any::<u16>(),
+                any::<u16>(),
+            )
+                .prop_map(|(x, y, z, old, new)| Event::BlockSet {
+                    pos: WorldPos { x, y, z },
+                    old: BlockId(old),
+                    new: BlockId(new),
+                }),
+            (any::<[u32; 3]>(), any::<[u32; 3]>()).prop_map(|(old, new)| Event::PlayerMoved {
+                old: Spot::from_bits(old),
+                new: Spot::from_bits(new),
+            }),
+            (
+                any::<u8>(),
+                (any::<u16>(), any::<u8>()),
+                (any::<u16>(), any::<u8>())
+            )
+                .prop_map(|(slot, old, new)| Event::SlotSet {
+                    slot,
+                    old: Held {
+                        item: old.0,
+                        count: old.1
+                    },
+                    new: Held {
+                        item: new.0,
+                        count: new.1
+                    },
+                }),
+        ]
     }
+
+    /// A block record, the only kind version 1 files hold.
+    const BLOCK_RECORD_LEN: usize = 17;
 
     fn log_of(events: &[Event]) -> EventLog {
         let mut log = EventLog::new();
@@ -191,15 +275,21 @@ mod tests {
         ) {
             let log = log_of(&events);
             let bytes = encode(seed, &log);
-            prop_assert_eq!(bytes.len(), HEADER_LEN + events.len() * RECORD_LEN);
+            prop_assert_eq!(
+                bytes.len(),
+                HEADER_LEN + events.iter().map(record_len).sum::<usize>()
+            );
             prop_assert_eq!(decode(&bytes), Ok(SavedLog { seed, log }));
         }
 
         #[test]
         fn a_file_cut_inside_a_record_is_rejected(
             events in prop::collection::vec(event(), 1..20),
-            cut in 1..RECORD_LEN,
+            cut in 1usize..32,
         ) {
+            // Cutting more than the last record would drop whole records and still decode.
+            let last = record_len(&events[events.len() - 1]);
+            let cut = 1 + (cut - 1) % (last - 1);
             let bytes = encode(0, &log_of(&events));
             prop_assert_eq!(decode(&bytes[..bytes.len() - cut]), Err(DecodeError::Truncated));
         }
@@ -236,9 +326,35 @@ mod tests {
     }
 
     #[test]
+    fn a_version_one_file_still_reads() {
+        let block = Event::BlockSet {
+            pos: WorldPos { x: -3, y: 4, z: 5 },
+            old: BlockId::AIR,
+            new: BlockId::STONE,
+        };
+        let mut bytes = encode(7, &log_of(&[block]));
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+
+        assert_eq!(
+            decode(&bytes),
+            Ok(SavedLog {
+                seed: 7,
+                log: log_of(&[block])
+            })
+        );
+    }
+
+    #[test]
+    fn version_zero_is_rejected() {
+        let mut bytes = encode(7, &EventLog::new());
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedVersion(0)));
+    }
+
+    #[test]
     fn an_unknown_tag_is_rejected() {
         let mut bytes = encode(7, &EventLog::new());
-        bytes.extend_from_slice(&[9; RECORD_LEN]);
+        bytes.extend_from_slice(&[9; BLOCK_RECORD_LEN]);
         assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(9)));
     }
 
