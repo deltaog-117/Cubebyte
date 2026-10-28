@@ -45,6 +45,11 @@ pub fn get(id: RecipeId) -> Option<&'static Recipe> {
     RECIPES.get(usize::from(id.0))
 }
 
+/// Every recipe, in table order.
+pub fn ids() -> impl Iterator<Item = RecipeId> {
+    (0..RECIPES.len() as u8).map(RecipeId)
+}
+
 /// The recipe after `id`, wrapping to the first.
 pub fn next(id: RecipeId) -> RecipeId {
     match usize::from(id.0) + 1 {
@@ -103,6 +108,14 @@ mod tests {
             assert_eq!(id, RecipeId(expected as u8));
         }
         assert_eq!(next(id), RecipeId::FIRST);
+    }
+
+    #[test]
+    fn ids_lists_every_recipe_once_in_order() {
+        let listed: Vec<_> = ids().collect();
+        assert_eq!(listed.len(), RECIPES.len());
+        assert!(listed.iter().all(|&id| get(id).is_some()));
+        assert!(listed.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 
     #[test]

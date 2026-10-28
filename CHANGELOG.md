@@ -92,6 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simulation::intent_log`: `ActorId` and an in-memory, append-only `IntentLog` with one track per actor and strictly rising ticks; `app` records the player's and each zombie's intent on every step
 - `mobs::service::decide` and `step_with`, so a zombie's intent can be recorded and replayed; `step` is now `decide` followed by `step_with`
 - Property tests that replaying a recorded player track, and a zombie's decided intents, reproduces the run exactly
+- `ui` feature: a crafting panel opened with Tab. `ui::layout` places a centred panel with one clickable row per recipe (rows you can craft now are green, others grey), `ui::font` is a built-in 5×7 pixel font, and `ui::draw` turns the panel into coloured quads; a left click on a row crafts that recipe
+- `Renderer::set_overlay` and `Renderer::size`, with a second pipeline that draws the interface over the scene without depth
+- `crafting::registry::ids` and `crafting::service::can_craft`, so the panel can list every recipe and mark the affordable ones
+- Property tests that panel rows fit the window without overlapping, that a click finds the row under it, and that the overlay's indices and colours are valid
 
 ### Changed
 - `shared::body::Intent` moved to `shared::intent` (still re-exported from `shared::body` and `player::service`) and its `walk` is now a `Walk` of whole numbers instead of a `Vec2`. Direction is rounded to about 0.45 degrees and speed to under 0.4%; a player step still costs about 180 ns
@@ -108,3 +112,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `app` loads `inventory.mcin` at startup, saves it on exit when it changed, and shows health, hunger and item counts in the window title
 - Starvation now kills: the old floor of 1 health is gone, and dying in `app` respawns the player at the start with full meters and an empty pack; the window title counts deaths
 - `items::registry::ItemDef` gains `restores_hunger`, and `items::registry::ids()` lists every item; the window title lists all items instead of a fixed three
+- Escape closes the crafting panel first and quits only when it is closed; the pointer is released while the panel is open and mouse look pauses

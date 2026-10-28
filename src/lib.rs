@@ -14,4 +14,5 @@ pub mod rendering;
 pub mod shared;
 pub mod simulation;
 pub mod survival;
+pub mod ui;
 pub mod world;

@@ -40,6 +40,12 @@ fn vs_main(vertex: Vertex) -> Fragment {
     return Fragment(camera.view_projection * vec4<f32>(vertex.position, 1.0), vertex.color);
 }
 
+// The interface is already in clip space, so it skips the camera.
+@vertex
+fn vs_overlay(vertex: Vertex) -> Fragment {
+    return Fragment(vec4<f32>(vertex.position, 1.0), vertex.color);
+}
+
 @fragment
 fn fs_main(fragment: Fragment) -> @location(0) vec4<f32> {
     return vec4<f32>(fragment.color, 1.0);
@@ -73,12 +79,16 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// Draws the interface over everything else, ignoring depth.
+    overlay_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     meshes: HashMap<ChunkPos, GpuMesh>,
     /// Everything that moves, rebuilt every frame by [`Renderer::set_entities`].
     entities: Option<GpuMesh>,
+    /// The interface drawn on top, replaced by [`Renderer::set_overlay`].
+    overlay: Option<GpuMesh>,
 }
 
 impl Renderer {
@@ -177,6 +187,38 @@ impl Renderer {
             cache: None,
         });
 
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_overlay"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &GpuVertex::ATTRIBUTES,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_view = depth_view(&device, &config);
         Ok(Self {
             surface,
@@ -184,11 +226,13 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            overlay_pipeline,
             camera_buffer,
             camera_group,
             depth_view,
             meshes: HashMap::new(),
             entities: None,
+            overlay: None,
         })
     }
 
@@ -209,6 +253,17 @@ impl Renderer {
     /// shows none.
     pub fn set_entities(&mut self, vertices: &[GpuVertex], indices: &[u32]) {
         self.entities = self.upload(vertices, indices);
+    }
+
+    /// Shows the interface with this mesh, in clip-space positions, over the scene and
+    /// replacing the previous one. An empty mesh shows none.
+    pub fn set_overlay(&mut self, vertices: &[GpuVertex], indices: &[u32]) {
+        self.overlay = self.upload(vertices, indices);
+    }
+
+    /// The window's drawable size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
     }
 
     /// Copies a mesh to the GPU. `None` for an empty mesh, and for one too large to draw.
@@ -308,6 +363,12 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_group, &[]);
             for mesh in self.meshes.values().chain(&self.entities) {
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+            if let Some(mesh) = &self.overlay {
+                pass.set_pipeline(&self.overlay_pipeline);
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);

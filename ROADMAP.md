@@ -31,6 +31,7 @@ Items are organized by priority, not by timeline.
 - ✅ Combat rules: a `Damage` type, health that can reach zero, death and respawn (full meters, empty pack), and a sword item that sets how hard the player hits
 - ✅ Hostile mobs: a zombie that chases and hits on the tick, drawn as a box and hit back with the held weapon; it shares one walking-body module with the player, entity hits go through a ray-versus-box test, and a sword recipe exists
 - ✅ Whole-number movement intent: walking direction is two integers from -127 to 127, bodies move by exactly those numbers, and the player's and each zombie's intent is recorded per tick in an in-memory `IntentLog`; replaying a track reproduces the run bit for bit
+- ✅ Crafting interface: Tab opens an on-screen recipe panel (built-in pixel font, flat quads drawn over the scene); click a row to craft it, rows you cannot afford are greyed
 
 ---
 
@@ -57,7 +58,6 @@ Items are organized by priority, not by timeline.
 
 - **Shareable blueprints** – Export a build or script as a text blob that others can import and watch build step by step.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
-- **Crafting interface** – An on-screen recipe list and crafting panel; needs a 2D and text pass in the renderer.
 - **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
 - **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
 

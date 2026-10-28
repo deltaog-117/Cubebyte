@@ -43,6 +43,8 @@ use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::model::Simulation;
 use crate::survival::model::Stats;
 use crate::survival::service::eat;
+use crate::ui::draw::overlay;
+use crate::ui::layout::panel;
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -119,6 +121,7 @@ pub fn run() -> Result<(), AppError> {
         running: None,
         keys: MoveKeys::default(),
         selected: SolidBlock::STONE,
+        cursor: (0.0, 0.0),
         failure: None,
     };
     event_loop.run_app(&mut app)?;
@@ -156,6 +159,8 @@ struct Running {
     intents: IntentLog,
     /// The recipe the craft key makes.
     recipe: RecipeId,
+    /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
+    panel_open: bool,
     terrain: TerrainGenerator,
     streamer: Streamer,
 }
@@ -165,6 +170,8 @@ struct App {
     keys: MoveKeys,
     /// The block a right click places.
     selected: SolidBlock,
+    /// Where the pointer last was, in window pixels.
+    cursor: (f32, f32),
     /// Why the loop was stopped early, handed back by [`run`].
     failure: Option<AppError>,
 }
@@ -174,15 +181,7 @@ impl App {
         let window = Arc::new(
             event_loop.create_window(Window::default_attributes().with_title("minecraft-clone"))?,
         );
-        // Locked is unsupported on some platforms; confined still keeps the pointer inside.
-        if window
-            .set_cursor_grab(CursorGrabMode::Locked)
-            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
-            .is_err()
-        {
-            tracing::warn!("cannot grab the cursor; mouse look may drift");
-        }
-        window.set_cursor_visible(false);
+        capture_cursor(&window);
 
         let size = window.inner_size();
         let renderer =
@@ -217,6 +216,7 @@ impl App {
             next_actor: ActorId::PLAYER.next(),
             intents: IntentLog::default(),
             recipe: RecipeId::FIRST,
+            panel_open: false,
             terrain,
             streamer: Streamer::new(
                 LOAD_RADIUS,
@@ -256,7 +256,12 @@ impl App {
             }),
             KeyCode::KeyC if down => self.with_running(Running::craft_selected),
             KeyCode::KeyE if down => self.with_running(Running::eat_food),
-            KeyCode::Escape if down => event_loop.exit(),
+            KeyCode::Tab if down => self.with_running(Running::toggle_panel),
+            // Escape first closes the panel, and only then quits.
+            KeyCode::Escape if down => match self.running.as_mut() {
+                Some(running) if running.panel_open => running.toggle_panel(),
+                _ => event_loop.exit(),
+            },
             _ => {}
         }
     }
@@ -270,10 +275,16 @@ impl App {
     /// Left click breaks the block under the crosshair and keeps what it yields, right
     /// click places the selected block against it, spending one from the inventory.
     fn click(&mut self, button: MouseButton) {
-        let selected = self.selected;
+        let (selected, cursor) = (self.selected, self.cursor);
         let Some(running) = self.running.as_mut() else {
             return;
         };
+        if running.panel_open {
+            if button == MouseButton::Left {
+                running.click_panel(cursor);
+            }
+            return;
+        }
         let (origin, direction) = (running.camera.position, running.camera.forward());
         if button == MouseButton::Left && running.hit_zombie(origin, direction) {
             return;
@@ -362,6 +373,7 @@ impl App {
         }
         running.stream(MAX_LOADS_PER_FRAME);
         running.show_zombie();
+        running.show_panel(self.cursor);
         running.renderer.render(&running.camera)
     }
 }
@@ -504,10 +516,48 @@ impl Running {
         self.renderer.set_entities(&vertices, &indices);
     }
 
-    /// Crafts the selected recipe once. Missing ingredients or a full pack are normal, not
-    /// a fault.
+    /// Opens or closes the crafting panel, freeing the pointer while it is open.
+    fn toggle_panel(&mut self) {
+        self.panel_open = !self.panel_open;
+        if self.panel_open {
+            self.window.set_cursor_visible(true);
+            if let Err(error) = self.window.set_cursor_grab(CursorGrabMode::None) {
+                tracing::warn!(%error, "cannot release the cursor");
+            }
+        } else {
+            capture_cursor(&self.window);
+        }
+    }
+
+    /// Crafts the recipe whose row is under `cursor`, if there is one.
+    fn click_panel(&mut self, cursor: (f32, f32)) {
+        let layout = panel(self.renderer.size(), &self.inventory);
+        if let Some(id) = layout.row_at(cursor.0, cursor.1) {
+            self.craft_recipe(id);
+        }
+    }
+
+    /// Draws the crafting panel while it is open, or removes it.
+    fn show_panel(&mut self, cursor: (f32, f32)) {
+        let (vertices, indices) = if self.panel_open {
+            let size = self.renderer.size();
+            let layout = panel(size, &self.inventory);
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            overlay(&layout, size, hovered)
+        } else {
+            Default::default()
+        };
+        self.renderer.set_overlay(&vertices, &indices);
+    }
+
+    /// Crafts the selected recipe once.
     fn craft_selected(&mut self) {
-        if craft(&mut self.inventory, self.recipe).is_ok() {
+        self.craft_recipe(self.recipe);
+    }
+
+    /// Crafts `id` once. Missing ingredients or a full pack are normal, not a fault.
+    fn craft_recipe(&mut self, id: RecipeId) {
+        if craft(&mut self.inventory, id).is_ok() {
             self.inventory_dirty = true;
             self.refresh_title();
         }
@@ -572,6 +622,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.set_key(event_loop, &event),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x as f32, position.y as f32);
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button,
@@ -589,6 +642,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, Some(running)) =
             (event, self.running.as_mut())
+            && !running.panel_open
         {
             running.camera.look(dx as f32, dy as f32);
         }
@@ -617,6 +671,19 @@ impl ApplicationHandler for App {
             running.window.request_redraw();
         }
     }
+}
+
+/// Hides the pointer and keeps it in the window, for mouse look.
+fn capture_cursor(window: &Window) {
+    // Locked is unsupported on some platforms; confined still keeps the pointer inside.
+    if window
+        .set_cursor_grab(CursorGrabMode::Locked)
+        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+        .is_err()
+    {
+        tracing::warn!("cannot grab the cursor; mouse look may drift");
+    }
+    window.set_cursor_visible(false);
 }
 
 /// Chunk offsets that share a face with a chunk.

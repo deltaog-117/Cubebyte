@@ -703,3 +703,38 @@ Replays need each actor's wanted movement per tick stored exactly. The player's 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-28 | Initial entry | deltaog-117 |
+
+### Crafting Interface
+
+**Date:** 2026-10-28
+**Status:** Confirmed
+
+#### Context / Background
+Crafting was driven by keys R, C and E with the window title as the only display. The renderer had no way to draw flat shapes or text, so a recipe list needed a 2D drawing path and some way to show words.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Built-in pixel font plus flat quads | No new dependency, readable, layout is pure code | Blocky look, hand-written font | Medium |
+| B: Font library (e.g. `glyphon`) | Best-looking text, scales to later UI | New dependency tied to `wgpu` 27, heavy | Medium |
+| C: Colour-only panel | Smallest change | Names unreadable, thrown away later | Small |
+
+#### Decision & Rationale
+**Chosen Option:** A. It is the only option with readable text and no new dependency, and it keeps placement and click-testing as pure arithmetic that property tests cover without a GPU. B can replace the font later without touching the layout.
+
+**Trade-offs accepted:** only capitals, digits, space, `-` and `,` exist in the font; other characters are drawn as gaps.
+
+#### Implementation Notes
+- Tab toggles the panel. While it is open the pointer is released, mouse look and block clicks pause, and a left click on a row crafts that recipe. Escape closes the panel before it quits. R, C and E still work.
+- `ui::layout::panel` is pure: window size and inventory in, rows with rectangles out. Text scale follows window height but is capped so the widest line always fits the width; a property test found the first version overflowing a 320-pixel-wide window.
+- `ui::draw` writes clip-space vertices with the existing `GpuVertex`, so the renderer only gained a second pipeline (no depth, no culling) and `set_overlay`.
+- `can_craft` runs `craft` on a copy, so the panel and the real craft cannot disagree, including the full-pack case.
+- The sword recipe already existed, so no recipe was added. It is the last row, not the first: recipe IDs are table positions, and reordering was not worth the churn.
+- The window was not run by the assistant; the layout, font and overlay are covered by unit and property tests only.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-28 | Initial entry | deltaog-117 |

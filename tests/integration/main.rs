@@ -7,4 +7,5 @@ mod mobs;
 mod player;
 mod rendering;
 mod simulation;
+mod ui;
 mod world;

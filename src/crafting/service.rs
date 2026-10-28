@@ -42,6 +42,11 @@ pub fn craft(inventory: &mut Inventory, id: RecipeId) -> Result<(), CraftError> 
     Ok(())
 }
 
+/// Whether [`craft`] would succeed for `id` right now, without changing `inventory`.
+pub fn can_craft(inventory: &Inventory, id: RecipeId) -> bool {
+    craft(&mut inventory.clone(), id).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +112,17 @@ mod tests {
             craft(&mut inventory, RecipeId(200)),
             Err(CraftError::UnknownRecipe(200))
         );
+    }
+
+    #[test]
+    fn can_craft_agrees_with_craft_and_changes_nothing() {
+        let mut inventory = Inventory::default();
+        assert!(!can_craft(&inventory, BREAD));
+        inventory.add(ItemId::GRASS, 3).unwrap();
+        let before = inventory.clone();
+
+        assert!(can_craft(&inventory, BREAD));
+        assert_eq!(inventory, before);
+        assert!(!can_craft(&inventory, RecipeId(200)));
     }
 }
