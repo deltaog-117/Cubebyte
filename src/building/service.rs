@@ -27,21 +27,11 @@ pub fn break_block(
     origin: Vec3,
     direction: Vec3,
 ) -> Result<WorldPos, EditError> {
-    let hit = cast(world, origin, direction, REACH).ok_or(EditError::NothingInReach)?;
-    set_block(world, log, hit.block, BlockId::AIR)?;
-    Ok(hit.block)
+    let pos = break_target(world, origin, direction)?;
+    set_block(world, log, pos, BlockId::AIR)?;
+    Ok(pos)
 }
 
-/// Places `block` against the face the viewer looks at and returns where it went.
-///
-/// # Errors
-///
-/// - [`EditError::NothingInReach`] when no block is within [`REACH`].
-/// - [`EditError::NoFace`] when the viewer is inside the block it would build against.
-/// - [`EditError::Occupied`] when the new block would fill the cell holding the viewer's
-///   eye.
-///
-/// The world and the log are left unchanged on any error.
 pub fn place_block(
     world: &mut World,
     log: &mut EventLog,
@@ -49,6 +39,29 @@ pub fn place_block(
     direction: Vec3,
     block: SolidBlock,
 ) -> Result<WorldPos, EditError> {
+    let target = place_target(world, origin, direction)?;
+    set_block(world, log, target, block.id())?;
+    Ok(target)
+}
+
+/// The block a break from `origin` along `direction` would clear.
+///
+/// # Errors
+///
+/// - [`EditError::NothingInReach`] when no block is within [`REACH`].
+pub fn break_target(world: &World, origin: Vec3, direction: Vec3) -> Result<WorldPos, EditError> {
+    let hit = cast(world, origin, direction, REACH).ok_or(EditError::NothingInReach)?;
+    Ok(hit.block)
+}
+
+/// The empty cell a placement from `origin` along `direction` would fill.
+///
+/// # Errors
+///
+/// - [`EditError::NothingInReach`] when no block is within [`REACH`].
+/// - [`EditError::NoFace`] when the viewer is inside the block, so there is no face to hit.
+/// - [`EditError::Occupied`] when the cell is the one the viewer stands in.
+pub fn place_target(world: &World, origin: Vec3, direction: Vec3) -> Result<WorldPos, EditError> {
     let hit = cast(world, origin, direction, REACH).ok_or(EditError::NothingInReach)?;
     let target = hit.before.ok_or(EditError::NoFace)?;
     // A cast that returned a hit has a finite origin within the cast's coordinate limit.
@@ -56,8 +69,16 @@ pub fn place_block(
     if (target.x, target.y, target.z) == (eye.x, eye.y, eye.z) {
         return Err(EditError::Occupied);
     }
-    set_block(world, log, target, block.id())?;
     Ok(target)
+}
+
+/// The event that turns the block at `pos` into `new`, recorded against what is there now.
+pub fn block_event(world: &World, pos: WorldPos, new: BlockId) -> Event {
+    Event::BlockSet {
+        pos,
+        old: world.block_at(pos),
+        new,
+    }
 }
 
 fn set_block(
@@ -66,11 +87,7 @@ fn set_block(
     pos: WorldPos,
     new: BlockId,
 ) -> Result<(), EditError> {
-    let event = Event::BlockSet {
-        pos,
-        old: world.block_at(pos),
-        new,
-    };
+    let event = block_event(world, pos, new);
     world.apply(&event)?;
     log.push(event);
     tracing::debug!(?event, logged = log.len(), "block edit applied");

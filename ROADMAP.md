@@ -33,6 +33,7 @@ Items are organized by priority, not by timeline.
 - ✅ Whole-number movement intent: walking direction is two integers from -127 to 127, bodies move by exactly those numbers, and the player's and each zombie's intent is recorded per tick in an in-memory `IntentLog`; replaying a track reproduces the run bit for bit
 - ✅ Crafting interface: Tab opens an on-screen recipe panel (built-in pixel font, flat quads drawn over the scene); click a row to craft it, rows you cannot afford are greyed
 - ✅ World interface for scripts, first slice: `Event` gains player jumps and per-slot inventory changes, one `events::apply` door sends every event to the world, player or inventory, and `scripting` runs commands (teleport, give item, set block) behind permissions, a range and a per-tick limit; every accepted command is logged and replays and undoes exactly (the window does not run scripts yet)
+- ✅ Gameplay under events: breaking with its yield, placing with its cost, crafting and eating now work out their block and slot changes as events, apply them all or nothing through the one `events::apply` door, and log them; a property test shows the event path matches the direct functions and undoes exactly
 
 ---
 
@@ -51,7 +52,7 @@ Items are organized by priority, not by timeline.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
 - **World interface for scripts** – First slice done (see Completed): teleport, give item and set block, each logged with its old value, checked for permission and range, and capped per tick. Still to do:
   - spawning mobs, which needs mobs under the event log (today there is one `Option<Zombie>` in `app`);
-  - the other event-less changes: breaking a block still adds its item without an event, crafting and eating change the inventory without one, and walking and mob movement are not events, so rewind cannot yet undo them;
+  - the other event-less changes: breaking, placing, crafting and eating are events now; still without events are the hunger and health meters (eating restores hunger outside the events), respawn, and walking and mob movement, so rewind cannot yet undo them;
   - reads (look, find, query);
   - a cost per action (fuel or energy) and a cooldown, tied to time as a resource;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
@@ -89,7 +90,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the inventory and crafting under events. The language comes after.
+1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the meters (hunger, health) and respawn under events. The language comes after.
 2. **Time rewind** – Every edit is already a logged event; add periodic snapshots to keep the log bounded.
 
 ---

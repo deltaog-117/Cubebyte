@@ -19,13 +19,14 @@ use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::REACH;
 use crate::combat::service::{Outcome, hit, respawn, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
-use crate::crafting::service::craft;
+use crate::crafting::service::craft_events;
+use crate::events::apply::{Stage, StageError, apply_all};
 use crate::events::log::EventLog;
 use crate::events::persist::{self, LoadError};
 use crate::events::replay::replay_chunk;
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
-use crate::inventory::service::{StockError, gather_block, place_from_stock};
+use crate::inventory::service::{StockError, gather_events, place_events};
 use crate::items::registry;
 use crate::mobs::model::Zombie;
 use crate::mobs::service as mobs;
@@ -37,12 +38,13 @@ use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
+use crate::shared::event::Event;
 use crate::shared::intent::Walk;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::model::Simulation;
 use crate::survival::model::Stats;
-use crate::survival::service::eat;
+use crate::survival::service::eat_events;
 use crate::ui::draw::overlay;
 use crate::ui::layout::panel;
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
@@ -289,26 +291,24 @@ impl App {
         if button == MouseButton::Left && running.hit_zombie(origin, direction) {
             return;
         }
-        let edit = match button {
-            MouseButton::Left => gather_block(
-                &mut running.world,
-                &mut running.log,
-                &mut running.inventory,
-                origin,
-                direction,
-            ),
-            MouseButton::Right => place_from_stock(
-                &mut running.world,
-                &mut running.log,
-                &mut running.inventory,
+        let planned = match button {
+            MouseButton::Left => {
+                gather_events(&running.world, &running.inventory, origin, direction)
+            }
+            MouseButton::Right => place_events(
+                &running.world,
+                &running.inventory,
                 origin,
                 direction,
                 selected,
             ),
             _ => return,
         };
-        match edit {
-            Ok(pos) => {
+        match planned {
+            Ok((pos, events)) => {
+                if !running.commit_or_warn(&events) {
+                    return;
+                }
                 running.inventory_dirty = true;
                 running.remesh_around(pos);
                 running.refresh_title();
@@ -550,6 +550,27 @@ impl Running {
         self.renderer.set_overlay(&vertices, &indices);
     }
 
+    /// Applies `events` to the world, player and inventory together, all or nothing, and logs
+    /// them only if they all applied.
+    fn commit(&mut self, events: &[Event]) -> Result<(), StageError> {
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+        };
+        apply_all(&mut stage, events)?;
+        events.iter().for_each(|&event| self.log.push(event));
+        Ok(())
+    }
+
+    /// [`Self::commit`] for events just worked out from the current state, so a refusal is a
+    /// bug: it is logged and reported as `false`.
+    fn commit_or_warn(&mut self, events: &[Event]) -> bool {
+        self.commit(events)
+            .inspect_err(|error| tracing::warn!(%error, "change rejected"))
+            .is_ok()
+    }
+
     /// Crafts the selected recipe once.
     fn craft_selected(&mut self) {
         self.craft_recipe(self.recipe);
@@ -557,7 +578,10 @@ impl Running {
 
     /// Crafts `id` once. Missing ingredients or a full pack are normal, not a fault.
     fn craft_recipe(&mut self, id: RecipeId) {
-        if craft(&mut self.inventory, id).is_ok() {
+        let Ok(events) = craft_events(&self.inventory, id) else {
+            return;
+        };
+        if self.commit_or_warn(&events) {
             self.inventory_dirty = true;
             self.refresh_title();
         }
@@ -565,7 +589,11 @@ impl Running {
 
     /// Eats one food item. Being full or having no food is normal, not a fault.
     fn eat_food(&mut self) {
-        if eat(&mut self.inventory, &mut self.stats).is_ok() {
+        let Ok(meal) = eat_events(&self.inventory, &self.stats) else {
+            return;
+        };
+        if self.commit_or_warn(&meal.events) {
+            self.stats.restore_hunger(meal.restored);
             self.inventory_dirty = true;
             self.refresh_title();
         }

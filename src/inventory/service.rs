@@ -9,11 +9,15 @@ use thiserror::Error;
 
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::raycast::cast;
-use crate::building::service::{REACH, break_block, place_block};
+use crate::building::service::{
+    REACH, block_event, break_block, break_target, place_block, place_target,
+};
+use crate::events::apply::slot_events;
 use crate::events::log::EventLog;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self, ItemId};
-use crate::shared::voxel::WorldPos;
+use crate::shared::event::Event;
+use crate::shared::voxel::{BlockId, WorldPos};
 use crate::world::model::World;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -81,6 +85,52 @@ pub fn place_from_stock(
         tracing::error!(%error, "stack vanished during placement");
     }
     Ok(placed)
+}
+
+/// The events for breaking the block the viewer looks at: the block change, then the slot
+/// changes that add its yield. Nothing is applied.
+///
+/// # Errors
+///
+/// The same as [`gather_block`].
+pub fn gather_events(
+    world: &World,
+    inventory: &Inventory,
+    origin: Vec3,
+    direction: Vec3,
+) -> Result<(WorldPos, Vec<Event>), StockError> {
+    let pos = break_target(world, origin, direction)?;
+    let mut events = vec![block_event(world, pos, BlockId::AIR)];
+    if let Some(item) = registry::drop_of(world.block_at(pos)) {
+        let mut after = inventory.clone();
+        if after.room_for(item).unwrap_or(0) == 0 || after.add(item, 1).is_err() {
+            return Err(StockError::Full);
+        }
+        events.extend(slot_events(inventory, &after));
+    }
+    Ok((pos, events))
+}
+
+/// The events for placing `block` against the face the viewer looks at: the block change,
+/// then the slot change that spends one of its item. Nothing is applied.
+///
+/// # Errors
+///
+/// The same as [`place_from_stock`].
+pub fn place_events(
+    world: &World,
+    inventory: &Inventory,
+    origin: Vec3,
+    direction: Vec3,
+    block: SolidBlock,
+) -> Result<(WorldPos, Vec<Event>), StockError> {
+    let item: ItemId = registry::drop_of(block.id()).ok_or(StockError::Missing)?;
+    let mut after = inventory.clone();
+    after.take(item, 1).map_err(|_| StockError::Missing)?;
+    let pos = place_target(world, origin, direction)?;
+    let mut events = vec![block_event(world, pos, block.id())];
+    events.extend(slot_events(inventory, &after));
+    Ok((pos, events))
 }
 
 #[cfg(test)]

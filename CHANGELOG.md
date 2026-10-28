@@ -102,8 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripting` feature: `Command` (teleport, give item, set block), `Permissions`, `Limits` (range 32 blocks, 8 commands per tick) and `Denied`; `scripting::service::run` checks each command, applies its event and then logs it, and a denied command changes nothing
 - Property tests that any run of events, inventory layout included, undoes exactly in reverse and replays from the start, that every accepted script command is logged, and that a scripted session survives a save and replays to the same game
 - Event log file version 2 with records for the new events; version 1 files still read
+- `craft_events`, `eat_events` (with `Meal`), `gather_events` and `place_events`: each works out the slot and block events for a craft, a meal, a break with its yield, or a placement with its cost, without changing anything; `break_target`, `place_target` and `block_event` in `building::service` expose the target and event steps they share with `break_block` and `place_block`
+- A property test that a random run of breaking, placing, crafting and eating through events reaches the same state as the direct functions and undoes exactly in reverse
 
 ### Changed
+- `app` sends breaking, placing, crafting and eating through `events::apply::apply_all` and logs the events, so the pack changes only through the one door and rewind can see these changes; the old direct functions remain. Hunger is still restored outside the events
 - `shared::body::Intent` moved to `shared::intent` (still re-exported from `shared::body` and `player::service`) and its `walk` is now a `Walk` of whole numbers instead of a `Vec2`. Direction is rounded to about 0.45 degrees and speed to under 0.4%; a player step still costs about 180 ns
 - `player::model::Player` wraps a `shared::body::Body`; `player::service::step`, `collides`, `Intent` and the speed constants keep their paths and behaviour. A step still costs about 181 ns
 - `app` spawns a zombie 12 to 20 blocks away ten seconds after the start, after each kill and after each death; a left click on the zombie hits it instead of breaking the block behind it. Free flight does not stop it

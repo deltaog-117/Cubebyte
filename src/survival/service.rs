@@ -2,8 +2,10 @@
 
 use thiserror::Error;
 
+use crate::events::apply::slot_events;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self, ItemId};
+use crate::shared::event::Event;
 use crate::survival::model::{Meter, Stats};
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -23,10 +25,45 @@ pub enum EatError {
 /// - [`EatError::NotHungry`] when hunger is full.
 /// - [`EatError::NoFood`] when no held item restores hunger.
 pub fn eat(inventory: &mut Inventory, stats: &mut Stats) -> Result<ItemId, EatError> {
+    let (item, restored) = pick_food(inventory, stats)?;
+    // The stack was just seen, so one is always there to take.
+    inventory.take(item, 1).map_err(|_| EatError::NoFood)?;
+    stats.restore_hunger(restored);
+    Ok(item)
+}
+
+/// One meal worked out but not yet eaten.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Meal {
+    pub item: ItemId,
+    /// The hunger points the meal gives back; the caller restores them once `events` apply.
+    pub restored: u8,
+    /// The slot change that spends the food.
+    pub events: Vec<Event>,
+}
+
+/// The meal [`eat`] would take, without changing `inventory` or `stats`.
+///
+/// # Errors
+///
+/// The same as [`eat`].
+pub fn eat_events(inventory: &Inventory, stats: &Stats) -> Result<Meal, EatError> {
+    let (item, restored) = pick_food(inventory, stats)?;
+    let mut after = inventory.clone();
+    after.take(item, 1).map_err(|_| EatError::NoFood)?;
+    Ok(Meal {
+        item,
+        restored,
+        events: slot_events(inventory, &after),
+    })
+}
+
+/// The food [`eat`] would choose and the points it restores.
+fn pick_food(inventory: &Inventory, stats: &Stats) -> Result<(ItemId, u8), EatError> {
     if stats.hunger() == Meter::FULL {
         return Err(EatError::NotHungry);
     }
-    let (item, restored) = inventory
+    inventory
         .slots()
         .iter()
         .flatten()
@@ -34,11 +71,7 @@ pub fn eat(inventory: &mut Inventory, stats: &mut Stats) -> Result<ItemId, EatEr
             let restored = registry::get(stack.item())?.restores_hunger?;
             Some((stack.item(), restored))
         })
-        .ok_or(EatError::NoFood)?;
-    // The stack was just seen, so one is always there to take.
-    inventory.take(item, 1).map_err(|_| EatError::NoFood)?;
-    stats.restore_hunger(restored);
-    Ok(item)
+        .ok_or(EatError::NoFood)
 }
 
 #[cfg(test)]

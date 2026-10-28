@@ -3,7 +3,9 @@
 use thiserror::Error;
 
 use crate::crafting::registry::{self, RecipeId};
+use crate::events::apply::slot_events;
 use crate::inventory::model::{Inventory, NotEnough, UnknownItem};
+use crate::shared::event::Event;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CraftError {
@@ -29,6 +31,24 @@ pub enum CraftError {
 /// - [`CraftError::Item`] when the recipe names an undefined item.
 /// - [`CraftError::Full`] when the output does not fit once the inputs are spent.
 pub fn craft(inventory: &mut Inventory, id: RecipeId) -> Result<(), CraftError> {
+    *inventory = crafted(inventory, id)?;
+    Ok(())
+}
+
+/// The slot events that crafting `id` once from `inventory` would apply, without changing it.
+///
+/// Applying them through [`crate::events::apply::apply_all`] gives the same inventory as
+/// [`craft`].
+///
+/// # Errors
+///
+/// The same as [`craft`].
+pub fn craft_events(inventory: &Inventory, id: RecipeId) -> Result<Vec<Event>, CraftError> {
+    Ok(slot_events(inventory, &crafted(inventory, id)?))
+}
+
+/// `inventory` after one craft of `id`, or why it cannot be done.
+fn crafted(inventory: &Inventory, id: RecipeId) -> Result<Inventory, CraftError> {
     let recipe = registry::get(id).ok_or(CraftError::UnknownRecipe(id.0))?;
     let mut after = inventory.clone();
     for &(item, count) in recipe.inputs {
@@ -38,8 +58,7 @@ pub fn craft(inventory: &mut Inventory, id: RecipeId) -> Result<(), CraftError> 
     if after.add(output, u32::from(count))? > 0 {
         return Err(CraftError::Full);
     }
-    *inventory = after;
-    Ok(())
+    Ok(after)
 }
 
 /// Whether [`craft`] would succeed for `id` right now, without changing `inventory`.

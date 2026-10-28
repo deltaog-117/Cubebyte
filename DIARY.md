@@ -777,3 +777,37 @@ Scripts will be able to move the player, give items, set blocks and later spawn 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-28 | Initial entry | deltaog-117 |
+
+### Gameplay Under Events
+
+**Date:** 2026-10-28
+**Status:** Confirmed
+
+#### Context / Background
+Scripts changed the pack through logged events, but a left click, a craft and a meal changed it directly. Rewind could not see those, so a replayed or rewound world would drift from the pack.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Diff the pack after each action | Smallest change, rules untouched | Log is a copy, no single door for gameplay | Small |
+| B: Rules return events, one door applies | One path for clicks and scripts, atomic, property-testable | More code moves, new twin functions | Medium |
+
+#### Decision & Rationale
+**Chosen Option:** B. The pack now changes only through `events::apply`, which refuses a stale event and rolls back a half-applied list. A would have left the log as an after-the-fact copy that a new rule could forget to update.
+
+**Trade-offs accepted:** each rule has an event-producing twin beside the old function, kept so public names and their tests stay. Hunger and health are still not events, so rewinding a meal returns the food but not the hunger.
+
+#### Implementation Notes
+- `craft_events`, `eat_events`, `gather_events` and `place_events` build their events from a copy of the inventory and `slot_events`, so they cannot disagree with `craft`, `eat` and the rest; `craft` and `eat` now share a private core with their twins.
+- `building::service` gained `break_target`, `place_target` and `block_event`, so the reach, face and eye-cell checks live in one place for both paths.
+- `app::Running::commit` applies a list through `apply_all` and logs it only if all of it applied. A refusal there means the plan was made from a stale state, which cannot happen on one thread, so it is logged as a warning.
+- The log is non-empty after a craft now, so `world.mcel` is written on exit more often. Startup replay still reads only block events per chunk, so nothing is applied twice, but the log grows with every pickup. "Grants that survive a restart" is still open.
+- No benchmark: clicks, crafts and meals are not a hot loop.
+- The window was not run by the assistant; the change is covered by unit and property tests, including a random run compared against the direct functions and undone in reverse.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-28 | Initial entry | deltaog-117 |
