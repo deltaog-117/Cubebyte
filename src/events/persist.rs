@@ -14,24 +14,27 @@
 //! | 1 | block set | x, y, z (4 each), old (2), new (2) |
 //! | 2 | player moved | old x, y, z bits (4 each), new x, y, z bits (4 each) |
 //! | 3 | slot set | slot (1), old item (2), old count (1), new item (2), new count (1) |
+//! | 4 | edit ends | none: the events since the last end form one edit |
+//! | 5 | rewind ends | none: the events since the last end undo the latest live edit |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
-//! only tag 1 and reads unchanged under version 2.
+//! only tag 1 and reads unchanged under version 2. Tags 4 and 5 came with version 3; older
+//! files have no action ends, so their history cannot be rewound.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::events::log::EventLog;
+use crate::events::log::{ActionKind, EventLog, Record};
 use crate::shared::event::{Event, Held, Spot};
 use crate::shared::voxel::{BlockId, WorldPos};
 
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -43,6 +46,8 @@ const HEADER_LEN: usize = 4 + 2 + 8;
 const TAG_BLOCK_SET: u8 = 1;
 const TAG_PLAYER_MOVED: u8 = 2;
 const TAG_SLOT_SET: u8 = 3;
+const TAG_EDIT_END: u8 = 4;
+const TAG_REWIND_END: u8 = 5;
 
 /// Bytes `event` takes in a file, tag included.
 const fn record_len(event: &Event) -> usize {
@@ -87,8 +92,19 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
     bytes.extend_from_slice(&MAGIC);
     bytes.extend_from_slice(&VERSION.to_le_bytes());
     bytes.extend_from_slice(&seed.to_le_bytes());
-    for event in log.iter() {
-        match *event {
+    for record in log.records() {
+        let event = match record {
+            Record::Event(event) => event,
+            Record::ActionEnd(ActionKind::Edit) => {
+                bytes.push(TAG_EDIT_END);
+                continue;
+            }
+            Record::ActionEnd(ActionKind::Rewind) => {
+                bytes.push(TAG_REWIND_END);
+                continue;
+            }
+        };
+        match event {
             Event::BlockSet { pos, old, new } => {
                 bytes.push(TAG_BLOCK_SET);
                 bytes.extend_from_slice(&pos.x.to_le_bytes());
@@ -166,6 +182,8 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 let new = held()?;
                 log.push(Event::SlotSet { slot, old, new });
             }
+            TAG_EDIT_END if version >= 3 => log.end_action(ActionKind::Edit),
+            TAG_REWIND_END if version >= 3 => log.end_action(ActionKind::Rewind),
             other => return Err(DecodeError::UnknownEvent(other)),
         }
     }
@@ -298,6 +316,46 @@ mod tests {
         fn decoding_arbitrary_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
             let _ = decode(&bytes);
         }
+    }
+
+    #[test]
+    fn action_ends_survive_a_save_and_decide_what_rewind_undoes() {
+        let events = [
+            Event::SlotSet {
+                slot: 0,
+                old: Held::EMPTY,
+                new: Held { item: 1, count: 1 },
+            },
+            Event::SlotSet {
+                slot: 0,
+                old: Held { item: 1, count: 1 },
+                new: Held::EMPTY,
+            },
+        ];
+        let mut log = EventLog::new();
+        log.push(events[0]);
+        log.end_action(ActionKind::Edit);
+        log.push(events[1]);
+        log.end_action(ActionKind::Rewind);
+
+        let SavedLog { log: back, .. } = decode(&encode(1, &log)).unwrap();
+
+        assert_eq!(back, log);
+        assert_eq!(back.latest_live_edit(), None);
+    }
+
+    #[test]
+    fn a_version_two_file_with_an_action_end_is_rejected() {
+        let mut log = log_of(&[]);
+        log.push(Event::PlayerMoved {
+            old: Spot::from_bits([0; 3]),
+            new: Spot::from_bits([1; 3]),
+        });
+        log.end_action(ActionKind::Edit);
+        let mut bytes = encode(1, &log);
+        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(TAG_EDIT_END)));
     }
 
     #[test]

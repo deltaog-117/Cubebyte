@@ -104,6 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Event log file version 2 with records for the new events; version 1 files still read
 - `craft_events`, `eat_events` (with `Meal`), `gather_events` and `place_events`: each works out the slot and block events for a craft, a meal, a break with its yield, or a placement with its cost, without changing anything; `break_target`, `place_target` and `block_event` in `building::service` expose the target and event steps they share with `break_block` and `place_block`
 - A property test that a random run of breaking, placing, crafting and eating through events reaches the same state as the direct functions and undoes exactly in reverse
+- Time rewind: key `Z` steps back the latest edit still in effect (a break with its yield, a placement, a craft, a meal). `events::rewind` builds the inverse events, the log records them as a rewind, and pressing `Z` again steps back through older edits; the log is never rewritten
+- `EventLog` records where each action ends (`end_action`, `ActionKind`, `Record`), with `records()` to walk events and ends together and `latest_live_edit()` to find what a rewind undoes
 
 ### Changed
 - `app` sends breaking, placing, crafting and eating through `events::apply::apply_all` and logs the events, so the pack changes only through the one door and rewind can see these changes; the old direct functions remain. Hunger is still restored outside the events
@@ -124,3 +126,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Escape closes the crafting panel first and quits only when it is closed; the pointer is released while the panel is open and mouse look pauses
 - `EventLog` keeps the per-chunk index for block events only; `World::apply` ignores events that change no blocks, so a whole log can still be replayed into a world
 - `events::persist` writes version 2 and reads versions 1 and 2; records are no longer all the same length
+- `events::persist` writes version 3 (tags 4 and 5 mark the end of an edit and of a rewind) and reads versions 1 to 3; saves older than version 3 have no action ends, so their history cannot be rewound
+- `app::Running::commit` logs each applied list as one edit

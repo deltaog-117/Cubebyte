@@ -811,3 +811,38 @@ Scripts changed the pack through logged events, but a left click, a craft and a 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-28 | Initial entry | deltaog-117 |
+
+### Time Rewind, First Slice
+
+**Date:** 2026-10-28
+**Status:** Confirmed
+
+#### Context / Background
+Every change is a logged event that remembers what it replaced, so undoing was solved. The open question was what a rewind does to the log, which is append-only, saved to disk and replayed per chunk. The log is also flat: a break and its yield are two events, and undoing one alone would leave block and pack out of step.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Append inverse events | Log stays append-only, replay and save work unchanged, local zones fit later | No forward step, log grows per rewind | Small |
+| B: Movable "now" marker | Two-way scrubbing | Breaks append-only, chunk replay and file must track the marker | Medium |
+| C: Snapshots plus replay | Bounded log | New file format and schedule, solves a problem not yet present | High |
+
+#### Decision & Rationale
+**Chosen Option:** A. A rewind is one more batch through `apply_all`, so it is all or nothing and already covered by the same checks. B's forward step can be added later by remembering undone actions in memory.
+
+**Trade-offs accepted:** the log grows with every rewind, and there is no redo yet.
+
+#### Implementation Notes
+- The log records where each action ends (`end_action`). Each rewind cancels the closest edit before it, like matching brackets (`latest_live_edit`), so pressing `Z` twice steps back two edits instead of redoing the first.
+- `events::rewind` builds the inverses newest first; `app::Running::rewind` commits them as a rewind and remeshes the changed blocks.
+- The saved log is version 3 with two new one-byte records for the ends. Version 1 and 2 files still read, but have no action ends, so their history cannot be rewound.
+- Not undone: walking, hunger (rewinding a meal returns the food only), health and respawn. A rewind that no longer matches the pack, for example after a respawn, is refused and logged. Edits in unloaded chunks are refused the same way.
+- Property tests: rewinding k actions gives the world after the earlier ones, replaying the whole log gives the same world, and an edit after a rewind can itself be rewound.
+- The window was not run by the assistant, so the `Z` key and the remesh are untested by hand.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-28 | Initial entry | deltaog-117 |

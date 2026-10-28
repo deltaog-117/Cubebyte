@@ -21,9 +21,10 @@ use crate::combat::service::{Outcome, hit, respawn, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
 use crate::events::apply::{Stage, StageError, apply_all};
-use crate::events::log::EventLog;
+use crate::events::log::{ActionKind, EventLog};
 use crate::events::persist::{self, LoadError};
 use crate::events::replay::replay_chunk;
+use crate::events::rewind::{log_action, rewind_events};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events, place_events};
@@ -258,6 +259,7 @@ impl App {
             }),
             KeyCode::KeyC if down => self.with_running(Running::craft_selected),
             KeyCode::KeyE if down => self.with_running(Running::eat_food),
+            KeyCode::KeyZ if down => self.with_running(Running::rewind),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -551,16 +553,40 @@ impl Running {
     }
 
     /// Applies `events` to the world, player and inventory together, all or nothing, and logs
-    /// them only if they all applied.
+    /// them as one edit only if they all applied.
     fn commit(&mut self, events: &[Event]) -> Result<(), StageError> {
+        self.commit_as(events, ActionKind::Edit)
+    }
+
+    /// [`Self::commit`] for an action of any `kind`.
+    fn commit_as(&mut self, events: &[Event], kind: ActionKind) -> Result<(), StageError> {
         let mut stage = Stage {
             world: &mut self.world,
             player: &mut self.player,
             inventory: &mut self.inventory,
         };
         apply_all(&mut stage, events)?;
-        events.iter().for_each(|&event| self.log.push(event));
+        log_action(&mut self.log, events, kind);
         Ok(())
+    }
+
+    /// Steps back the latest edit still in effect. Nothing left to undo is normal; a refusal
+    /// (the state moved on in a way no event records, such as a respawn) is logged.
+    fn rewind(&mut self) {
+        let Some(events) = rewind_events(&self.log) else {
+            return;
+        };
+        if let Err(error) = self.commit_as(&events, ActionKind::Rewind) {
+            tracing::warn!(%error, "rewind rejected");
+            return;
+        }
+        for event in &events {
+            if let Event::BlockSet { pos, .. } = *event {
+                self.remesh_around(pos);
+            }
+        }
+        self.inventory_dirty = true;
+        self.refresh_title();
     }
 
     /// [`Self::commit`] for events just worked out from the current state, so a refusal is a
@@ -615,7 +641,7 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat)",
+                " | recipe {} (R next, C craft, E eat, Z rewind)",
                 recipe.name
             ));
         }

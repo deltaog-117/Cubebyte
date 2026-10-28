@@ -34,6 +34,7 @@ Items are organized by priority, not by timeline.
 - ✅ Crafting interface: Tab opens an on-screen recipe panel (built-in pixel font, flat quads drawn over the scene); click a row to craft it, rows you cannot afford are greyed
 - ✅ World interface for scripts, first slice: `Event` gains player jumps and per-slot inventory changes, one `events::apply` door sends every event to the world, player or inventory, and `scripting` runs commands (teleport, give item, set block) behind permissions, a range and a per-tick limit; every accepted command is logged and replays and undoes exactly (the window does not run scripts yet)
 - ✅ Gameplay under events: breaking with its yield, placing with its cost, crafting and eating now work out their block and slot changes as events, apply them all or nothing through the one `events::apply` door, and log them; a property test shows the event path matches the direct functions and undoes exactly
+- ✅ Time rewind, first slice: key `Z` steps back one whole action (a break with its yield, a placement, a craft, a meal); the undo is logged as new events, so the log stays append-only and a restart keeps the rewound world; the saved log gains action ends (version 3)
 
 ---
 
@@ -47,7 +48,11 @@ Items are organized by priority, not by timeline.
 
 ## 🟡 Medium Priority (Important)
 
-- **Time rewind** – Scrub backward through the event log to undo builds. Needs periodic snapshots with events in between to keep the log bounded.
+- **Time rewind** – First slice done (see Completed): `Z` undoes one action at a time. Still to do:
+  - periodic snapshots with events in between, to keep the log bounded (every rewind adds events);
+  - a forward step (redo), which could keep the undone actions in memory;
+  - undoing what is not an event yet: walking, hunger, health and respawn (a rewind refused after a respawn, because the pack no longer matches, is logged and skipped);
+  - rewinding edits in chunks that are not loaded.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
 - **World interface for scripts** – First slice done (see Completed): teleport, give item and set block, each logged with its old value, checked for permission and range, and capped per tick. Still to do:
@@ -91,7 +96,7 @@ Items are organized by priority, not by timeline.
 ## 🎯 Next Actions (Immediate)
 
 1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the meters (hunger, health) and respawn under events. The language comes after.
-2. **Time rewind** – Every edit is already a logged event; add periodic snapshots to keep the log bounded.
+2. **Time rewind, next slice** – Add periodic snapshots to keep the log bounded, then a forward step.
 
 ---
 

@@ -5,10 +5,36 @@ use std::collections::HashMap;
 use crate::shared::event::Event;
 use crate::shared::voxel::ChunkPos;
 
+/// What one logged action was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionKind {
+    /// A change the player or a script made.
+    Edit,
+    /// The undoing of the latest edit that had not been undone yet.
+    Rewind,
+}
+
+/// Where an action's events end in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mark {
+    end: usize,
+    kind: ActionKind,
+}
+
+/// One entry of the log as it is saved: an event, or the end of an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Record {
+    Event(Event),
+    ActionEnd(ActionKind),
+}
+
 /// Every event applied to the world, in order. Events are never removed or reordered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventLog {
     events: Vec<Event>,
+    // Where each finished action ends, oldest first. Events pushed after the last mark are
+    // not part of any action yet, and rewind never touches them.
+    marks: Vec<Mark>,
     // Indices into `events`, per chunk and in log order, so a chunk that streams back in
     // replays only its own edits.
     by_chunk: HashMap<ChunkPos, Vec<usize>>,
@@ -48,6 +74,49 @@ impl EventLog {
 
     pub fn iter(&self) -> impl Iterator<Item = &Event> {
         self.events.iter()
+    }
+
+    /// Closes the events pushed since the last action as one action of `kind`. Does nothing
+    /// when there are none, so an action is never empty.
+    pub fn end_action(&mut self, kind: ActionKind) {
+        let end = self.events.len();
+        if self.marks.last().map_or(0, |mark| mark.end) < end {
+            self.marks.push(Mark { end, kind });
+        }
+    }
+
+    /// The events and action ends in the order they were logged.
+    pub fn records(&self) -> impl Iterator<Item = Record> + '_ {
+        let mut marks = self.marks.iter().peekable();
+        self.events
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, &event)| {
+                let end = marks
+                    .next_if(|mark| mark.end == index + 1)
+                    .map(|mark| Record::ActionEnd(mark.kind));
+                std::iter::once(Record::Event(event)).chain(end)
+            })
+    }
+
+    /// The events of the latest edit that no later rewind has undone, in the order they
+    /// happened. Each rewind cancels the closest edit before it, like matching brackets, so
+    /// rewinding again steps back through older edits instead of redoing the last one.
+    pub fn latest_live_edit(&self) -> Option<&[Event]> {
+        let mut undone = 0usize;
+        for (index, mark) in self.marks.iter().enumerate().rev() {
+            match mark.kind {
+                ActionKind::Rewind => undone += 1,
+                ActionKind::Edit if undone > 0 => undone -= 1,
+                ActionKind::Edit => {
+                    let start = index
+                        .checked_sub(1)
+                        .map_or(0, |before| self.marks[before].end);
+                    return Some(&self.events[start..mark.end]);
+                }
+            }
+        }
+        None
     }
 }
 
