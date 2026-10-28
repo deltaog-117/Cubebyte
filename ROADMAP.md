@@ -30,14 +30,15 @@ Items are organized by priority, not by timeline.
 - ✅ Deterministic player physics: gravity, jumping and swept box collision stepped on the simulation tick, with the view blended between ticks; `F` toggles the old free flight
 - ✅ Combat rules: a `Damage` type, health that can reach zero, death and respawn (full meters, empty pack), and a sword item that sets how hard the player hits
 - ✅ Hostile mobs: a zombie that chases and hits on the tick, drawn as a box and hit back with the held weapon; it shares one walking-body module with the player, entity hits go through a ray-versus-box test, and a sword recipe exists
+- ✅ Whole-number movement intent: walking direction is two integers from -127 to 127, bodies move by exactly those numbers, and the player's and each zombie's intent is recorded per tick in an in-memory `IntentLog`; replaying a track reproduces the run bit for bit
 
 ---
 
 ## 🔥 High Priority (Critical)
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
-- **Deterministic simulation** – The tick loop and player physics are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match. Record movement intent per tick as whole numbers before replays are saved.
-- **Mob movement intent in replays** – The zombie has no random choices yet, but the player's and mobs' per-tick intent must be recorded as whole numbers before replays are saved.
+- **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
+- **Saving intent tracks** – The intent log lives in memory only. Give it a versioned file format like `world.mcel`, and bound its growth (about 2 MB an hour with one zombie), before replays are saved.
 
 ---
 

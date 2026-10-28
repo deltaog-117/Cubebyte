@@ -32,6 +32,7 @@ mod tests {
     use super::*;
     use crate::shared::body::SKIN;
     use crate::shared::event::Event;
+    use crate::shared::intent::Walk;
     use crate::shared::voxel::BlockId;
     use glam::{Vec2, Vec3};
 
@@ -70,7 +71,7 @@ mod tests {
 
     fn walk_towards(x: f32, z: f32) -> Intent {
         Intent {
-            walk: Vec2::new(x, z),
+            walk: Walk::from_direction(Vec2::new(x, z)),
             jump: false,
         }
     }
@@ -110,7 +111,7 @@ mod tests {
     fn a_jump_needs_the_ground_and_clears_one_block() {
         let world = floor();
         let jump = Intent {
-            walk: Vec2::ZERO,
+            walk: Walk::STILL,
             jump: true,
         };
 
@@ -142,7 +143,7 @@ mod tests {
         let mut player = player_at(0.5, 1.0, 0.5);
         run(&mut player, Intent::default(), &world, 5);
         let jump = Intent {
-            walk: Vec2::ZERO,
+            walk: Walk::STILL,
             jump: true,
         };
         for _ in 0..30 {

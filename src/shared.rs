@@ -3,6 +3,7 @@
 pub mod body;
 pub mod clock;
 pub mod event;
+pub mod intent;
 pub mod math;
 pub mod rng;
 pub mod voxel;

@@ -36,8 +36,10 @@ use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
-use crate::shared::clock::{ClockError, FixedClock};
+use crate::shared::clock::{ClockError, FixedClock, Tick};
+use crate::shared::intent::Walk;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
+use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::model::Simulation;
 use crate::survival::model::Stats;
 use crate::survival::service::eat;
@@ -146,6 +148,12 @@ struct Running {
     zombie: Option<Zombie>,
     /// Steps left before the next zombie appears.
     zombie_timer: u32,
+    /// Who the current zombie is in the intent log.
+    zombie_actor: ActorId,
+    /// The id the next zombie will get.
+    next_actor: ActorId,
+    /// What the player and each zombie asked for on every step, in memory only.
+    intents: IntentLog,
     /// The recipe the craft key makes.
     recipe: RecipeId,
     terrain: TerrainGenerator,
@@ -205,6 +213,9 @@ impl App {
             stats: Stats::default(),
             zombie: None,
             zombie_timer: ZOMBIE_DELAY_STEPS,
+            zombie_actor: ActorId::PLAYER.next(),
+            next_actor: ActorId::PLAYER.next(),
+            intents: IntentLog::default(),
             recipe: RecipeId::FIRST,
             terrain,
             streamer: Streamer::new(
@@ -314,11 +325,13 @@ impl App {
         running.last_frame = now;
         // Later systems read the tick and draw from streams; survival needs neither.
         let steps = running.simulation.advance(elapsed);
+        // The clock has already moved past this frame's steps, so the first one is behind it.
+        let first = running.simulation.tick().0.saturating_sub(u64::from(steps));
         if steps > 0 {
             let shown = (running.stats.health(), running.stats.hunger());
-            for _ in 0..steps {
+            for step_index in 0..u64::from(steps) {
                 running.stats.step();
-                running.step_zombie();
+                running.step_zombie(Tick(first + step_index));
             }
             if running.stats.is_dead() {
                 running.die();
@@ -333,10 +346,11 @@ impl App {
             let direction =
                 running.camera.right() * walk.x + running.camera.level_forward() * walk.y;
             let intent = Intent {
-                walk: Vec2::new(direction.x, direction.z),
+                walk: Walk::from_direction(Vec2::new(direction.x, direction.z)),
                 jump: self.keys.up,
             };
-            for _ in 0..steps {
+            for step_index in 0..u64::from(steps) {
+                running.record(ActorId::PLAYER, Tick(first + step_index), intent);
                 step(
                     &mut running.player,
                     intent,
@@ -418,7 +432,7 @@ impl Running {
     }
 
     /// Moves the zombie one step and lets it hit the player, or counts down to the next one.
-    fn step_zombie(&mut self) {
+    fn step_zombie(&mut self, tick: Tick) {
         let target = self.player.position();
         let Some(zombie) = self.zombie.as_mut() else {
             self.zombie_timer = self.zombie_timer.saturating_sub(1);
@@ -430,10 +444,22 @@ impl Running {
         if mobs::despawns(zombie, target) {
             self.zombie = None;
             self.zombie_timer = ZOMBIE_DELAY_STEPS;
-        } else if let Some(damage) =
-            mobs::step(zombie, target, &self.world, TICK_STEP.as_secs_f32())
-        {
-            hit(&mut self.stats, damage);
+        } else {
+            let intent = mobs::decide(zombie, target, &self.world);
+            if let Some(damage) =
+                mobs::step_with(zombie, intent, target, &self.world, TICK_STEP.as_secs_f32())
+            {
+                hit(&mut self.stats, damage);
+            }
+            self.record(self.zombie_actor, tick, intent);
+        }
+    }
+
+    /// Keeps `intent` in the log. A refusal means a step was recorded twice, which loses
+    /// nothing of the run itself, so it is reported and play goes on.
+    fn record(&mut self, actor: ActorId, tick: Tick, intent: Intent) {
+        if let Err(error) = self.intents.record(actor, tick, intent) {
+            tracing::warn!(%error, "cannot record an intent");
         }
     }
 
@@ -443,7 +469,11 @@ impl Running {
             .stream(ZOMBIE_STREAM ^ self.simulation.tick().0);
         let at = mobs::spawn_point(&mut rng, target, |x, z| self.terrain.height_at(x, z));
         match Zombie::try_new(at) {
-            Ok(zombie) => self.zombie = Some(zombie),
+            Ok(zombie) => {
+                self.zombie = Some(zombie);
+                self.zombie_actor = self.next_actor;
+                self.next_actor = self.next_actor.next();
+            }
             Err(error) => tracing::warn!(%error, "cannot place a zombie"),
         }
     }

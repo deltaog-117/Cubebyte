@@ -6,8 +6,10 @@
 //! Only `+ - * /` and comparisons touch positions, with no trigonometry, and nothing reads
 //! wall-clock time, so the same start and the same [`Intent`]s always give the same result.
 
-use glam::{Vec2, Vec3};
+use glam::Vec3;
 use thiserror::Error;
+
+pub use crate::shared::intent::Intent;
 
 /// Blocks per second on level ground.
 pub const WALK_SPEED: f32 = 4.3;
@@ -38,15 +40,6 @@ pub enum BodyError {
     NonFinite,
     #[error("a body must be wider and taller than zero, and finite")]
     BadSize,
-}
-
-/// What a body asks for in one tick.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Intent {
-    /// Wanted horizontal direction in world space as x and z. A length above 1 is cut to 1,
-    /// and a non-finite value counts as standing still.
-    pub walk: Vec2,
-    pub jump: bool,
 }
 
 /// A box standing at `position` (the middle of its feet) with a velocity.
@@ -134,11 +127,8 @@ pub fn step(body: &mut Body, intent: Intent, solid: &impl Fn([i32; 3]) -> bool, 
         return;
     }
 
-    let walk = if intent.walk.is_finite() {
-        intent.walk.clamp_length_max(1.0)
-    } else {
-        Vec2::ZERO
-    };
+    // A diagonal of whole axes can come out a hair above 1, and must not be faster.
+    let walk = intent.walk.direction().clamp_length_max(1.0);
     let mut velocity = body.velocity;
     velocity.x = walk.x * WALK_SPEED;
     velocity.z = walk.y * WALK_SPEED;
@@ -214,6 +204,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::shared::intent::{AXIS_MAX, Walk};
 
     const DT: f32 = 0.05;
 
@@ -258,7 +249,7 @@ mod tests {
 
         let mut tall = body(0.2, 2.4, 0.5, 1.0);
         let east = Intent {
-            walk: Vec2::X,
+            walk: Walk::new(AXIS_MAX, 0),
             jump: false,
         };
         for _ in 0..60 {
@@ -276,7 +267,7 @@ mod tests {
         step(
             &mut walker,
             Intent {
-                walk: Vec2::X,
+                walk: Walk::new(AXIS_MAX, 0),
                 jump: false,
             },
             &solid,
@@ -293,23 +284,23 @@ mod tests {
         fn a_body_of_any_size_never_ends_a_step_inside_a_block(
             half_width in 0.1f32..0.6,
             height in 0.5f32..2.5,
-            moves in prop::collection::vec((-1.0f32..1.0, -1.0f32..1.0, any::<bool>()), 1..80),
+            moves in prop::collection::vec((-AXIS_MAX..=AXIS_MAX, -AXIS_MAX..=AXIS_MAX, any::<bool>()), 1..80),
         ) {
             let mut walker = body(half_width, height, 0.5, 1.0);
             for (x, z, jump) in moves {
-                step(&mut walker, Intent { walk: Vec2::new(x, z), jump }, &solid, DT);
+                step(&mut walker, Intent { walk: Walk::new(x, z), jump }, &solid, DT);
                 prop_assert!(!collides(&walker, &solid));
             }
         }
 
         #[test]
         fn the_same_intents_give_the_same_body(
-            moves in prop::collection::vec((-1.0f32..1.0, -1.0f32..1.0, any::<bool>()), 0..60),
+            moves in prop::collection::vec((-AXIS_MAX..=AXIS_MAX, -AXIS_MAX..=AXIS_MAX, any::<bool>()), 0..60),
         ) {
             let run = || {
                 let mut walker = body(0.3, 1.8, 0.5, 1.0);
                 for &(x, z, jump) in &moves {
-                    step(&mut walker, Intent { walk: Vec2::new(x, z), jump }, &solid, DT);
+                    step(&mut walker, Intent { walk: Walk::new(x, z), jump }, &solid, DT);
                 }
                 walker
             };

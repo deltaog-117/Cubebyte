@@ -1,8 +1,11 @@
-use glam::{Vec2, Vec3};
+use glam::Vec3;
 use minecraft_clone::player::model::Player;
 use minecraft_clone::player::service::{Intent, collides, step};
+use minecraft_clone::shared::clock::Tick;
 use minecraft_clone::shared::event::Event;
+use minecraft_clone::shared::intent::{AXIS_MAX, Walk};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
+use minecraft_clone::simulation::intent_log::{ActorId, IntentLog};
 use minecraft_clone::world::model::World;
 use proptest::prelude::*;
 
@@ -27,9 +30,11 @@ fn terrain(blocks: &[(i32, i32, i32)]) -> Result<World, TestCaseError> {
 
 fn intents() -> impl Strategy<Value = Vec<Intent>> {
     prop::collection::vec(
-        ((-1.5f32..1.5, -1.5f32..1.5), any::<bool>()).prop_map(|((x, z), jump)| Intent {
-            walk: Vec2::new(x, z),
-            jump,
+        ((-AXIS_MAX..=AXIS_MAX, -AXIS_MAX..=AXIS_MAX), any::<bool>()).prop_map(|((x, z), jump)| {
+            Intent {
+                walk: Walk::new(x, z),
+                jump,
+            }
         }),
         0..200,
     )
@@ -72,5 +77,26 @@ proptest! {
             step(&mut second, intent, &world, DT);
         }
         prop_assert_eq!(first, second);
+    }
+
+    #[test]
+    fn replaying_the_recorded_intents_reproduces_the_run_exactly(
+        blocks in blocks(),
+        intents in intents(),
+        from in (-4.0f32..4.0, 8.0f32..80.0, -4.0f32..4.0),
+    ) {
+        let world = terrain(&blocks)?;
+        let mut log = IntentLog::default();
+        let mut live = start(from.0, from.1, from.2)?;
+        for (tick, intent) in (1u64..).zip(intents.iter().copied()) {
+            prop_assert_eq!(log.record(ActorId::PLAYER, Tick(tick), intent), Ok(()));
+            step(&mut live, intent, &world, DT);
+        }
+
+        let mut replayed = start(from.0, from.1, from.2)?;
+        for entry in log.track(ActorId::PLAYER) {
+            step(&mut replayed, entry.intent, &world, DT);
+        }
+        prop_assert_eq!(live, replayed);
     }
 }

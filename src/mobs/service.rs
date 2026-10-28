@@ -13,6 +13,7 @@ use crate::combat::model::Damage;
 use crate::combat::service::Outcome;
 use crate::mobs::model::{HALF_WIDTH, HEIGHT, Zombie};
 use crate::shared::body::{self, Intent};
+use crate::shared::intent::Walk;
 use crate::shared::math::ray_box;
 use crate::shared::rng::Rng;
 use crate::shared::voxel::WorldPos;
@@ -48,30 +49,67 @@ fn hit_damage() -> Damage {
     Damage::try_new(HIT_POINTS).unwrap_or(Damage::FIST)
 }
 
-/// Moves `zombie` through one tick of `dt` seconds towards `target`, the player's feet.
-///
-/// Returns the damage when the zombie lands a hit this tick. It walks straight at the player,
-/// jumps when a block stands in its way, and hits once the player is within [`REACH`] with
-/// [`HIT_COOLDOWN`] steps between hits.
-pub fn step(zombie: &mut Zombie, target: Vec3, world: &World, dt: f32) -> Option<Damage> {
-    zombie.cooldown = zombie.cooldown.saturating_sub(1);
+/// What the zombie sees of the player this tick.
+struct Sight {
+    offset: Vec2,
+    /// Within [`SIGHT`], so the zombie notices the player.
+    near: bool,
+    /// Within [`REACH`] and level enough to hit.
+    close: bool,
+}
 
+fn look(zombie: &Zombie, target: Vec3) -> Sight {
     let offset = Vec2::new(
         target.x - zombie.position().x,
         target.z - zombie.position().z,
     );
     let near = offset.is_finite() && offset.length() <= SIGHT;
     let close = near && offset.length() <= REACH && (target.y - zombie.position().y).abs() < HEIGHT;
+    Sight {
+        offset,
+        near,
+        close,
+    }
+}
 
-    let direction = if near && !close {
-        offset.normalize_or_zero()
+/// What the zombie wants to do this tick, given `target`, the player's feet.
+///
+/// It walks straight at the player, and jumps when a block stands in its way. The result is
+/// whole numbers, so it can be recorded and fed back through [`step_with`].
+pub fn decide(zombie: &Zombie, target: Vec3, world: &World) -> Intent {
+    let sight = look(zombie, target);
+    let direction = if sight.near && !sight.close {
+        sight.offset.normalize_or_zero()
     } else {
         Vec2::ZERO
     };
-    let intent = Intent {
-        walk: direction * WALK_FRACTION,
+    Intent {
+        walk: Walk::from_direction(direction * WALK_FRACTION),
         jump: blocked_ahead(zombie, direction, world),
-    };
+    }
+}
+
+/// Moves `zombie` through one tick of `dt` seconds towards `target`, the player's feet.
+///
+/// Returns the damage when the zombie lands a hit this tick. It follows [`decide`], and hits
+/// once the player is within [`REACH`] with [`HIT_COOLDOWN`] steps between hits.
+pub fn step(zombie: &mut Zombie, target: Vec3, world: &World, dt: f32) -> Option<Damage> {
+    let intent = decide(zombie, target, world);
+    step_with(zombie, intent, target, world, dt)
+}
+
+/// Like [`step`], but moves by the given `intent` instead of deciding one, which is how a
+/// recorded run is replayed. `target` still decides whether the zombie hits.
+pub fn step_with(
+    zombie: &mut Zombie,
+    intent: Intent,
+    target: Vec3,
+    world: &World,
+    dt: f32,
+) -> Option<Damage> {
+    zombie.cooldown = zombie.cooldown.saturating_sub(1);
+    // Judged from where the zombie stood before it moved, as a hit is swung before the step.
+    let close = look(zombie, target).close;
     body::step(&mut zombie.body, intent, &|cell| solid(world, cell), dt);
 
     if close && zombie.cooldown == 0 {
@@ -216,6 +254,29 @@ mod tests {
             walked < 4.3,
             "a second of player walking covers 4.3, not {walked}"
         );
+    }
+
+    #[test]
+    fn replaying_the_decided_intents_gives_the_same_zombie_and_the_same_hits() {
+        let world = floor();
+        let target = Vec3::new(6.5, 1.0, 3.5);
+        let mut live = zombie_at(0.5, 0.5);
+        let mut decided = Vec::new();
+        let mut live_hits = Vec::new();
+        for _ in 0..80 {
+            let intent = decide(&live, target, &world);
+            decided.push(intent);
+            live_hits.push(step_with(&mut live, intent, target, &world, DT));
+        }
+
+        let mut replayed = zombie_at(0.5, 0.5);
+        let replayed_hits: Vec<_> = decided
+            .into_iter()
+            .map(|intent| step_with(&mut replayed, intent, target, &world, DT))
+            .collect();
+        assert_eq!(live, replayed);
+        assert_eq!(live_hits, replayed_hits);
+        assert!(live_hits.iter().any(Option::is_some), "it reached and hit");
     }
 
     #[test]

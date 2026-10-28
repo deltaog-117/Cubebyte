@@ -88,8 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rendering::vertex::box_mesh` and `Renderer::set_entities`: the zombie is drawn as a green box
 - A sword recipe (6 stone and 2 dirt), so the sword can now be crafted
 - Tests: shared-body properties for bodies of any size, zombie chase, hit, climb, strike, aim and spawn tests, and an integration test of a zombie killing the player and a crafted sword killing a zombie
+- `shared::intent`: `Walk` (two axes from -127 to 127, private fields so no other value exists) and `Intent`, with `Walk::from_direction` rounding a float direction and treating a non-finite one as standing still
+- `simulation::intent_log`: `ActorId` and an in-memory, append-only `IntentLog` with one track per actor and strictly rising ticks; `app` records the player's and each zombie's intent on every step
+- `mobs::service::decide` and `step_with`, so a zombie's intent can be recorded and replayed; `step` is now `decide` followed by `step_with`
+- Property tests that replaying a recorded player track, and a zombie's decided intents, reproduces the run exactly
 
 ### Changed
+- `shared::body::Intent` moved to `shared::intent` (still re-exported from `shared::body` and `player::service`) and its `walk` is now a `Walk` of whole numbers instead of a `Vec2`. Direction is rounded to about 0.45 degrees and speed to under 0.4%; a player step still costs about 180 ns
 - `player::model::Player` wraps a `shared::body::Body`; `player::service::step`, `collides`, `Intent` and the speed constants keep their paths and behaviour. A step still costs about 181 ns
 - `app` spawns a zombie 12 to 20 blocks away ten seconds after the start, after each kill and after each death; a left click on the zombie hits it instead of breaking the block behind it. Free flight does not stop it
 - `app` starts the player walking on the terrain and moves it on the simulation tick; the camera follows its eyes and Space jumps. Free flight remains on `F`

@@ -28,6 +28,7 @@
 | 2026-10-26 | Player physics | `f32` swept box on the tick, stopping a skin short of blocks; player only | ✅ Confirmed |
 | 2026-10-27 | Combat rules | Damage, death and respawn first, hostile mobs in a separate iteration | ✅ Confirmed |
 | 2026-10-27 | Hostile mobs | One zombie on a shared walking body that takes its solid test as a closure | ✅ Confirmed |
+| 2026-10-28 | Movement intent | Bodies move by whole-number intent; per-actor in-memory log; no saving yet | ✅ Confirmed |
 
 ---
 
@@ -665,3 +666,40 @@ The zombie needs a body that falls, walks and stops at blocks, as the player's d
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-27 | Initial entry | deltaog-117 |
+
+---
+
+### Movement Intent
+
+**Date:** 2026-10-28
+**Status:** Confirmed
+
+#### Context / Background
+Replays need each actor's wanted movement per tick stored exactly. The player's was two `f32` values built from the camera's `sin` and `cos`, and the zombie's came from `normalize`; neither is guaranteed to be the same bits on another machine, so a saved replay could drift.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Shadow log of rounded floats | Smallest change, physics untouched | The log is not what ran, so replay is not exact | Small |
+| B: Physics consumes whole numbers | Exact replay, one type for the player and mobs | Shared `Intent` changes; direction and speed shift slightly | Medium |
+| C: Record keys and an integer view angle | Replay can also drive the camera | Needs an integer sine table and a separate form for mobs | Hard |
+
+#### Decision & Rationale
+**Chosen Option:** B. Only B is both exact and shared by the player and the zombie. C's extra reach (replaying the camera) is not needed yet and can be added on top of B later. Saving was left out on purpose: a file format is hard to undo and nothing reads it until replays exist.
+
+**Trade-offs accepted:** walking direction is rounded to 127 steps per axis, about 0.45 degrees, and the zombie's half-speed walk is 64/127 of full speed, not exactly half. A player step costs the same (180.5 ns, no change beyond noise).
+
+#### Implementation Notes
+- `Walk` has private fields and `-128` is raised to `-127`, so left and right are symmetric and no out-of-range value exists. `from_direction` cuts length to 1 before rounding, and a non-finite direction stands still.
+- A diagonal of whole axes such as `(90, 90)` is a hair above length 1, so the body still cuts it to 1 and a diagonal is never faster.
+- The log keeps one track per actor, not one global list. Within a frame the zombie is stepped for all steps and then the player, so ticks are only ordered inside a track; recording refuses a tick that is not after the actor's last one.
+- The zombie is split into `decide` (intent from what it sees) and `step_with` (move by a given intent and swing). `step` is the two in a row, so existing callers are unchanged. The hit check still uses where the zombie stood before it moved.
+- Each new zombie gets a new `ActorId`, so a track follows one body. The log grows by about 2 MB an hour with one zombie, which is why saving also needs a bound.
+- The window was not run by the assistant; replay exactness is covered by property tests for the player and a unit test for the zombie.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-28 | Initial entry | deltaog-117 |

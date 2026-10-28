@@ -6,6 +6,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Vec2, Vec3};
 use minecraft_clone::player::model::Player;
 use minecraft_clone::player::service::{Intent, step};
+use minecraft_clone::shared::intent::Walk;
 use minecraft_clone::shared::voxel::ChunkPos;
 use minecraft_clone::world::generation::TerrainGenerator;
 use minecraft_clone::world::model::World;
@@ -29,7 +30,7 @@ fn walking_over_terrain(c: &mut Criterion) {
         return;
     };
     let intent = Intent {
-        walk: Vec2::new(0.6, 0.8),
+        walk: Walk::from_direction(Vec2::new(0.6, 0.8)),
         jump: false,
     };
     c.bench_function("player_step_walking", |b| {
