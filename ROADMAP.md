@@ -48,7 +48,20 @@ Items are organized by priority, not by timeline.
 - **Time rewind** – Scrub backward through the event log to undo builds. Needs periodic snapshots with events in between to keep the log bounded.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
-- **Code as gameplay (scripting)** – Embed a sandboxed language with an instruction budget per tick, so a bad script cannot freeze the game.
+- **World interface for scripts** – The fixed list of things a script may read (look, find, query) and do (move the player, spawn mobs, grant items, add or remove blocks). Built before the language, so the language can be swapped later. Every action must:
+  - produce a logged event, so rewind and replay stay exact (mobs, player position and inventory are not in the event log yet and need events);
+  - pass the same rules as a player action;
+  - carry a cost (fuel or energy), a range, a cooldown and a cap on effects per tick, so "craft from nowhere" cannot trivialize the game;
+  - be a permission a script is granted, because shared scripts are untrusted code.
+- **Code as gameplay (scripting)** – A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
+  - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
+  - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
+  - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
+  - Name still open; "Nibble" is the leading candidate.
+- **Quick-hacks** – Watch Dogs-style actions. Aim at a thing or a place and pick a hack from a menu (unlock, distract, go to this coordinate). Each hack is a ready-made script a player can open, read and edit, so players learn by using code first and writing it later. Two ways to trigger one:
+  - a specific command aimed at a target, which the command line reads as, for example, "go" to that coordinate;
+  - the command-line menu, fetching what the player asks for.
+- **Command line and command dictionary** – An in-game command line that runs commands and quick-hacks, with a dictionary listing every command. Commands use a vim-like grammar, a verb plus a noun, that can grow beyond verbs and nouns (modifiers, counts, targets) where needed, so commands are easy to remember and combine.
 - **Programmable mobs** – Craft a "brain" item and script its behavior: follow, guard, farm, haul. The best first use of scripting.
 - **Logic and automation** – Wires, sensors and triggers that scripts can read and write.
 
@@ -74,12 +87,13 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Time rewind** – Every edit is already a logged event; add periodic snapshots to keep the log bounded.
+1. **World interface for scripts** – Start with the reads and actions, their events, costs and limits, behind a trivial interpreter; the language comes after.
+2. **Time rewind** – Every edit is already a logged event; add periodic snapshots to keep the log bounded.
 
 ---
 
 ## Notes
 
 - The two headline features pair well. If every edit is a logged event, rewind comes almost free, and scripted blocks can replay deterministically.
-- For scripting, embed a sandboxed language (Lua or Rhai in Rust, or a restricted JS runtime in the browser).
+- For scripting, build our own beginner-friendly language on top of the world interface; embedding Rhai or Lua is the fallback. The power and the risk live in the world interface, not in the syntax.
 - Keep combat and resource management simple until rewind and scripting work.
