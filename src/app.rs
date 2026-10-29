@@ -23,6 +23,7 @@ use crate::crafting::service::craft_events;
 use crate::events::apply::{Stage, StageError, apply_all};
 use crate::events::log::{ActionKind, EventLog};
 use crate::events::persist::{self, LoadError};
+use crate::events::redo::RedoStack;
 use crate::events::replay::replay_chunk;
 use crate::events::rewind::{log_action, rewind_events};
 use crate::inventory::model::Inventory;
@@ -146,6 +147,8 @@ struct Running {
     simulation: Simulation,
     world: World,
     log: EventLog,
+    /// Edits that `Z` undid and nothing has replaced since, for `Y` to bring back.
+    redo: RedoStack,
     inventory: Inventory,
     /// Whether the inventory differs from what is on disk, so exit knows to save it.
     inventory_dirty: bool,
@@ -210,6 +213,7 @@ impl App {
             simulation: Simulation::new(SEED, clock),
             world: World::default(),
             log,
+            redo: RedoStack::default(),
             inventory,
             inventory_dirty: false,
             stats: Stats::default(),
@@ -260,6 +264,7 @@ impl App {
             KeyCode::KeyC if down => self.with_running(Running::craft_selected),
             KeyCode::KeyE if down => self.with_running(Running::eat_food),
             KeyCode::KeyZ if down => self.with_running(Running::rewind),
+            KeyCode::KeyY if down => self.with_running(Running::redo),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -555,7 +560,10 @@ impl Running {
     /// Applies `events` to the world, player and inventory together, all or nothing, and logs
     /// them as one edit only if they all applied.
     fn commit(&mut self, events: &[Event]) -> Result<(), StageError> {
-        self.commit_as(events, ActionKind::Edit)
+        self.commit_as(events, ActionKind::Edit)?;
+        // A new edit starts a new future, so what was rewound can no longer come back.
+        self.redo.clear();
+        Ok(())
     }
 
     /// [`Self::commit`] for an action of any `kind`.
@@ -580,7 +588,28 @@ impl Running {
             tracing::warn!(%error, "rewind rejected");
             return;
         }
-        for event in &events {
+        self.redo.record(&events);
+        self.finish_history_step(&events);
+    }
+
+    /// Brings back the edit `Z` undid last. It is logged as a new edit, so a later `Z` can
+    /// undo it again. If the game has moved on in a way no event records, the edit no longer
+    /// fits: it is refused and logged, and the older ones are dropped with it.
+    fn redo(&mut self) {
+        let Some(events) = self.redo.take() else {
+            return;
+        };
+        if let Err(error) = self.commit_as(&events, ActionKind::Edit) {
+            tracing::warn!(%error, "redo rejected");
+            self.redo.clear();
+            return;
+        }
+        self.finish_history_step(&events);
+    }
+
+    /// Redraws and flags for saving after a rewind or redo applied `events`.
+    fn finish_history_step(&mut self, events: &[Event]) {
+        for event in events {
             if let Event::BlockSet { pos, .. } = *event {
                 self.remesh_around(pos);
             }
@@ -641,7 +670,7 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind)",
+                " | recipe {} (R next, C craft, E eat, Z rewind, Y redo)",
                 recipe.name
             ));
         }

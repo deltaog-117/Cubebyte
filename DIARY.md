@@ -30,6 +30,7 @@
 | 2026-10-27 | Hostile mobs | One zombie on a shared walking body that takes its solid test as a closure | ✅ Confirmed |
 | 2026-10-28 | Movement intent | Bodies move by whole-number intent; per-actor in-memory log; no saving yet | ✅ Confirmed |
 | 2026-10-28 | World interface for scripts | Every script effect is an event in the one log; checked commands run behind permissions, range and a per-tick limit | ✅ Confirmed |
+| 2026-10-29 | Bounded log and redo | Fold old actions into a per-chunk base of final blocks, keep 256 rewindable; redo from an in-memory stack | ✅ Confirmed |
 
 ---
 
@@ -846,3 +847,39 @@ Every change is a logged event that remembers what it replaced, so undoing was s
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-28 | Initial entry | deltaog-117 |
+
+### Bounded Log and Redo
+
+**Date:** 2026-10-29
+**Status:** Confirmed
+
+#### Context / Background
+Every rewind added events to an append-only log that is kept in memory and saved whole, so the log only grew. The first rewind slice also had no way forward again. Snapshots were the fix the earlier entries pointed to.
+
+#### Options Considered
+
+| Option | Advantages | Disadvantages | Difficulty |
+|---|---|---|---|
+| A: Fold old history into a per-chunk base, drop the old events | Bounds memory and file, log stays append-only | Old history lost, rewind depth capped | Medium |
+| B: Remove the rewound action instead of logging an undo | Smallest change, no format change | Does not bound growth, breaks append-only, crash risk | Small |
+| C: Fold like A, move the old events to an archive file | Bounded memory, history kept on disk | Two files to keep consistent, disk unbounded | High |
+
+#### Decision & Rationale
+**Chosen Option:** A. It is the only simple option that bounds the log and keeps the append-only rule. It fits chunk streaming: a chunk is rebuilt as terrain, then its base, then its events. Redo has one credible design, so it had no options: rewound edits stay in memory and are logged again as a new edit, which the existing bracket matching already understands.
+
+**Trade-offs accepted:** history older than the newest 256 actions is gone for good, so no timelapse or fork can start there; moving to C later means archiving instead of discarding. The base holds one entry per edited position, so it grows with the number of distinct blocks changed, not with the number of actions. The redo stack is lost on restart.
+
+#### Implementation Notes
+- `EventLog::compact(keep)` folds all but the newest `keep` actions at an action boundary: each `BlockSet` sets its position in the base to its `new` block, and other events are dropped, since the inventory is saved as its own snapshot. The per-chunk index is rebuilt after the fold.
+- `log_action` compacts to 256 once the log holds 512 actions, so the fold runs once per window and not on every action.
+- Rewind needs no change: a rewind in the kept part that cancels a folded edit finds nothing live and stops, which is the intended limit.
+- Redo: `RedoStack` stores each undone edit; `Y` applies the newest and logs it as an edit. A new edit clears the stack, and a refused redo (the state moved on, for example after a respawn) clears it too.
+- The saved log is version 4 with tag 6 for a base block; version 1 to 3 files still read.
+- Property tests: a compacted log keeps exactly the newest actions rewindable and rebuilds the world; a compacted log saved and reloaded chunk by chunk over generated terrain equals the live world; rewind and redo move through the history both ways and a replay of the whole log agrees.
+- The window was not run by the assistant, so the `Y` key and the remesh are untested by hand.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-29 | Initial entry | deltaog-117 |

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::shared::event::Event;
-use crate::shared::voxel::ChunkPos;
+use crate::shared::voxel::{BlockId, ChunkPos, WorldPos};
 
 /// What one logged action was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +28,8 @@ pub enum Record {
     ActionEnd(ActionKind),
 }
 
-/// Every event applied to the world, in order. Events are never removed or reordered.
+/// Every event applied to the world, in order. Events are never reordered, and only
+/// [`EventLog::compact`] removes any: it folds the oldest into a base of final blocks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventLog {
     events: Vec<Event>,
@@ -38,6 +39,9 @@ pub struct EventLog {
     // Indices into `events`, per chunk and in log order, so a chunk that streams back in
     // replays only its own edits.
     by_chunk: HashMap<ChunkPos, Vec<usize>>,
+    // The block every position ended up as in the history folded away by `compact`, per
+    // chunk. It sits under `events`: a chunk is rebuilt as terrain, then this, then its events.
+    base: HashMap<ChunkPos, HashMap<WorldPos, BlockId>>,
 }
 
 impl EventLog {
@@ -53,6 +57,63 @@ impl EventLog {
                 .push(self.events.len());
         }
         self.events.push(event);
+    }
+
+    /// Sets what `pos` is in the folded-away history.
+    pub fn set_base(&mut self, pos: WorldPos, block: BlockId) {
+        self.base
+            .entry(pos.split().0)
+            .or_default()
+            .insert(pos, block);
+    }
+
+    /// What the folded-away history left in `pos`, in no particular order.
+    pub fn chunk_base(&self, pos: ChunkPos) -> impl Iterator<Item = (WorldPos, BlockId)> + '_ {
+        self.base
+            .get(&pos)
+            .into_iter()
+            .flatten()
+            .map(|(&at, &block)| (at, block))
+    }
+
+    /// Every block of the folded-away history, in no particular order.
+    pub fn base_blocks(&self) -> impl Iterator<Item = (WorldPos, BlockId)> + '_ {
+        self.base
+            .values()
+            .flatten()
+            .map(|(&at, &block)| (at, block))
+    }
+
+    /// How many finished actions the log still holds, which is as far back as a rewind can
+    /// reach.
+    pub fn actions(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// Folds every action but the newest `keep` into the base, so the log stops growing
+    /// with play. Only the final block at each position is kept, which is all a chunk needs
+    /// to be rebuilt; the folded events, and rewinding past them, are gone. Does nothing when
+    /// there are `keep` actions or fewer.
+    pub fn compact(&mut self, keep: usize) {
+        let Some(folded) = self.marks.len().checked_sub(keep).filter(|&n| n > 0) else {
+            return;
+        };
+        let cut = self.marks[folded - 1].end;
+        for event in self.events.drain(..cut) {
+            if let Event::BlockSet { pos, new, .. } = event {
+                self.base.entry(pos.split().0).or_default().insert(pos, new);
+            }
+        }
+        self.marks.drain(..folded);
+        for mark in &mut self.marks {
+            mark.end -= cut;
+        }
+        self.by_chunk.clear();
+        for (index, event) in self.events.iter().enumerate() {
+            if let Some(chunk) = event.chunk() {
+                self.by_chunk.entry(chunk).or_default().push(index);
+            }
+        }
     }
 
     /// The events that changed `pos`, in the order they were logged.
@@ -170,6 +231,57 @@ mod tests {
             let expected = events.iter().filter(|event| event.chunk() == Some(chunk));
             prop_assert!(log.chunk_events(chunk).eq(expected));
         }
+    }
+
+    fn set(x: i32, old: u16, new: u16) -> Event {
+        Event::BlockSet {
+            pos: WorldPos { x, y: 0, z: 0 },
+            old: BlockId(old),
+            new: BlockId(new),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn compacting_keeps_exactly_the_newest_actions(
+            sizes in prop::collection::vec(1usize..4, 0..12),
+            keep in 0usize..14,
+        ) {
+            let mut log = EventLog::new();
+            for &size in &sizes {
+                for _ in 0..size {
+                    log.push(set(0, 0, 1));
+                }
+                log.end_action(ActionKind::Edit);
+            }
+            log.compact(keep);
+
+            let kept = sizes.len().min(keep);
+            prop_assert_eq!(log.actions(), kept);
+            prop_assert_eq!(log.len(), sizes[sizes.len() - kept..].iter().sum::<usize>());
+            let chunk = ChunkPos { x: 0, y: 0, z: 0 };
+            prop_assert_eq!(log.chunk_events(chunk).count(), log.len());
+        }
+    }
+
+    #[test]
+    fn compacting_folds_old_actions_into_the_final_block_of_each_position() {
+        let mut log = EventLog::new();
+        for (old, new) in [(0, 1), (1, 2), (2, 3)] {
+            log.push(set(5, old, new));
+            log.end_action(ActionKind::Edit);
+        }
+        let before = log.clone();
+
+        log.compact(3);
+        assert_eq!(log, before);
+
+        log.compact(1);
+        let chunk = ChunkPos { x: 0, y: 0, z: 0 };
+        let pos = WorldPos { x: 5, y: 0, z: 0 };
+        assert!(log.chunk_base(chunk).eq([(pos, BlockId(2))]));
+        assert!(log.chunk_events(chunk).eq([&set(5, 2, 3)]));
+        assert_eq!(log.latest_live_edit(), Some(&[set(5, 2, 3)][..]));
     }
 
     #[test]

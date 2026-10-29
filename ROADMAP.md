@@ -35,6 +35,7 @@ Items are organized by priority, not by timeline.
 - ✅ World interface for scripts, first slice: `Event` gains player jumps and per-slot inventory changes, one `events::apply` door sends every event to the world, player or inventory, and `scripting` runs commands (teleport, give item, set block) behind permissions, a range and a per-tick limit; every accepted command is logged and replays and undoes exactly (the window does not run scripts yet)
 - ✅ Gameplay under events: breaking with its yield, placing with its cost, crafting and eating now work out their block and slot changes as events, apply them all or nothing through the one `events::apply` door, and log them; a property test shows the event path matches the direct functions and undoes exactly
 - ✅ Time rewind, first slice: key `Z` steps back one whole action (a break with its yield, a placement, a craft, a meal); the undo is logged as new events, so the log stays append-only and a restart keeps the rewound world; the saved log gains action ends (version 3)
+- ✅ Time rewind, second slice: the log folds all but its newest 256 actions into a base of final blocks per chunk (compaction runs at 512), so it stops growing with play; key `Y` redoes the edit `Z` last undid, from an in-memory stack that any new edit clears; the saved log is version 4
 
 ---
 
@@ -48,9 +49,9 @@ Items are organized by priority, not by timeline.
 
 ## 🟡 Medium Priority (Important)
 
-- **Time rewind** – First slice done (see Completed): `Z` undoes one action at a time. Still to do:
-  - periodic snapshots with events in between, to keep the log bounded (every rewind adds events);
-  - a forward step (redo), which could keep the undone actions in memory;
+- **Time rewind** – First two slices done (see Completed): `Z` undoes one action at a time, `Y` brings it back, and the log keeps the last 256 actions rewindable. Still to do:
+  - keeping the folded-away history (an archive file) for a timelapse or timeline forks; today it is discarded;
+  - saving the redo stack, which is forgotten on restart;
   - undoing what is not an event yet: walking, hunger, health and respawn (a rewind refused after a respawn, because the pack no longer matches, is logged and skipped);
   - rewinding edits in chunks that are not loaded.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
@@ -96,7 +97,7 @@ Items are organized by priority, not by timeline.
 ## 🎯 Next Actions (Immediate)
 
 1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the meters (hunger, health) and respawn under events. The language comes after.
-2. **Time rewind, next slice** – Add periodic snapshots to keep the log bounded, then a forward step.
+2. **Time rewind, next slice** – Undo what is not an event yet (hunger, health, respawn), then rewind edits in unloaded chunks.
 
 ---
 

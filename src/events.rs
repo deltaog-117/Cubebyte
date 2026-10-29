@@ -4,5 +4,6 @@ pub mod apply;
 pub mod log;
 pub mod model;
 pub mod persist;
+pub mod redo;
 pub mod replay;
 pub mod rewind;

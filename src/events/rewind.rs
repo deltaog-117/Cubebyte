@@ -3,21 +3,37 @@
 //! A rewind never removes anything from the log. It works out the events that undo the
 //! latest edit that is still in effect; the caller applies them like any other action and
 //! logs them as a [`ActionKind::Rewind`], so replay and a restart land on the rewound game.
+//!
+//! The log keeps only the last [`HISTORY_WINDOW`] actions as history; older ones are folded
+//! away, so a rewind cannot reach past them.
 
 use crate::events::log::{ActionKind, EventLog};
 use crate::shared::event::Event;
 
+/// How many actions of history the log keeps rewindable. Compaction runs once the log holds
+/// twice this many, so it happens once per window of play and not on every action.
+pub const HISTORY_WINDOW: usize = 256;
+
+/// The events that undo `events`, newest change first. Inverting the result gives `events`
+/// back, which is how a rewound edit is replayed.
+pub fn inverse_run(events: &[Event]) -> Vec<Event> {
+    events.iter().rev().map(|event| event.inverse()).collect()
+}
+
 /// The events that undo the latest edit still in effect, newest change first, or `None` when
 /// nothing is left to undo.
 pub fn rewind_events(log: &EventLog) -> Option<Vec<Event>> {
-    let edit = log.latest_live_edit()?;
-    Some(edit.iter().rev().map(|event| event.inverse()).collect())
+    Some(inverse_run(log.latest_live_edit()?))
 }
 
-/// Logs `events` as one action of `kind`.
+/// Logs `events` as one action of `kind`, then folds the oldest history away once it has
+/// grown past twice [`HISTORY_WINDOW`].
 pub fn log_action(log: &mut EventLog, events: &[Event], kind: ActionKind) {
     events.iter().for_each(|&event| log.push(event));
     log.end_action(kind);
+    if log.actions() >= 2 * HISTORY_WINDOW {
+        log.compact(HISTORY_WINDOW);
+    }
 }
 
 #[cfg(test)]
@@ -25,7 +41,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::shared::voxel::{BlockId, WorldPos};
+    use crate::events::replay::replay_chunk;
+    use crate::shared::voxel::{BlockId, ChunkPos, WorldPos};
     use crate::world::model::World;
 
     /// One action: a few blocks in one chunk set to new values.
@@ -71,6 +88,38 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn compacting_keeps_the_newest_actions_rewindable_and_the_world_rebuildable(
+            actions in prop::collection::vec(action(), 1..12),
+            keep in 0usize..14,
+        ) {
+            let (mut world, mut log) = (World::default(), EventLog::new());
+            let mut after_each = vec![World::default()];
+            for step in &actions {
+                edit(&mut world, &mut log, step);
+                after_each.push(world.clone());
+            }
+            log.compact(keep);
+
+            // A restart sees the base and the kept events, and lands on the same world.
+            let chunk = ChunkPos { x: 0, y: 0, z: 0 };
+            let mut restored = World::default();
+            prop_assert_eq!(replay_chunk(&mut restored, &log, chunk), Ok(()));
+            prop_assert_eq!(&restored, &world);
+
+            let mut stepped = 0;
+            while rewind(&mut world, &mut log) {
+                stepped += 1;
+            }
+            prop_assert_eq!(stepped, keep.min(actions.len()));
+            prop_assert_eq!(&world, &after_each[actions.len() - stepped]);
+
+            // The rewinds are in the log too, so a restart still lands on the rewound world.
+            let mut restored = World::default();
+            prop_assert_eq!(replay_chunk(&mut restored, &log, chunk), Ok(()));
+            prop_assert_eq!(restored, world);
+        }
+
         #[test]
         fn rewinding_k_actions_restores_the_world_after_the_earlier_ones(
             actions in prop::collection::vec(action(), 1..8),

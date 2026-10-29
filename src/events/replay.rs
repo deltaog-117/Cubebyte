@@ -1,10 +1,12 @@
 //! Rebuilding world state from events.
 
 use crate::events::log::EventLog;
+use crate::shared::event::Event;
 use crate::shared::voxel::ChunkPos;
 use crate::world::model::{ApplyError, World};
 
-/// Re-applies the logged edits of one chunk, oldest first.
+/// Re-applies the logged edits of one chunk, oldest first: first the base, the final blocks of
+/// history that was folded away, then the events kept since.
 ///
 /// Call it right after the chunk's generated baseline is installed. Each event touches a
 /// single block, so replaying one chunk on its own gives the same blocks the live world
@@ -15,6 +17,11 @@ use crate::world::model::{ApplyError, World};
 /// Returns the first [`ApplyError`] if an event does not match the baseline, for example
 /// when the terrain came from a different seed. Events before it stay applied.
 pub fn replay_chunk(world: &mut World, log: &EventLog, pos: ChunkPos) -> Result<(), ApplyError> {
+    // Base positions are all different, so their order does not matter.
+    for (at, new) in log.chunk_base(pos) {
+        let old = world.block_at(at);
+        world.apply(&Event::BlockSet { pos: at, old, new })?;
+    }
     log.chunk_events(pos)
         .try_for_each(|event| world.apply(event))
 }

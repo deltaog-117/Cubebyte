@@ -106,6 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A property test that a random run of breaking, placing, crafting and eating through events reaches the same state as the direct functions and undoes exactly in reverse
 - Time rewind: key `Z` steps back the latest edit still in effect (a break with its yield, a placement, a craft, a meal). `events::rewind` builds the inverse events, the log records them as a rewind, and pressing `Z` again steps back through older edits; the log is never rewritten
 - `EventLog` records where each action ends (`end_action`, `ActionKind`, `Record`), with `records()` to walk events and ends together and `latest_live_edit()` to find what a rewind undoes
+- `EventLog::compact(keep)` folds all but the newest `keep` actions into a base (the final block at each position, per chunk), with `actions`, `set_base`, `chunk_base` and `base_blocks`; `log_action` runs it once the log holds twice `HISTORY_WINDOW` (256) actions, so the log no longer grows without bound. Rewinding stops at the base, and the folded events are gone
+- `events::redo::RedoStack` and key `Y`: redo brings back the edit `Z` last undid, logged as a new edit; any new edit clears the stack, a refused redo drops it, and a restart forgets it
+- `events::rewind::inverse_run`, the inverse of a run of events, shared by rewind and redo
+- Property tests that a compacted log keeps its newest actions rewindable and rebuilds the same world, that a compacted log survives a save chunk by chunk over generated terrain, that rewind and redo walk the history both ways, and that base blocks survive a save
 
 ### Changed
 - `app` sends breaking, placing, crafting and eating through `events::apply::apply_all` and logs the events, so the pack changes only through the one door and rewind can see these changes; the old direct functions remain. Hunger is still restored outside the events
@@ -128,3 +132,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::persist` writes version 2 and reads versions 1 and 2; records are no longer all the same length
 - `events::persist` writes version 3 (tags 4 and 5 mark the end of an edit and of a rewind) and reads versions 1 to 3; saves older than version 3 have no action ends, so their history cannot be rewound
 - `app::Running::commit` logs each applied list as one edit
+- `events::persist` writes version 4 (tag 6 holds a base block) and reads versions 1 to 4; `events::replay::replay_chunk` applies a chunk's base blocks before its events. Version 4 files cannot be read by older builds

@@ -4,16 +4,18 @@ use minecraft_clone::building::service::{break_block, place_block};
 use minecraft_clone::crafting::registry::RecipeId;
 use minecraft_clone::crafting::service::{craft, craft_events};
 use minecraft_clone::events::apply::{Stage, apply, apply_all};
-use minecraft_clone::events::log::EventLog;
+use minecraft_clone::events::log::{ActionKind, EventLog};
 use minecraft_clone::events::persist::{decode, encode};
+use minecraft_clone::events::redo::RedoStack;
 use minecraft_clone::events::replay::replay_chunk;
+use minecraft_clone::events::rewind::{inverse_run, log_action, rewind_events};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::inventory::service::{
     gather_block, gather_events, place_events, place_from_stock,
 };
 use minecraft_clone::player::model::Player;
 use minecraft_clone::shared::event::Event;
-use minecraft_clone::shared::voxel::ChunkPos;
+use minecraft_clone::shared::voxel::{BlockId, ChunkPos, WorldPos};
 use minecraft_clone::survival::model::Stats;
 use minecraft_clone::survival::service::{eat, eat_events};
 use minecraft_clone::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
@@ -157,4 +159,113 @@ proptest! {
         prop_assert_eq!(world, start);
         prop_assert_eq!(pack, Inventory::default());
     }
+}
+
+/// One action: a few blocks set to new values, each remembering what it replaced.
+fn action_events(world: &mut World, action: &[(i32, i32, i32, u16)]) -> Vec<Event> {
+    action
+        .iter()
+        .map(|&(x, y, z, new)| {
+            let pos = WorldPos { x, y, z };
+            let event = Event::BlockSet {
+                pos,
+                old: world.block_at(pos),
+                new: BlockId(new),
+            };
+            assert_eq!(world.apply(&event), Ok(()));
+            event
+        })
+        .collect()
+}
+
+fn action() -> impl Strategy<Value = Vec<(i32, i32, i32, u16)>> {
+    prop::collection::vec(
+        (-16i32..32, MIN_HEIGHT..=MAX_HEIGHT, -16i32..32, 0u16..4),
+        1..4,
+    )
+}
+
+proptest! {
+    // A long game that keeps folding its oldest history away still restarts into the same
+    // world, chunk by chunk, through a save.
+    #[test]
+    fn a_compacted_saved_log_rebuilds_the_edited_world(
+        seed in any::<u64>(),
+        actions in prop::collection::vec(action(), 0..30),
+        keep in 0usize..32,
+    ) {
+        let terrain = TerrainGenerator::new(seed);
+        let mut live = terrain_world(&terrain);
+        let mut log = EventLog::new();
+        for step in &actions {
+            let events = action_events(&mut live, step);
+            log_action(&mut log, &events, ActionKind::Edit);
+        }
+        log.compact(keep);
+
+        let saved = decode(&encode(seed, &log)).unwrap();
+        prop_assert_eq!(&saved.log, &log);
+        let mut restored = World::default();
+        for pos in chunk_range() {
+            prop_assert_eq!(restored.insert_generated(pos, terrain.generate_chunk(pos)), Ok(()));
+            prop_assert_eq!(replay_chunk(&mut restored, &saved.log, pos), Ok(()));
+        }
+        prop_assert_eq!(restored, live);
+    }
+
+    // Rewind and redo walk one line of history both ways: the world always matches the
+    // state after the same number of actions, and a restart from the log agrees.
+    #[test]
+    fn rewind_and_redo_walk_the_history_both_ways(
+        actions in prop::collection::vec(action(), 1..8),
+        moves in prop::collection::vec(any::<bool>(), 0..24),
+    ) {
+        let mut world = World::default();
+        let (mut log, mut redo) = (EventLog::new(), RedoStack::default());
+        let mut after_each = vec![World::default()];
+        for step in &actions {
+            let events = action_events(&mut world, step);
+            log_action(&mut log, &events, ActionKind::Edit);
+            after_each.push(world.clone());
+        }
+        let mut at = actions.len();
+
+        for rewinding in moves {
+            if rewinding {
+                if let Some(events) = rewind_events(&log) {
+                    for event in &events {
+                        prop_assert_eq!(world.apply(event), Ok(()));
+                    }
+                    log_action(&mut log, &events, ActionKind::Rewind);
+                    redo.record(&events);
+                    at -= 1;
+                } else {
+                    prop_assert_eq!(at, 0);
+                }
+            } else if let Some(events) = redo.take() {
+                for event in &events {
+                    prop_assert_eq!(world.apply(event), Ok(()));
+                }
+                log_action(&mut log, &events, ActionKind::Edit);
+                at += 1;
+            } else {
+                prop_assert_eq!(at, actions.len());
+            }
+            prop_assert_eq!(&world, &after_each[at]);
+        }
+
+        let mut replayed = World::default();
+        for event in log.iter() {
+            prop_assert_eq!(replayed.apply(event), Ok(()));
+        }
+        prop_assert_eq!(replayed, world);
+    }
+}
+
+#[test]
+fn inverting_a_run_twice_gives_the_run_back() {
+    let mut world = World::default();
+    let events = action_events(&mut world, &[(0, 0, 0, 1), (0, 0, 0, 2), (1, 0, 0, 3)]);
+
+    assert_eq!(inverse_run(&inverse_run(&events)), events);
 }

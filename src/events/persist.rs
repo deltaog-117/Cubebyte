@@ -7,6 +7,7 @@
 //! | magic | 4 | `MCEL` |
 //! | version | 2 | [`VERSION`] |
 //! | seed | 8 | seed of the terrain the events were made on |
+//! | base blocks | by tag | tag 6 records, written first |
 //! | records | by tag | a tag byte, then the fields below |
 //!
 //! | Tag | Event | Fields |
@@ -16,11 +17,15 @@
 //! | 3 | slot set | slot (1), old item (2), old count (1), new item (2), new count (1) |
 //! | 4 | edit ends | none: the events since the last end form one edit |
 //! | 5 | rewind ends | none: the events since the last end undo the latest live edit |
+//! | 6 | base block | x, y, z (4 each), block (2): what the folded-away history left there |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
 //! only tag 1 and reads unchanged under version 2. Tags 4 and 5 came with version 3; older
-//! files have no action ends, so their history cannot be rewound.
+//! files have no action ends, so their history cannot be rewound. Tag 6 came with version 4:
+//! the log folds its oldest actions into base blocks to stay bounded, and a chunk is rebuilt
+//! from its base blocks first, then its events. Base blocks may appear anywhere in the file,
+//! since they sit under every event whatever their place; the writer puts them first.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,7 +39,7 @@ use crate::shared::voxel::{BlockId, WorldPos};
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -48,6 +53,10 @@ const TAG_PLAYER_MOVED: u8 = 2;
 const TAG_SLOT_SET: u8 = 3;
 const TAG_EDIT_END: u8 = 4;
 const TAG_REWIND_END: u8 = 5;
+const TAG_BASE_BLOCK: u8 = 6;
+
+/// Bytes a base block takes in a file, tag included.
+const BASE_RECORD_LEN: usize = 1 + 3 * 4 + 2;
 
 /// Bytes `event` takes in a file, tag included.
 const fn record_len(event: &Event) -> usize {
@@ -87,11 +96,21 @@ pub enum LoadError {
 
 /// Serialises `log` in the layout described in the module docs.
 pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
-    let len = log.iter().map(record_len).sum::<usize>();
+    // Sorted, so the same log always gives the same bytes.
+    let mut base: Vec<_> = log.base_blocks().collect();
+    base.sort_by_key(|(pos, _)| (pos.x, pos.y, pos.z));
+    let len = log.iter().map(record_len).sum::<usize>() + base.len() * BASE_RECORD_LEN;
     let mut bytes = Vec::with_capacity(HEADER_LEN + len);
     bytes.extend_from_slice(&MAGIC);
     bytes.extend_from_slice(&VERSION.to_le_bytes());
     bytes.extend_from_slice(&seed.to_le_bytes());
+    for (pos, block) in base {
+        bytes.push(TAG_BASE_BLOCK);
+        bytes.extend_from_slice(&pos.x.to_le_bytes());
+        bytes.extend_from_slice(&pos.y.to_le_bytes());
+        bytes.extend_from_slice(&pos.z.to_le_bytes());
+        bytes.extend_from_slice(&block.0.to_le_bytes());
+    }
     for record in log.records() {
         let event = match record {
             Record::Event(event) => event,
@@ -182,6 +201,14 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 let new = held()?;
                 log.push(Event::SlotSet { slot, old, new });
             }
+            TAG_BASE_BLOCK if version >= 4 => log.set_base(
+                WorldPos {
+                    x: i32::from_le_bytes(reader.take()?),
+                    y: i32::from_le_bytes(reader.take()?),
+                    z: i32::from_le_bytes(reader.take()?),
+                },
+                BlockId(u16::from_le_bytes(reader.take()?)),
+            ),
             TAG_EDIT_END if version >= 3 => log.end_action(ActionKind::Edit),
             TAG_REWIND_END if version >= 3 => log.end_action(ActionKind::Rewind),
             other => return Err(DecodeError::UnknownEvent(other)),
@@ -301,6 +328,24 @@ mod tests {
         }
 
         #[test]
+        fn base_blocks_survive_a_save(
+            seed in any::<u64>(),
+            events in prop::collection::vec(event(), 0..20),
+            base in prop::collection::vec(
+                ((any::<i32>(), any::<i32>(), any::<i32>()), any::<u16>()),
+                0..20,
+            ),
+        ) {
+            let mut log = log_of(&events);
+            for ((x, y, z), block) in base {
+                log.set_base(WorldPos { x, y, z }, BlockId(block));
+            }
+            let bytes = encode(seed, &log);
+            prop_assert_eq!(&encode(seed, &log), &bytes);
+            prop_assert_eq!(decode(&bytes), Ok(SavedLog { seed, log }));
+        }
+
+        #[test]
         fn a_file_cut_inside_a_record_is_rejected(
             events in prop::collection::vec(event(), 1..20),
             cut in 1usize..32,
@@ -356,6 +401,19 @@ mod tests {
         bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
 
         assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(TAG_EDIT_END)));
+    }
+
+    #[test]
+    fn a_version_three_file_with_a_base_block_is_rejected() {
+        let mut log = EventLog::new();
+        log.set_base(WorldPos { x: 1, y: 2, z: 3 }, BlockId::STONE);
+        let mut bytes = encode(1, &log);
+        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::UnknownEvent(TAG_BASE_BLOCK))
+        );
     }
 
     #[test]
