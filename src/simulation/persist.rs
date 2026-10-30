@@ -12,7 +12,8 @@
 //! run instead of one entry per tick. The writer joins every such stretch into a single run
 //! and lists the runs by actor, then by tick; the reader accepts any run order within an
 //! actor as long as ticks keep rising. The run count is not stored: runs go to the end of
-//! the file, so a file cut short mid-run is rejected.
+//! the file, so a file cut short mid-run is rejected by [`decode`]; [`decode_recovering`]
+//! keeps the whole runs before the cut instead, for a file left behind by a crash.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use thiserror::Error;
 
 use crate::shared::clock::Tick;
 use crate::shared::intent::{AXIS_MAX, Intent, Walk};
-use crate::simulation::intent_log::{ActorId, IntentLog, RecordError};
+use crate::simulation::intent_log::{ActorId, Entry, IntentLog, RecordError};
 
 const MAGIC: [u8; 4] = *b"MCIT";
 
@@ -29,6 +30,14 @@ const MAGIC: [u8; 4] = *b"MCIT";
 pub const VERSION: u16 = 1;
 
 const HEADER_LEN: usize = 4 + 2;
+
+/// The first bytes of every file; `simulation::stream` writes them before any run.
+pub(super) const HEADER: [u8; HEADER_LEN] = {
+    let version = VERSION.to_le_bytes();
+    [
+        MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], version[0], version[1],
+    ]
+};
 const RUN_LEN: usize = 4 + 8 + 4 + 1 + 1 + 1;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -62,29 +71,33 @@ pub enum LoadError {
 /// Serialises `log` in the layout described in the module docs.
 pub fn encode(log: &IntentLog) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_LEN);
-    bytes.extend_from_slice(&MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&HEADER);
     for (actor, track) in log.tracks() {
-        let mut entries = track.iter();
-        let Some(first) = entries.next() else {
-            continue;
-        };
-        let (mut start, mut length, mut intent) = (first.tick.0, 1u32, first.intent);
-        for entry in entries {
-            // The track's ticks rise, so `start + length` cannot overflow before this check.
-            let continues = entry.intent == intent
-                && entry.tick.0 == start + u64::from(length)
-                && length < u32::MAX;
-            if continues {
-                length += 1;
-            } else {
-                push_run(&mut bytes, actor, start, length, intent);
-                (start, length, intent) = (entry.tick.0, 1, entry.intent);
-            }
-        }
-        push_run(&mut bytes, actor, start, length, intent);
+        push_runs(&mut bytes, actor, track);
     }
     bytes
+}
+
+/// Appends `track` as runs, joining every stretch of one intent on consecutive ticks.
+pub(super) fn push_runs(bytes: &mut Vec<u8>, actor: ActorId, track: &[Entry]) {
+    let mut entries = track.iter();
+    let Some(first) = entries.next() else {
+        return;
+    };
+    let (mut start, mut length, mut intent) = (first.tick.0, 1u32, first.intent);
+    for entry in entries {
+        // The track's ticks rise, so `start + length` cannot overflow before this check.
+        let continues = entry.intent == intent
+            && entry.tick.0 == start + u64::from(length)
+            && length < u32::MAX;
+        if continues {
+            length += 1;
+        } else {
+            push_run(bytes, actor, start, length, intent);
+            (start, length, intent) = (entry.tick.0, 1, entry.intent);
+        }
+    }
+    push_run(bytes, actor, start, length, intent);
 }
 
 fn push_run(bytes: &mut Vec<u8>, actor: ActorId, start: u64, length: u32, intent: Intent) {
@@ -102,6 +115,21 @@ fn push_run(bytes: &mut Vec<u8>, actor: ActorId, start: u64, length: u32, intent
 /// Returns a [`DecodeError`] if the bytes are not a complete, supported and well-ordered
 /// intent log.
 pub fn decode(bytes: &[u8]) -> Result<IntentLog, DecodeError> {
+    decode_runs(bytes, false).map(|(log, _)| log)
+}
+
+/// Like [`decode`], but a file that ends in the middle of a run (a crash or power loss while
+/// the game was appending to it) gives the runs before the cut, plus how many bytes were left
+/// over. Every other fault is still an error.
+///
+/// # Errors
+///
+/// Returns a [`DecodeError`] for a damaged header or a run that is complete but invalid.
+pub fn decode_recovering(bytes: &[u8]) -> Result<(IntentLog, usize), DecodeError> {
+    decode_runs(bytes, true)
+}
+
+fn decode_runs(bytes: &[u8], allow_torn_tail: bool) -> Result<(IntentLog, usize), DecodeError> {
     let mut reader = Reader(bytes);
     if reader.take::<4>()? != MAGIC {
         return Err(DecodeError::BadMagic);
@@ -112,7 +140,12 @@ pub fn decode(bytes: &[u8]) -> Result<IntentLog, DecodeError> {
     }
 
     let mut log = IntentLog::default();
+    let mut discarded = 0;
     while !reader.0.is_empty() {
+        if allow_torn_tail && reader.0.len() < RUN_LEN {
+            discarded = reader.0.len();
+            break;
+        }
         let actor = ActorId(u32::from_le_bytes(reader.take()?));
         let start = u64::from_le_bytes(reader.take()?);
         let length = u32::from_le_bytes(reader.take()?);
@@ -140,7 +173,7 @@ pub fn decode(bytes: &[u8]) -> Result<IntentLog, DecodeError> {
             log.record(actor, Tick(tick), intent)?;
         }
     }
-    Ok(log)
+    Ok((log, discarded))
 }
 
 /// Writes the log to `path` without ever leaving a half-written file there: the bytes go
@@ -249,6 +282,42 @@ mod tests {
         fn decoding_arbitrary_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
             let _ = decode(&bytes);
         }
+    }
+
+    proptest! {
+        #[test]
+        fn recovering_a_cut_file_keeps_the_whole_runs_before_the_cut(
+            steps in steps(),
+            cut in 1usize..RUN_LEN,
+        ) {
+            let bytes = encode(&log_of(&steps));
+            prop_assume!(bytes.len() > HEADER_LEN);
+            let whole = &bytes[..bytes.len() - RUN_LEN];
+            let cut_file = &bytes[..bytes.len() - cut];
+            prop_assert_eq!(
+                decode_recovering(cut_file),
+                Ok((decode(whole)?, RUN_LEN - cut))
+            );
+        }
+
+        #[test]
+        fn recovering_an_intact_file_discards_nothing(steps in steps()) {
+            let log = log_of(&steps);
+            prop_assert_eq!(decode_recovering(&encode(&log)), Ok((log, 0)));
+        }
+    }
+
+    #[test]
+    fn recovering_still_rejects_a_cut_header_and_a_damaged_run() {
+        let bytes = encode(&IntentLog::default());
+        assert_eq!(
+            decode_recovering(&bytes[..HEADER_LEN - 1]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            decode_recovering(&one_run(1, 0, 0, 2)),
+            Err(DecodeError::BadJump(2))
+        );
     }
 
     #[test]

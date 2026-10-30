@@ -97,6 +97,15 @@ impl IntentLog {
             .map(|index| track[index].intent)
     }
 
+    /// Forgets all but each track's newest entry. The newest stays so the rising-ticks rule
+    /// keeps checking the next record; the caller must have saved the rest first.
+    pub fn retain_newest(&mut self) {
+        for track in self.tracks.values_mut() {
+            let keep = track.len().saturating_sub(1);
+            track.drain(..keep);
+        }
+    }
+
     /// Entries recorded across all actors.
     pub fn len(&self) -> usize {
         self.tracks.values().map(Vec::len).sum()
@@ -145,6 +154,19 @@ mod tests {
             );
         }
         assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn retaining_the_newest_keeps_the_ordering_check_alive() {
+        let mut log = IntentLog::default();
+        for tick in 1..=3 {
+            assert_eq!(log.record(ZOMBIE, Tick(tick), walking(1)), Ok(()));
+        }
+        log.retain_newest();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.intent_at(ZOMBIE, Tick(3)), Some(walking(1)));
+        assert!(log.record(ZOMBIE, Tick(3), walking(1)).is_err());
+        assert_eq!(log.record(ZOMBIE, Tick(4), walking(1)), Ok(()));
     }
 
     #[test]

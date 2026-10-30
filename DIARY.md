@@ -32,6 +32,7 @@
 | 2026-10-28 | World interface for scripts | Every script effect is an event in the one log; checked commands run behind permissions, range and a per-tick limit | ✅ Confirmed |
 | 2026-10-29 | Bounded log and redo | Fold old actions into a per-chunk base of final blocks, keep 256 rewindable; redo from an in-memory stack | ✅ Confirmed |
 | 2026-10-30 | Saved intent tracks | Own `MCIT` file of runs (one intent held over consecutive ticks); written on exit, replacing the last session's | ✅ Confirmed |
+| 2026-10-30 | Streamed intent tracks | Settled entries appended to a numbered session file during play; same v1 format, memory bounded | ✅ Confirmed |
 
 ---
 
@@ -904,6 +905,36 @@ The approach was clear, so no options were compared: a new file next to `world.m
 - `app` saves `intents.mcit` on exit when the log is not empty; a failed save is reported like the other saves.
 - Tests: a property that decode inverts encode and bytes are stable, a cut inside a run is rejected, arbitrary bytes never panic, one run covers 10,000 idle ticks, and one integration property that a saved and reloaded player track replays to the same body.
 - The window was not run by the assistant, so the save on exit is untested by hand.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-30 | Initial entry | deltaog-117 |
+
+### Streamed Intent Tracks
+
+**Date:** 2026-10-30
+**Status:** Confirmed
+
+#### Context / Background
+The saved intent track was written once, on exit, and each exit replaced the last session's file. That left three gaps: the in-memory log grew by one entry per actor per tick for as long as the game ran, a crash lost the whole session, and older sessions were gone.
+
+#### Decision & Rationale
+Three options were compared. A kept every tick as runs in memory and wrote numbered files on exit: smallest change, but a crash loses everything and busy play still grows memory. B dropped the oldest ticks past a limit: simplest, but a track that no longer starts at tick 0 cannot be replayed from a fresh body. C wrote settled stretches to the file during play. C was chosen for bounded memory and crash survival, with its cost accepted: a flush on the game loop and handling of failed and torn writes.
+
+The design that kept C small: the file stays a plain `MCIT` version 1 file, so the reader and the existing `encode` are unchanged and no version bump was needed. The reader already accepts runs in any order within an actor, so appending runs in flush order is valid. Each track's newest entry stays in memory, so the rising-ticks rule keeps working and a run is never ended early by a flush; an idle hour still costs one run per flush (19 bytes), not one per tick. Memory per flush is a few thousand entries, not the session.
+
+Invariants that make data loss impossible short of a crash: an entry leaves memory only after its run was written; the file is always the header plus whole runs up to `good_len`; a failed write is cut back to `good_len` before the next write, and if the cut-back also fails the file is marked broken and nothing more goes to it, so a torn run can never sit in the middle of a file. After a failed flush the next try waits for another 2048 entries, so a full disk costs one warning per flush, not one per tick.
+
+**Trade-offs accepted:** a crash still loses up to 2048 entries per run of play (a minute or two), and a power loss can leave a torn last run, which `decode_recovering` handles by keeping the whole runs before it (the strict `decode` still refuses such a file). Every launch that plays at least one tick leaves a new file; none are removed, but runs keep them small. Without a replay mode nothing reads these files yet.
+
+#### Implementation Notes
+- New `simulation::stream`: `IntentStream` (record, flush at 2048 entries, `finish` that syncs) and `next_session_path`, which picks one more than the highest `NNNN.mcit` in `intents/` and refuses to wrap at `u32::MAX`. The file is created with `create_new` on the first write, so a second game in the same folder never appends to it, and a session that records nothing leaves no file.
+- `persist` gained `push_runs` (the run-joining loop pulled out of `encode`, same bytes), a `HEADER` constant and `decode_recovering`; `IntentLog` gained `retain_newest`.
+- `app` records through `IntentStream`, calls `finish` on exit, and no longer writes `intents.mcit`. A leftover `intents.mcit` from earlier runs is left alone.
+- Tests: finishing gives back exactly the recorded log for any flush size; file plus tail always equals the whole history and the file is a per-actor prefix (the crash case); 100,000 idle ticks stay under 1 KB on disk and 2048 entries in memory; a failed write keeps every entry and retries at the pushed-back mark; a write that cannot be undone stops further writes (`/dev/full`, Linux only); cut files recover; session numbering.
+- The window was not run by the assistant, so the stream during real play and the `intents/` folder on exit are untested by hand. Add `intents/` to your ignore rules if you do not want sessions tracked.
 
 #### Review / Update Log
 

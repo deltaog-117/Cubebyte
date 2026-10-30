@@ -43,9 +43,9 @@ use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::Event;
 use crate::shared::intent::Walk;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
-use crate::simulation::intent_log::{ActorId, IntentLog};
+use crate::simulation::intent_log::ActorId;
 use crate::simulation::model::Simulation;
-use crate::simulation::persist as intent_persist;
+use crate::simulation::stream::{IntentStream, next_session_path};
 use crate::survival::model::Stats;
 use crate::survival::service::eat_events;
 use crate::ui::draw::overlay;
@@ -62,9 +62,9 @@ const SAVE_PATH: &str = "world.mcel";
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
 
-/// Where the intent track of the latest session is kept, relative to the working directory.
-/// Ticks restart at zero each session, so each run replaces the file instead of extending it.
-const INTENTS_PATH: &str = "intents.mcit";
+/// Where intent tracks are kept, relative to the working directory: one numbered file per
+/// session, because ticks restart at zero each session and earlier sessions are kept.
+const INTENTS_DIR: &str = "intents";
 
 /// Chunks kept loaded in each horizontal direction around the camera.
 const LOAD_RADIUS: u8 = 4;
@@ -168,8 +168,9 @@ struct Running {
     zombie_actor: ActorId,
     /// The id the next zombie will get.
     next_actor: ActorId,
-    /// What the player and each zombie asked for on every step, in memory only.
-    intents: IntentLog,
+    /// What the player and each zombie asked for on every step; settled steps are written to
+    /// this session's file as play goes on.
+    intents: IntentStream,
     /// The recipe the craft key makes.
     recipe: RecipeId,
     /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
@@ -202,6 +203,9 @@ impl App {
 
         let log = open_log(Path::new(SAVE_PATH))?;
         let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
+        let intents = IntentStream::new(
+            next_session_path(Path::new(INTENTS_DIR)).map_err(AppError::SaveIntents)?,
+        );
         let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
         // Two blocks above the surface, so the player drops onto the ground.
@@ -228,7 +232,7 @@ impl App {
             zombie_timer: ZOMBIE_DELAY_STEPS,
             zombie_actor: ActorId::PLAYER.next(),
             next_actor: ActorId::PLAYER.next(),
-            intents: IntentLog::default(),
+            intents,
             recipe: RecipeId::FIRST,
             panel_open: false,
             terrain,
@@ -482,7 +486,8 @@ impl Running {
     }
 
     /// Keeps `intent` in the log. A refusal means a step was recorded twice, which loses
-    /// nothing of the run itself, so it is reported and play goes on.
+    /// nothing of the run itself, and a failed write leaves the steps in memory to be
+    /// written later, so both are reported and play goes on.
     fn record(&mut self, actor: ActorId, tick: Tick, intent: Intent) {
         if let Err(error) = self.intents.record(actor, tick, intent) {
             tracing::warn!(%error, "cannot record an intent");
@@ -739,7 +744,7 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        let Some(running) = &self.running else {
+        let Some(running) = self.running.take() else {
             return;
         };
         // An empty log was never edited, so there is nothing worth writing.
@@ -754,9 +759,7 @@ impl ApplicationHandler for App {
         {
             self.failure.get_or_insert(AppError::SaveInventory(error));
         }
-        if !running.intents.is_empty()
-            && let Err(error) = intent_persist::save(Path::new(INTENTS_PATH), &running.intents)
-        {
+        if let Err(error) = running.intents.finish() {
             self.failure.get_or_insert(AppError::SaveIntents(error));
         }
     }

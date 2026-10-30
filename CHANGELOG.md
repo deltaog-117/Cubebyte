@@ -113,9 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simulation::persist`: a versioned binary file (`MCIT`, version 1) for the intent log. Each run of one intent on consecutive ticks is a single 19-byte record, so standing still for an hour costs one record; `encode`, `decode`, `save` (via a temporary sibling file) and `load`. A damaged file is refused: a cut run, an empty run, a run past the last tick, a walk axis outside -127 to 127, a jump flag other than 0 or 1, or ticks that go back
 - `IntentLog::tracks()` to walk every actor's entries in id order
 - The window saves the session's intent track to `intents.mcit` on exit (replacing the previous one, since ticks restart each session)
+- `simulation::stream::IntentStream`: the intent log written to disk while the game runs. Settled entries are appended to the session file as runs once 2048 gather, so memory stays small and a crash loses a minute or two of play at most; the file is created on the first write, a failed write is cut back and retried later with nothing dropped, and `finish` writes the rest and syncs
+- `simulation::stream::next_session_path`: one numbered file per session in `intents/` (`0001.mcit`, `0002.mcit`, ...), one more than the highest, so earlier sessions are kept
+- `simulation::persist::decode_recovering`: reads a session file cut short by a crash or power loss, keeping the whole runs before the cut and reporting the bytes left over
+- `IntentLog::retain_newest()`, which drops all but each track's newest entry
 - Property tests that a saved log decodes to an equal log with the same bytes each time, that a file cut inside a run is rejected, that arbitrary bytes never panic the reader, and that replaying a saved and reloaded player track reproduces the run exactly
 
 ### Changed
+- `app` writes intent tracks through `IntentStream` into `intents/NNNN.mcit`, one file per session, instead of replacing `intents.mcit` on exit; `simulation::persist` keeps the same format (version 1) and its `save` and `load`
 - `app` sends breaking, placing, crafting and eating through `events::apply::apply_all` and logs the events, so the pack changes only through the one door and rewind can see these changes; the old direct functions remain. Hunger is still restored outside the events
 - `shared::body::Intent` moved to `shared::intent` (still re-exported from `shared::body` and `player::service`) and its `walk` is now a `Walk` of whole numbers instead of a `Vec2`. Direction is rounded to about 0.45 degrees and speed to under 0.4%; a player step still costs about 180 ns
 - `player::model::Player` wraps a `shared::body::Body`; `player::service::step`, `collides`, `Intent` and the speed constants keep their paths and behaviour. A step still costs about 181 ns
