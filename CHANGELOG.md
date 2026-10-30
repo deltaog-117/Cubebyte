@@ -110,6 +110,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::redo::RedoStack` and key `Y`: redo brings back the edit `Z` last undid, logged as a new edit; any new edit clears the stack, a refused redo drops it, and a restart forgets it
 - `events::rewind::inverse_run`, the inverse of a run of events, shared by rewind and redo
 - Property tests that a compacted log keeps its newest actions rewindable and rebuilds the same world, that a compacted log survives a save chunk by chunk over generated terrain, that rewind and redo walk the history both ways, and that base blocks survive a save
+- `simulation::persist`: a versioned binary file (`MCIT`, version 1) for the intent log. Each run of one intent on consecutive ticks is a single 19-byte record, so standing still for an hour costs one record; `encode`, `decode`, `save` (via a temporary sibling file) and `load`. A damaged file is refused: a cut run, an empty run, a run past the last tick, a walk axis outside -127 to 127, a jump flag other than 0 or 1, or ticks that go back
+- `IntentLog::tracks()` to walk every actor's entries in id order
+- The window saves the session's intent track to `intents.mcit` on exit (replacing the previous one, since ticks restart each session)
+- Property tests that a saved log decodes to an equal log with the same bytes each time, that a file cut inside a run is rejected, that arbitrary bytes never panic the reader, and that replaying a saved and reloaded player track reproduces the run exactly
 
 ### Changed
 - `app` sends breaking, placing, crafting and eating through `events::apply::apply_all` and logs the events, so the pack changes only through the one door and rewind can see these changes; the old direct functions remain. Hunger is still restored outside the events

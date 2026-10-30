@@ -36,6 +36,7 @@ Items are organized by priority, not by timeline.
 - ✅ Gameplay under events: breaking with its yield, placing with its cost, crafting and eating now work out their block and slot changes as events, apply them all or nothing through the one `events::apply` door, and log them; a property test shows the event path matches the direct functions and undoes exactly
 - ✅ Time rewind, first slice: key `Z` steps back one whole action (a break with its yield, a placement, a craft, a meal); the undo is logged as new events, so the log stays append-only and a restart keeps the rewound world; the saved log gains action ends (version 3)
 - ✅ Time rewind, second slice: the log folds all but its newest 256 actions into a base of final blocks per chunk (compaction runs at 512), so it stops growing with play; key `Y` redoes the edit `Z` last undid, from an in-memory stack that any new edit clears; the saved log is version 4
+- ✅ Saving intent tracks: the intent log has a versioned file format (`MCIT`) that stores runs of one intent, so idle stretches cost almost nothing; the window writes `intents.mcit` on exit and a reloaded track replays the run bit for bit
 
 ---
 
@@ -43,7 +44,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
-- **Saving intent tracks** – The intent log lives in memory only. Give it a versioned file format like `world.mcel`, and bound its growth (about 2 MB an hour with one zombie), before replays are saved.
+- **Saving intent tracks** – First slice done (see Completed). Still to do: cap the in-memory log (it still holds one entry per actor per tick until exit), load a saved track at startup for a replay mode, and keep older sessions instead of replacing them.
 
 ---
 

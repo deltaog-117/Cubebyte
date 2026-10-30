@@ -45,6 +45,7 @@ use crate::shared::intent::Walk;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::model::Simulation;
+use crate::simulation::persist as intent_persist;
 use crate::survival::model::Stats;
 use crate::survival::service::eat_events;
 use crate::ui::draw::overlay;
@@ -60,6 +61,10 @@ const SAVE_PATH: &str = "world.mcel";
 
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
+
+/// Where the intent track of the latest session is kept, relative to the working directory.
+/// Ticks restart at zero each session, so each run replaces the file instead of extending it.
+const INTENTS_PATH: &str = "intents.mcit";
 
 /// Chunks kept loaded in each horizontal direction around the camera.
 const LOAD_RADIUS: u8 = 4;
@@ -109,6 +114,8 @@ pub enum AppError {
     LoadInventory(#[from] inventory_persist::LoadError),
     #[error("cannot save the inventory")]
     SaveInventory(#[source] io::Error),
+    #[error("cannot save the intent track")]
+    SaveIntents(#[source] io::Error),
 }
 
 /// Opens the window and runs until it is closed.
@@ -746,6 +753,11 @@ impl ApplicationHandler for App {
                 inventory_persist::save(Path::new(INVENTORY_PATH), &running.inventory)
         {
             self.failure.get_or_insert(AppError::SaveInventory(error));
+        }
+        if !running.intents.is_empty()
+            && let Err(error) = intent_persist::save(Path::new(INTENTS_PATH), &running.intents)
+        {
+            self.failure.get_or_insert(AppError::SaveIntents(error));
         }
     }
 

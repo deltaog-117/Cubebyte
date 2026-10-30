@@ -1,8 +1,8 @@
 //! A record of what every actor asked for on every tick.
 //!
 //! Intents are whole numbers (see [`Intent`]), and bodies consume exactly those numbers, so
-//! feeding a track back into a fresh body reproduces the run bit for bit. The log is kept in
-//! memory only; saving it is a later step.
+//! feeding a track back into a fresh body reproduces the run bit for bit. The log lives in
+//! memory; `simulation::persist` saves and loads it.
 
 use std::collections::BTreeMap;
 
@@ -79,6 +79,13 @@ impl IntentLog {
     /// Everything recorded for `actor`, oldest first. Empty for an actor never seen.
     pub fn track(&self, actor: ActorId) -> &[Entry] {
         self.tracks.get(&actor).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every actor with a track, in id order, each with its entries oldest first.
+    pub fn tracks(&self) -> impl Iterator<Item = (ActorId, &[Entry])> {
+        self.tracks
+            .iter()
+            .map(|(actor, track)| (*actor, track.as_slice()))
     }
 
     /// What `actor` asked for on `tick`, if anything was recorded for that tick.

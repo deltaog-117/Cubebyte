@@ -6,6 +6,7 @@ use minecraft_clone::shared::event::Event;
 use minecraft_clone::shared::intent::{AXIS_MAX, Walk};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
 use minecraft_clone::simulation::intent_log::{ActorId, IntentLog};
+use minecraft_clone::simulation::persist::{decode, encode};
 use minecraft_clone::world::model::World;
 use proptest::prelude::*;
 
@@ -95,6 +96,30 @@ proptest! {
 
         let mut replayed = start(from.0, from.1, from.2)?;
         for entry in log.track(ActorId::PLAYER) {
+            step(&mut replayed, entry.intent, &world, DT);
+        }
+        prop_assert_eq!(live, replayed);
+    }
+
+    #[test]
+    fn replaying_a_saved_and_reloaded_track_reproduces_the_run_exactly(
+        blocks in blocks(),
+        intents in intents(),
+        from in (-4.0f32..4.0, 8.0f32..80.0, -4.0f32..4.0),
+    ) {
+        let world = terrain(&blocks)?;
+        let mut log = IntentLog::default();
+        let mut live = start(from.0, from.1, from.2)?;
+        for (tick, intent) in (1u64..).zip(intents.iter().copied()) {
+            prop_assert_eq!(log.record(ActorId::PLAYER, Tick(tick), intent), Ok(()));
+            step(&mut live, intent, &world, DT);
+        }
+
+        let Ok(loaded) = decode(&encode(&log)) else {
+            return Err(TestCaseError::fail("a saved track must load"));
+        };
+        let mut replayed = start(from.0, from.1, from.2)?;
+        for entry in loaded.track(ActorId::PLAYER) {
             step(&mut replayed, entry.intent, &world, DT);
         }
         prop_assert_eq!(live, replayed);

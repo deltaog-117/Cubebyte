@@ -31,6 +31,7 @@
 | 2026-10-28 | Movement intent | Bodies move by whole-number intent; per-actor in-memory log; no saving yet | ✅ Confirmed |
 | 2026-10-28 | World interface for scripts | Every script effect is an event in the one log; checked commands run behind permissions, range and a per-tick limit | ✅ Confirmed |
 | 2026-10-29 | Bounded log and redo | Fold old actions into a per-chunk base of final blocks, keep 256 rewindable; redo from an in-memory stack | ✅ Confirmed |
+| 2026-10-30 | Saved intent tracks | Own `MCIT` file of runs (one intent held over consecutive ticks); written on exit, replacing the last session's | ✅ Confirmed |
 
 ---
 
@@ -883,3 +884,29 @@ Every rewind added events to an append-only log that is kept in memory and saved
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-29 | Initial entry | deltaog-117 |
+
+### Saved Intent Tracks
+
+**Date:** 2026-10-30
+**Status:** Confirmed
+
+#### Context / Background
+The intent log, which makes a run replayable bit for bit, lived in memory only. A replay needs it on disk. At one entry per actor per tick it would also cost about 2 MB an hour with one zombie, mostly the same intent repeated while an actor stands or walks straight.
+
+#### Decision & Rationale
+The approach was clear, so no options were compared: a new file next to `world.mcel` and `inventory.mcin`, with the same shape (magic, version, little-endian fields, a temporary sibling file renamed into place, a reader that refuses damage). The one real choice was the record. A run (actor, first tick, length, intent) stores an unchanged intent once, so idle time is nearly free and the file follows what the actor did, not how long the session ran. The writer joins every maximal run, so the same log always gives the same bytes. The reader is stricter than the writer needs to be: it rejects a walk axis of -128 instead of quietly turning it into -127, since a replay must not differ from the recording.
+
+**Trade-offs accepted:** the file is bounded by how often intents change, not by a fixed size; an actor that changes every tick still costs 19 bytes per tick, more than a plain entry list would. The in-memory log is still unbounded. Ticks restart at zero each session, so the file holds only the latest session and each exit replaces it.
+
+#### Implementation Notes
+- `simulation::persist` has `encode`, `decode`, `save` and `load`, written like `events::persist`. Run order inside an actor must rise in ticks; the reader feeds each tick through `IntentLog::record`, so the log's own rule decides, and a violation is reported as out of order.
+- `IntentLog::tracks()` walks the actors for the writer.
+- `app` saves `intents.mcit` on exit when the log is not empty; a failed save is reported like the other saves.
+- Tests: a property that decode inverts encode and bytes are stable, a cut inside a run is rejected, arbitrary bytes never panic, one run covers 10,000 idle ticks, and one integration property that a saved and reloaded player track replays to the same body.
+- The window was not run by the assistant, so the save on exit is untested by hand.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-30 | Initial entry | deltaog-117 |
