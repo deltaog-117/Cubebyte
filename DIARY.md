@@ -941,3 +941,34 @@ Invariants that make data loss impossible short of a crash: an entry leaves memo
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-30 | Initial entry | deltaog-117 |
+
+### Replaying Intent Tracks
+
+**Date:** 2026-10-30
+**Status:** Confirmed
+
+#### Context / Background
+Sessions were written to `intents/NNNN.mcit` but nothing read them. The last open piece of "Saving intent tracks" was a mode that loads one at startup and drives the player and the zombie from it.
+
+#### Decision & Rationale
+Three options: A, a command-line flag that replays and then hands the keys back; B, the same flag but the window closes at the end; C, an in-game key that resets the world and replays. C was dropped because the world cannot yet be reset to a run's start (walking, hunger and health are not events). A was chosen over B because the hand-over costs almost nothing: the replay just stops answering. The Forza-style rewind (hold a key, scrub back a few seconds, resume live) was discussed and is left for a later slice built on this one.
+
+Decisions made while building it, which differ from the plan given before coding in one place: the session started from a replay records the replayed steps as well as the new ones. The plan was to record nothing until the hand-over, but that file would not start at tick 0, and a replay needs the player's track to start there. Recording everything keeps every session replayable by itself, at the price of one more file per replay.
+- The replay ends at the first tick with no recorded player step. That also covers the end of the file and a flight, which leaves no steps in the track; `F` is ignored during a replay so a flight cannot cut it short by accident.
+- A zombie takes its recorded step if it has one, and otherwise decides for itself. After the player's click hits the original zombie, the recording stops but the replayed zombie lives on.
+- A file cut short by a crash still plays, up to the cut. A missing, damaged or empty file, or a bad flag, stops the game before the window opens, with a message.
+- `Replay::try_new` refuses a track whose first player step is not tick 0, so a replay always lines up with the clock.
+
+**Trade-offs accepted:** the tracks hold walking and jumping only, so a replay matches the original only if the world is the same as when the run began. Block edits, crafting, eating and clicks on the zombie are not replayed, and clicks still work during a replay and can change the world under it. Nothing limits how many session files are kept.
+
+#### Implementation Notes
+- New `simulation::replay`: `Replay` (`try_new`, `load`, `intent`), `ReplayError`, `replay_session` and `ArgsError`. `stream::session_path` builds a session path and `next_session_path` now uses it.
+- `app` reads the flag and loads the session before opening a window, keeps the replay in `Running`, asks `player_intent` for each player step and the replay for each zombie step, and adds a line to the title while it runs.
+- Tests: the flag, a missing, damaged, empty, offset and cut-short file, lookup by tick, and one integration property that a run streamed to a session file and loaded as a replay moves a fresh body to exactly the same state.
+- The window was not run by the assistant, so the replay during real play and the hand-over are untested by hand. Try it with `cargo run -- --replay 1` after one recorded session.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-30 | Initial entry | deltaog-117 |

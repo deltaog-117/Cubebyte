@@ -211,7 +211,12 @@ pub fn next_session_path(dir: &Path) -> io::Result<PathBuf> {
     let next = newest
         .checked_add(1)
         .ok_or_else(|| io::Error::other("every session number is taken"))?;
-    Ok(dir.join(format!("{next:04}.{EXTENSION}")))
+    Ok(session_path(dir, next))
+}
+
+/// The path of session `number` in `dir`, the name [`next_session_path`] gives it.
+pub fn session_path(dir: &Path, number: u32) -> PathBuf {
+    dir.join(format!("{number:04}.{EXTENSION}"))
 }
 
 #[cfg(test)]

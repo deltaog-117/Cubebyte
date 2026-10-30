@@ -118,6 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simulation::persist::decode_recovering`: reads a session file cut short by a crash or power loss, keeping the whole runs before the cut and reporting the bytes left over
 - `IntentLog::retain_newest()`, which drops all but each track's newest entry
 - Property tests that a saved log decodes to an equal log with the same bytes each time, that a file cut inside a run is rejected, that arbitrary bytes never panic the reader, and that replaying a saved and reloaded player track reproduces the run exactly
+- `simulation::replay`: `Replay` loads a numbered session file (a file cut short by a crash gives the steps before the cut) and looks up what the player or a mob asked for on a tick; `replay_session` reads `--replay <number>` from the command line; `stream::session_path` names a session file
+- `cargo run -- --replay 3` plays `intents/0003.mcit` back: the player and the zombie move by the recorded steps, and the first tick with no recorded player step hands the keys back; the window title says while a replay runs
 
 ### Changed
 - `app` writes intent tracks through `IntentStream` into `intents/NNNN.mcit`, one file per session, instead of replacing `intents.mcit` on exit; `simulation::persist` keeps the same format (version 1) and its `save` and `load`
@@ -142,3 +144,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::persist` writes version 3 (tags 4 and 5 mark the end of an edit and of a rewind) and reads versions 1 to 3; saves older than version 3 have no action ends, so their history cannot be rewound
 - `app::Running::commit` logs each applied list as one edit
 - `events::persist` writes version 4 (tag 6 holds a base block) and reads versions 1 to 4; `events::replay::replay_chunk` applies a chunk's base blocks before its events. Version 4 files cannot be read by older builds
+- The zombie takes its recorded step during a replay and decides for itself once the session has none; `F` (free flight) is ignored during a replay, because a flight leaves no steps in the track

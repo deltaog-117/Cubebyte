@@ -80,6 +80,7 @@ src/
 ├── mobs/        # the zombie: chasing, hitting, spawning
 ├── player/      # player model and input
 ├── rendering/   # camera, meshing, pipeline
+├── simulation/  # tick loop, intent log, session files and replay
 ├── shared/      # voxel types, events, rng, clock, walking body
 ├── app.rs       # wiring
 └── main.rs      # entry point

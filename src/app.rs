@@ -1,6 +1,7 @@
 //! Wiring only: window, game loop and handing each feature what it needs.
 
 use std::collections::HashSet;
+use std::env;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +46,8 @@ use crate::shared::intent::Walk;
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::intent_log::ActorId;
 use crate::simulation::model::Simulation;
-use crate::simulation::stream::{IntentStream, next_session_path};
+use crate::simulation::replay::{ArgsError, Replay, ReplayError, replay_session};
+use crate::simulation::stream::{IntentStream, next_session_path, session_path};
 use crate::survival::model::Stats;
 use crate::survival::service::eat_events;
 use crate::ui::draw::overlay;
@@ -116,6 +118,10 @@ pub enum AppError {
     SaveInventory(#[source] io::Error),
     #[error("cannot save the intent track")]
     SaveIntents(#[source] io::Error),
+    #[error("bad command line")]
+    Args(#[from] ArgsError),
+    #[error("cannot replay the session")]
+    Replay(#[from] ReplayError),
 }
 
 /// Opens the window and runs until it is closed.
@@ -124,8 +130,13 @@ pub enum AppError {
 ///
 /// Fails if the event loop, window or graphics device cannot be set up, if the saved world
 /// cannot be read or does not match the seed, if the saved inventory is damaged, if drawing
-/// a frame fails for good, or if the world or inventory cannot be saved on exit.
+/// a frame fails for good, or if the world or inventory cannot be saved on exit. Also fails
+/// before opening a window if `--replay <number>` is malformed or names a session that cannot
+/// be loaded.
 pub fn run() -> Result<(), AppError> {
+    let replay = replay_session(env::args().skip(1))?
+        .map(|number| Replay::load(&session_path(Path::new(INTENTS_DIR), number)))
+        .transpose()?;
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -133,6 +144,7 @@ pub fn run() -> Result<(), AppError> {
         keys: MoveKeys::default(),
         selected: SolidBlock::STONE,
         cursor: (0.0, 0.0),
+        replay,
         failure: None,
     };
     event_loop.run_app(&mut app)?;
@@ -171,6 +183,8 @@ struct Running {
     /// What the player and each zombie asked for on every step; settled steps are written to
     /// this session's file as play goes on.
     intents: IntentStream,
+    /// The saved session driving the player and the zombie, until it has no step for a tick.
+    replay: Option<Replay>,
     /// The recipe the craft key makes.
     recipe: RecipeId,
     /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
@@ -186,12 +200,14 @@ struct App {
     selected: SolidBlock,
     /// Where the pointer last was, in window pixels.
     cursor: (f32, f32),
+    /// The session to play back, handed to the game when the window opens.
+    replay: Option<Replay>,
     /// Why the loop was stopped early, handed back by [`run`].
     failure: Option<AppError>,
 }
 
 impl App {
-    fn start(event_loop: &ActiveEventLoop) -> Result<Running, AppError> {
+    fn start(event_loop: &ActiveEventLoop, replay: Option<Replay>) -> Result<Running, AppError> {
         let window = Arc::new(
             event_loop.create_window(Window::default_attributes().with_title("minecraft-clone"))?,
         );
@@ -233,6 +249,7 @@ impl App {
             zombie_actor: ActorId::PLAYER.next(),
             next_actor: ActorId::PLAYER.next(),
             intents,
+            replay,
             recipe: RecipeId::FIRST,
             panel_open: false,
             terrain,
@@ -379,7 +396,9 @@ impl App {
                 jump: self.keys.up,
             };
             for step_index in 0..u64::from(steps) {
-                running.record(ActorId::PLAYER, Tick(first + step_index), intent);
+                let tick = Tick(first + step_index);
+                let intent = running.player_intent(tick, intent);
+                running.record(ActorId::PLAYER, tick, intent);
                 step(
                     &mut running.player,
                     intent,
@@ -440,6 +459,10 @@ impl Running {
     /// Switches between walking and free flight. Landing from a flight stands the player
     /// where the camera is, even if that is inside a block; the player can walk out of it.
     fn toggle_flying(&mut self) {
+        // A flight leaves no steps in the track, so it would break the replay.
+        if self.replay.is_some() {
+            return;
+        }
         self.flying = !self.flying;
         if !self.flying
             && let Ok(player) = Player::try_new(self.camera.position - Vec3::Y * EYE_HEIGHT)
@@ -475,13 +498,38 @@ impl Running {
             self.zombie = None;
             self.zombie_timer = ZOMBIE_DELAY_STEPS;
         } else {
-            let intent = mobs::decide(zombie, target, &self.world);
+            // Past the recorded steps, for instance after the original zombie was hit and
+            // killed, it decides for itself.
+            let intent = self
+                .replay
+                .as_ref()
+                .and_then(|replay| replay.intent(self.zombie_actor, tick))
+                .unwrap_or_else(|| mobs::decide(zombie, target, &self.world));
             if let Some(damage) =
                 mobs::step_with(zombie, intent, target, &self.world, TICK_STEP.as_secs_f32())
             {
                 hit(&mut self.stats, damage);
             }
             self.record(self.zombie_actor, tick, intent);
+        }
+    }
+
+    /// What the player does on `tick`: the recorded step while a replay has one, otherwise
+    /// `live`. The first tick the replay has no step for ends it and hands control to the keys.
+    fn player_intent(&mut self, tick: Tick, live: Intent) -> Intent {
+        let recorded = self
+            .replay
+            .as_ref()
+            .map(|replay| replay.intent(ActorId::PLAYER, tick));
+        match recorded {
+            Some(Some(intent)) => intent,
+            Some(None) => {
+                self.replay = None;
+                tracing::info!(?tick, "replay finished; the keys are live again");
+                self.refresh_title();
+                live
+            }
+            None => live,
         }
     }
 
@@ -686,6 +734,9 @@ impl Running {
                 recipe.name
             ));
         }
+        if self.replay.is_some() {
+            title.push_str(" | replaying a saved run (keys are live when it ends)");
+        }
         self.window.set_title(&title);
     }
 
@@ -702,7 +753,7 @@ impl ApplicationHandler for App {
         if self.running.is_some() {
             return;
         }
-        match Self::start(event_loop) {
+        match Self::start(event_loop, self.replay.take()) {
             Ok(running) => self.running = Some(running),
             Err(error) => self.fail(event_loop, error),
         }
