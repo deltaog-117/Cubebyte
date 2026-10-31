@@ -124,8 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `simulation::action::Action` (break, place, craft, eat) and an action list in `IntentLog` (`record_action`, `actions`, `actions_at`); `IntentStream::record_action` writes them to the session file with the walking steps, and `Replay::actions_at` gives the ones due on a tick
 - `inventory::service::gather_events_at` and `place_events_at`: break or place at a named position instead of along a look direction; a break needs a block there, a place needs an empty cell
 - A replay now performs the recorded breaks, placements, crafts and meals on their ticks, and the new session records them again; keys and mouse do not act during a replay
+- `Action::Strike(ActorId)`, `Action::Rewind` and `Action::Redo`: hits on a mob and the `Z`/`Y` rewinds are saved in the session file (kinds 5, 6 and 7) and performed again by a replay; a strike names the zombie it hit, so it is refused if that zombie is gone
 
 ### Changed
+- The intent file is now version 3, which adds the strike, rewind and redo action kinds. Versions 1 and 2 are still read unchanged
+- `Z`, `Y` and a left click on the zombie now go through the same `perform` path as breaking and placing, so they are recorded when they worked and nothing else is
 - The intent file is now version 2: every record starts with a tag byte (run or action). Version 1 files are still read unchanged
 - `app` aims a click by working out the target block first and then doing the action at that position, the same path a replay uses
 - `app` writes intent tracks through `IntentStream` into `intents/NNNN.mcit`, one file per session, instead of replacing `intents.mcit` on exit; `simulation::persist` keeps the same format (version 1) and its `save` and `load`

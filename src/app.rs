@@ -300,8 +300,8 @@ impl App {
             }),
             KeyCode::KeyC if down => self.with_running(Running::craft_selected),
             KeyCode::KeyE if down => self.with_running(Running::eat_food),
-            KeyCode::KeyZ if down => self.with_running(Running::rewind),
-            KeyCode::KeyY if down => self.with_running(Running::redo),
+            KeyCode::KeyZ if down => self.with_running(|running| running.act(Action::Rewind)),
+            KeyCode::KeyY if down => self.with_running(|running| running.act(Action::Redo)),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -332,7 +332,8 @@ impl App {
             return;
         }
         let (origin, direction) = (running.camera.position, running.camera.forward());
-        if button == MouseButton::Left && running.hit_zombie(origin, direction) {
+        if button == MouseButton::Left && running.aimed_at_zombie(origin, direction) {
+            running.act(Action::Strike(running.zombie_actor));
             return;
         }
         let action = match button {
@@ -549,17 +550,29 @@ impl Running {
         }
     }
 
-    /// Hits the zombie if the crosshair is on it, with the best weapon in the pack. Returns
-    /// whether it was, so the click does not also break the block behind it.
-    fn hit_zombie(&mut self, origin: Vec3, direction: Vec3) -> bool {
-        let alpha = self.simulation.alpha();
-        let Some(zombie) = self.zombie.as_mut() else {
+    /// Whether the crosshair is on the zombie, so the click hits it and does not also break
+    /// the block behind it.
+    fn aimed_at_zombie(&self, origin: Vec3, direction: Vec3) -> bool {
+        self.zombie.as_ref().is_some_and(|zombie| {
+            mobs::aimed_at(
+                zombie,
+                &self.world,
+                origin,
+                direction,
+                REACH,
+                self.simulation.alpha(),
+            )
+        })
+    }
+
+    /// Hits the zombie `actor` with the best weapon in the pack. Reports whether it did: it
+    /// did not if that zombie is gone.
+    fn strike_zombie(&mut self, actor: ActorId) -> bool {
+        let damage = strike(&self.inventory);
+        let Some(zombie) = self.zombie.as_mut().filter(|_| self.zombie_actor == actor) else {
             return false;
         };
-        if !mobs::aimed_at(zombie, &self.world, origin, direction, REACH, alpha) {
-            return false;
-        }
-        if mobs::strike(zombie, strike(&self.inventory)) == Outcome::Died {
+        if mobs::strike(zombie, damage) == Outcome::Died {
             self.zombie = None;
             self.zombie_timer = ZOMBIE_DELAY_STEPS;
         }
@@ -630,33 +643,37 @@ impl Running {
         Ok(())
     }
 
-    /// Steps back the latest edit still in effect. Nothing left to undo is normal; a refusal
-    /// (the state moved on in a way no event records, such as a respawn) is logged.
-    fn rewind(&mut self) {
+    /// Steps back the latest edit still in effect. Reports whether it did. Nothing left to
+    /// undo is normal; a refusal (the state moved on in a way no event records, such as a
+    /// respawn) is logged.
+    fn rewind(&mut self) -> bool {
         let Some(events) = rewind_events(&self.log) else {
-            return;
+            return false;
         };
         if let Err(error) = self.commit_as(&events, ActionKind::Rewind) {
             tracing::warn!(%error, "rewind rejected");
-            return;
+            return false;
         }
         self.redo.record(&events);
         self.finish_history_step(&events);
+        true
     }
 
     /// Brings back the edit `Z` undid last. It is logged as a new edit, so a later `Z` can
     /// undo it again. If the game has moved on in a way no event records, the edit no longer
-    /// fits: it is refused and logged, and the older ones are dropped with it.
-    fn redo(&mut self) {
+    /// fits: it is refused and logged, and the older ones are dropped with it. Reports whether
+    /// it brought an edit back.
+    fn redo(&mut self) -> bool {
         let Some(events) = self.redo.take() else {
-            return;
+            return false;
         };
         if let Err(error) = self.commit_as(&events, ActionKind::Edit) {
             tracing::warn!(%error, "redo rejected");
             self.redo.clear();
-            return;
+            return false;
         }
         self.finish_history_step(&events);
+        true
     }
 
     /// Redraws and flags for saving after a rewind or redo applied `events`.
@@ -722,6 +739,9 @@ impl Running {
             Action::Place { pos, block } => self.place_at(pos, block),
             Action::Craft(recipe) => self.craft_once(RecipeId(recipe)),
             Action::Eat => self.eat_once(),
+            Action::Strike(actor) => self.strike_zombie(actor),
+            Action::Rewind => self.rewind(),
+            Action::Redo => self.redo(),
         };
         if !done {
             return;

@@ -5,7 +5,7 @@
 //! place of the keyboard and the mob's own choices, and performs the actions on their ticks,
 //! which reproduces the run as long as the world is the same as when it was recorded. An
 //! action that no longer fits the world is refused like any other, so a different world
-//! gives a different run, not a crash. Hits on a mob and rewinds are not in the session.
+//! gives a different run, not a crash. Hits on a mob and rewinds are actions like the rest.
 
 use std::fs;
 use std::io;

@@ -40,6 +40,7 @@ Items are organized by priority, not by timeline.
 - ✅ Streaming intent tracks: settled entries are appended to a numbered session file (`intents/0001.mcit`, ...) as play goes on, so memory is bounded, a crash loses little, older sessions are kept, and a file cut short by a crash can be read back with `decode_recovering`
 - ✅ Replaying intent tracks: `cargo run -- --replay 3` loads `intents/0003.mcit` and drives the player and the zombie from it; when the recording has no step for a tick, the keys are live again from where the replay stopped, and the new play is recorded to a fresh session file that holds the replayed steps too
 - ✅ Limiting kept intent sessions: at startup the game deletes the oldest `intents/NNNN.mcit` files so at most 20 remain, the new session included
+- ✅ Recording hits and rewinds in intent tracks: hits on the zombie (named by the zombie's id), `Z` and `Y` are saved in the session file (version 3; versions 1 and 2 still load) and performed again by a replay, so a replay of a run that used them no longer drifts
 - ✅ Recording actions in intent tracks: breaking, placing, crafting and eating are saved in the session file (version 2; version 1 files still load) as the target block, the recipe or the meal, on the tick they happened; a replay performs them again and records them in its own new session, and keys and mouse do not act while it runs
 
 ---
@@ -48,7 +49,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
-- **Saving intent tracks** – Five slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, and recording actions. Still to do: the things a replay still does not reproduce, namely hits on a mob and rewinds (`Z`/`Y`); until then a replay of a run that used them can drift.
+- **Saving intent tracks** – Six slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, recording actions, and recording hits and rewinds. A replay is exact as long as the world starts as it did when recorded; it does not yet save or restore the starting world itself.
 
 ---
 

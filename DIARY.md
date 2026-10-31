@@ -1033,3 +1033,35 @@ Three options were presented; the choice was **A: record the player's intention 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-31 | Initial entry | deltaog-117 |
+
+
+---
+
+### Recording Hits and Rewinds in Intent Tracks
+
+**Date:** 2026-10-31
+**Status:** Confirmed
+
+#### Context / Background
+A replay performed breaks, placements, crafts and meals, but not hits on the zombie or the `Z`/`Y` rewinds. A run that used them drifted: the zombie lived when it had died, and the world kept edits the player had undone.
+
+#### Decision & Rationale
+The approach was clear (new action kinds in the existing record), so no options were compared.
+- A hit names the zombie by its intent-log id, not the aim. The look direction is not recorded, so a replay cannot re-aim; it hits "zombie 3" with the best weapon in the pack, and is refused if that zombie is already gone.
+- Rewind and redo are actions with no fields. The rewind history and the redo stack are rebuilt by performing the same actions in order, so nothing else needs saving.
+- Live play and replay share one path: `Z`, `Y` and the click call `act`, which calls `perform`, which records only what worked. A rewind with nothing to undo, or a redo with nothing undone, costs nothing in the file.
+- The aim test is split from the hit: the click checks the crosshair, then performs a hit that works from the mob's id alone.
+
+**Trade-offs accepted:** the replay does not check that the zombie is within reach, since the hit was in reach when it was recorded; in a different world it may land when the live one would have missed. The starting world is still not saved, so exactness depends on starting from the same world.
+
+#### Implementation Notes
+- File format version 3: action kinds 5 (strike, actor id), 6 (rewind) and 7 (redo). Versions 1 and 2 are still read.
+- `Running::hit_zombie` became `aimed_at_zombie` plus `strike_zombie`; `rewind` and `redo` now report whether they did anything.
+- Tests: the random round-trip and torn-tail tests now draw the new kinds, plus a version 2 file and the three new kinds sharing one tick.
+- The window was not run by the assistant. Try it by hitting the zombie, pressing `Z` and `Y`, then `cargo run -- --replay N`.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-31 | Initial entry | deltaog-117 |

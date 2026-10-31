@@ -19,6 +19,9 @@
 //! | 2 | place | x, y, z (4 each), block (2) |
 //! | 3 | craft | recipe (1) |
 //! | 4 | eat | none |
+//! | 5 | strike | actor (4) |
+//! | 6 | rewind | none |
+//! | 7 | redo | none |
 //!
 //! A run is one intent held on consecutive ticks, so standing still for an hour costs one
 //! run instead of one entry per tick. The writer joins every such stretch into a single run
@@ -28,7 +31,8 @@
 //! file cut short mid-record is rejected by [`decode`]; [`decode_recovering`] keeps the whole
 //! records before the cut instead, for a file left behind by a crash.
 //!
-//! Version 1 had no tags and no actions, only runs; it is still read, unchanged.
+//! Version 1 had no tags and no actions, only runs; it is still read, unchanged. Version 2 had
+//! kinds 1 to 4 only; it is still read, unchanged.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -44,7 +48,7 @@ use crate::simulation::intent_log::{ActionEntry, ActorId, Entry, IntentLog, Reco
 const MAGIC: [u8; 4] = *b"MCIT";
 
 /// Bump when the layout changes.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -71,6 +75,9 @@ const KIND_BREAK: u8 = 1;
 const KIND_PLACE: u8 = 2;
 const KIND_CRAFT: u8 = 3;
 const KIND_EAT: u8 = 4;
+const KIND_STRIKE: u8 = 5;
+const KIND_REWIND: u8 = 6;
+const KIND_REDO: u8 = 7;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
@@ -170,6 +177,12 @@ pub(super) fn push_actions(bytes: &mut Vec<u8>, actions: &[ActionEntry]) {
                 bytes.push(recipe);
             }
             Action::Eat => bytes.push(KIND_EAT),
+            Action::Strike(actor) => {
+                bytes.push(KIND_STRIKE);
+                bytes.extend_from_slice(&actor.0.to_le_bytes());
+            }
+            Action::Rewind => bytes.push(KIND_REWIND),
+            Action::Redo => bytes.push(KIND_REDO),
         }
     }
 }
@@ -281,6 +294,9 @@ fn read_action(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeErr
         },
         KIND_CRAFT => Action::Craft(reader.take::<1>()?[0]),
         KIND_EAT => Action::Eat,
+        KIND_STRIKE => Action::Strike(ActorId(u32::from_le_bytes(reader.take()?))),
+        KIND_REWIND => Action::Rewind,
+        KIND_REDO => Action::Redo,
         other => return Err(DecodeError::BadActionKind(other)),
     };
     log.record_action(tick, action)?;
@@ -573,6 +589,9 @@ mod tests {
             ),
             any::<u8>().prop_map(Action::Craft),
             Just(Action::Eat),
+            any::<u32>().prop_map(|id| Action::Strike(ActorId(id))),
+            Just(Action::Rewind),
+            Just(Action::Redo),
         ]
     }
 
@@ -658,6 +677,30 @@ mod tests {
         bytes.remove(HEADER_LEN);
         assert_eq!(bytes.len(), HEADER_LEN + RUN_LEN);
         assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn a_version_two_file_is_still_read() {
+        let log = log_with_actions(
+            &[(2, 0, 1, false)],
+            &[(0, Action::Eat), (1, Action::Craft(3))],
+        );
+        let mut bytes = encode(&log);
+        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn strikes_rewinds_and_redos_keep_their_order_on_one_tick() {
+        let log = log_with_actions(
+            &[],
+            &[
+                (0, Action::Strike(ActorId(4))),
+                (0, Action::Rewind),
+                (0, Action::Redo),
+            ],
+        );
+        assert_eq!(decode(&encode(&log)), Ok(log));
     }
 
     #[test]
