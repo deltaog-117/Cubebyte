@@ -6,14 +6,29 @@
 //! |---|---|---|
 //! | magic | 4 | `MCIT` |
 //! | version | 2 | [`VERSION`] |
-//! | runs | 19 each | actor (4), first tick (8), length (4), walk x (1), walk z (1), jump (1) |
+//! | records | by tag | a tag byte, then the fields below |
+//!
+//! | Tag | Record | Fields |
+//! |---|---|---|
+//! | 1 | run | actor (4), first tick (8), length (4), walk x (1), walk z (1), jump (1) |
+//! | 2 | action | tick (8), kind (1), then by kind |
+//!
+//! | Kind | Action | Fields |
+//! |---|---|---|
+//! | 1 | break | x, y, z (4 each) |
+//! | 2 | place | x, y, z (4 each), block (2) |
+//! | 3 | craft | recipe (1) |
+//! | 4 | eat | none |
 //!
 //! A run is one intent held on consecutive ticks, so standing still for an hour costs one
 //! run instead of one entry per tick. The writer joins every such stretch into a single run
-//! and lists the runs by actor, then by tick; the reader accepts any run order within an
-//! actor as long as ticks keep rising. The run count is not stored: runs go to the end of
-//! the file, so a file cut short mid-run is rejected by [`decode`]; [`decode_recovering`]
-//! keeps the whole runs before the cut instead, for a file left behind by a crash.
+//! and lists the runs by actor, then by tick, and the actions after them; the reader accepts
+//! any run order within an actor as long as ticks keep rising, and actions as long as their
+//! ticks never fall. The record count is not stored: records go to the end of the file, so a
+//! file cut short mid-record is rejected by [`decode`]; [`decode_recovering`] keeps the whole
+//! records before the cut instead, for a file left behind by a crash.
+//!
+//! Version 1 had no tags and no actions, only runs; it is still read, unchanged.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,12 +37,18 @@ use thiserror::Error;
 
 use crate::shared::clock::Tick;
 use crate::shared::intent::{AXIS_MAX, Intent, Walk};
-use crate::simulation::intent_log::{ActorId, Entry, IntentLog, RecordError};
+use crate::shared::voxel::{BlockId, WorldPos};
+use crate::simulation::action::Action;
+use crate::simulation::intent_log::{ActionEntry, ActorId, Entry, IntentLog, RecordError};
 
 const MAGIC: [u8; 4] = *b"MCIT";
 
-/// Bump when the layout changes; older files are then refused, not guessed at.
-pub const VERSION: u16 = 1;
+/// Bump when the layout changes.
+pub const VERSION: u16 = 2;
+
+/// The oldest version still read. A layout that cannot be read unchanged is refused, not
+/// guessed at.
+pub const MIN_VERSION: u16 = 1;
 
 const HEADER_LEN: usize = 4 + 2;
 
@@ -38,16 +59,33 @@ pub(super) const HEADER: [u8; HEADER_LEN] = {
         MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], version[0], version[1],
     ]
 };
+/// Bytes a run takes after its tag.
 const RUN_LEN: usize = 4 + 8 + 4 + 1 + 1 + 1;
+
+/// Record tags, from version 2 on.
+const TAG_RUN: u8 = 1;
+const TAG_ACTION: u8 = 2;
+
+/// Action kinds.
+const KIND_BREAK: u8 = 1;
+const KIND_PLACE: u8 = 2;
+const KIND_CRAFT: u8 = 3;
+const KIND_EAT: u8 = 4;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
     #[error("not an intent log file")]
     BadMagic,
-    #[error("intent log version {0} is not supported (expected {VERSION})")]
+    #[error(
+        "intent log version {0} is not supported (this build reads {MIN_VERSION} to {VERSION})"
+    )]
     UnsupportedVersion(u16),
-    #[error("the file ends in the middle of the header or a run")]
+    #[error("the file ends in the middle of the header or a record")]
     Truncated,
+    #[error("record tag {0} is not a run or an action")]
+    BadTag(u8),
+    #[error("action kind {0} is not known")]
+    BadActionKind(u8),
     #[error("a run has no length")]
     EmptyRun,
     #[error("a run goes past the last tick")]
@@ -56,7 +94,7 @@ pub enum DecodeError {
     WalkOutOfRange,
     #[error("the jump flag is {0}, not 0 or 1")]
     BadJump(u8),
-    #[error("the runs of one actor are out of order")]
+    #[error("the runs of one actor, or the actions, are out of order")]
     OutOfOrder(#[from] RecordError),
 }
 
@@ -75,6 +113,7 @@ pub fn encode(log: &IntentLog) -> Vec<u8> {
     for (actor, track) in log.tracks() {
         push_runs(&mut bytes, actor, track);
     }
+    push_actions(&mut bytes, log.actions());
     bytes
 }
 
@@ -101,13 +140,44 @@ pub(super) fn push_runs(bytes: &mut Vec<u8>, actor: ActorId, track: &[Entry]) {
 }
 
 fn push_run(bytes: &mut Vec<u8>, actor: ActorId, start: u64, length: u32, intent: Intent) {
-    bytes.reserve(RUN_LEN);
+    bytes.reserve(1 + RUN_LEN);
+    bytes.push(TAG_RUN);
     bytes.extend_from_slice(&actor.0.to_le_bytes());
     bytes.extend_from_slice(&start.to_le_bytes());
     bytes.extend_from_slice(&length.to_le_bytes());
     bytes.extend_from_slice(&intent.walk.x().to_le_bytes());
     bytes.extend_from_slice(&intent.walk.z().to_le_bytes());
     bytes.push(u8::from(intent.jump));
+}
+
+/// Appends `actions` as records, one each, in the order given.
+pub(super) fn push_actions(bytes: &mut Vec<u8>, actions: &[ActionEntry]) {
+    for entry in actions {
+        bytes.push(TAG_ACTION);
+        bytes.extend_from_slice(&entry.tick.0.to_le_bytes());
+        match entry.action {
+            Action::Break(pos) => {
+                bytes.push(KIND_BREAK);
+                push_pos(bytes, pos);
+            }
+            Action::Place { pos, block } => {
+                bytes.push(KIND_PLACE);
+                push_pos(bytes, pos);
+                bytes.extend_from_slice(&block.0.to_le_bytes());
+            }
+            Action::Craft(recipe) => {
+                bytes.push(KIND_CRAFT);
+                bytes.push(recipe);
+            }
+            Action::Eat => bytes.push(KIND_EAT),
+        }
+    }
+}
+
+fn push_pos(bytes: &mut Vec<u8>, pos: WorldPos) {
+    for axis in [pos.x, pos.y, pos.z] {
+        bytes.extend_from_slice(&axis.to_le_bytes());
+    }
 }
 
 /// # Errors
@@ -118,13 +188,13 @@ pub fn decode(bytes: &[u8]) -> Result<IntentLog, DecodeError> {
     decode_runs(bytes, false).map(|(log, _)| log)
 }
 
-/// Like [`decode`], but a file that ends in the middle of a run (a crash or power loss while
-/// the game was appending to it) gives the runs before the cut, plus how many bytes were left
-/// over. Every other fault is still an error.
+/// Like [`decode`], but a file that ends in the middle of a record (a crash or power loss
+/// while the game was appending to it) gives the records before the cut, plus how many bytes
+/// were left over. Every other fault is still an error.
 ///
 /// # Errors
 ///
-/// Returns a [`DecodeError`] for a damaged header or a run that is complete but invalid.
+/// Returns a [`DecodeError`] for a damaged header or a record that is complete but invalid.
 pub fn decode_recovering(bytes: &[u8]) -> Result<(IntentLog, usize), DecodeError> {
     decode_runs(bytes, true)
 }
@@ -135,45 +205,94 @@ fn decode_runs(bytes: &[u8], allow_torn_tail: bool) -> Result<(IntentLog, usize)
         return Err(DecodeError::BadMagic);
     }
     let version = u16::from_le_bytes(reader.take()?);
-    if version != VERSION {
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return Err(DecodeError::UnsupportedVersion(version));
     }
+    // Version 1 files are runs end to end, with no tag byte before each.
+    let tagged = version >= 2;
 
     let mut log = IntentLog::default();
     let mut discarded = 0;
     while !reader.0.is_empty() {
-        if allow_torn_tail && reader.0.len() < RUN_LEN {
-            discarded = reader.0.len();
-            break;
-        }
-        let actor = ActorId(u32::from_le_bytes(reader.take()?));
-        let start = u64::from_le_bytes(reader.take()?);
-        let length = u32::from_le_bytes(reader.take()?);
-        let [x, z, jump] = reader.take()?;
-        let (x, z) = (i8::from_le_bytes([x]), i8::from_le_bytes([z]));
-        if length == 0 {
-            return Err(DecodeError::EmptyRun);
-        }
-        if x < -AXIS_MAX || z < -AXIS_MAX {
-            return Err(DecodeError::WalkOutOfRange);
-        }
-        let jump = match jump {
-            0 => false,
-            1 => true,
-            other => return Err(DecodeError::BadJump(other)),
-        };
-        let end = start
-            .checked_add(u64::from(length) - 1)
-            .ok_or(DecodeError::TickOverflow)?;
-        let intent = Intent {
-            walk: Walk::new(x, z),
-            jump,
-        };
-        for tick in start..=end {
-            log.record(actor, Tick(tick), intent)?;
+        let left = reader.0.len();
+        match read_record(&mut reader, tagged, &mut log) {
+            Ok(()) => {}
+            Err(DecodeError::Truncated) if allow_torn_tail => {
+                discarded = left;
+                break;
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok((log, discarded))
+}
+
+/// Reads one record from `reader` into `log`.
+fn read_record(reader: &mut Reader, tagged: bool, log: &mut IntentLog) -> Result<(), DecodeError> {
+    let tag = if tagged {
+        reader.take::<1>()?[0]
+    } else {
+        TAG_RUN
+    };
+    match tag {
+        TAG_RUN => read_run(reader, log),
+        TAG_ACTION => read_action(reader, log),
+        other => Err(DecodeError::BadTag(other)),
+    }
+}
+
+fn read_run(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeError> {
+    let actor = ActorId(u32::from_le_bytes(reader.take()?));
+    let start = u64::from_le_bytes(reader.take()?);
+    let length = u32::from_le_bytes(reader.take()?);
+    let [x, z, jump] = reader.take()?;
+    let (x, z) = (i8::from_le_bytes([x]), i8::from_le_bytes([z]));
+    if length == 0 {
+        return Err(DecodeError::EmptyRun);
+    }
+    if x < -AXIS_MAX || z < -AXIS_MAX {
+        return Err(DecodeError::WalkOutOfRange);
+    }
+    let jump = match jump {
+        0 => false,
+        1 => true,
+        other => return Err(DecodeError::BadJump(other)),
+    };
+    let end = start
+        .checked_add(u64::from(length) - 1)
+        .ok_or(DecodeError::TickOverflow)?;
+    let intent = Intent {
+        walk: Walk::new(x, z),
+        jump,
+    };
+    for tick in start..=end {
+        log.record(actor, Tick(tick), intent)?;
+    }
+    Ok(())
+}
+
+fn read_action(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeError> {
+    let tick = Tick(u64::from_le_bytes(reader.take()?));
+    let action = match reader.take::<1>()?[0] {
+        KIND_BREAK => Action::Break(read_pos(reader)?),
+        KIND_PLACE => Action::Place {
+            pos: read_pos(reader)?,
+            block: BlockId(u16::from_le_bytes(reader.take()?)),
+        },
+        KIND_CRAFT => Action::Craft(reader.take::<1>()?[0]),
+        KIND_EAT => Action::Eat,
+        other => return Err(DecodeError::BadActionKind(other)),
+    };
+    log.record_action(tick, action)?;
+    Ok(())
+}
+
+fn read_pos(reader: &mut Reader) -> Result<WorldPos, DecodeError> {
+    Ok(WorldPos {
+        x: i32::from_le_bytes(reader.take()?),
+        y: i32::from_le_bytes(reader.take()?),
+        z: i32::from_le_bytes(reader.take()?),
+    })
 }
 
 /// Writes the log to `path` without ever leaving a half-written file there: the bytes go
@@ -225,6 +344,9 @@ mod tests {
 
     const ZOMBIE: ActorId = ActorId(1);
 
+    /// A run with its tag.
+    const RECORD_LEN: usize = 1 + RUN_LEN;
+
     fn still() -> Intent {
         Intent::default()
     }
@@ -272,7 +394,7 @@ mod tests {
         }
 
         #[test]
-        fn a_file_cut_inside_a_run_is_rejected(steps in steps(), cut in 1usize..RUN_LEN) {
+        fn a_file_cut_inside_a_run_is_rejected(steps in steps(), cut in 1usize..RECORD_LEN) {
             let bytes = encode(&log_of(&steps));
             prop_assume!(bytes.len() > HEADER_LEN);
             prop_assert_eq!(decode(&bytes[..bytes.len() - cut]), Err(DecodeError::Truncated));
@@ -288,15 +410,15 @@ mod tests {
         #[test]
         fn recovering_a_cut_file_keeps_the_whole_runs_before_the_cut(
             steps in steps(),
-            cut in 1usize..RUN_LEN,
+            cut in 1usize..RECORD_LEN,
         ) {
             let bytes = encode(&log_of(&steps));
             prop_assume!(bytes.len() > HEADER_LEN);
-            let whole = &bytes[..bytes.len() - RUN_LEN];
+            let whole = &bytes[..bytes.len() - RECORD_LEN];
             let cut_file = &bytes[..bytes.len() - cut];
             prop_assert_eq!(
                 decode_recovering(cut_file),
-                Ok((decode(whole)?, RUN_LEN - cut))
+                Ok((decode(whole)?, RECORD_LEN - cut))
             );
         }
 
@@ -326,7 +448,7 @@ mod tests {
         for tick in 0..10_000 {
             log.record(ZOMBIE, Tick(tick), still()).unwrap();
         }
-        assert_eq!(encode(&log).len(), HEADER_LEN + RUN_LEN);
+        assert_eq!(encode(&log).len(), HEADER_LEN + RECORD_LEN);
     }
 
     #[test]
@@ -336,7 +458,7 @@ mod tests {
             log.record(ZOMBIE, Tick(tick), intent).unwrap();
         }
         let bytes = encode(&log);
-        assert_eq!(bytes.len(), HEADER_LEN + 3 * RUN_LEN);
+        assert_eq!(bytes.len(), HEADER_LEN + 3 * RECORD_LEN);
         assert_eq!(decode(&bytes), Ok(log));
     }
 
@@ -351,10 +473,10 @@ mod tests {
         let mut log = IntentLog::default();
         log.record(ZOMBIE, Tick(0), still()).unwrap();
         let mut bytes = encode(&log);
-        bytes[HEADER_LEN + 12..HEADER_LEN + 16].copy_from_slice(&length.to_le_bytes());
-        bytes[HEADER_LEN + 16..HEADER_LEN + 18]
+        bytes[HEADER_LEN + 13..HEADER_LEN + 17].copy_from_slice(&length.to_le_bytes());
+        bytes[HEADER_LEN + 17..HEADER_LEN + 19]
             .copy_from_slice(&[x.to_le_bytes()[0], z.to_le_bytes()[0]]);
-        bytes[HEADER_LEN + 18] = jump;
+        bytes[HEADER_LEN + 19] = jump;
         bytes
     }
 
@@ -383,7 +505,7 @@ mod tests {
     #[test]
     fn a_run_past_the_last_tick_is_rejected() {
         let mut bytes = one_run(2, 0, 0, 0);
-        bytes[HEADER_LEN + 4..HEADER_LEN + 12].copy_from_slice(&u64::MAX.to_le_bytes());
+        bytes[HEADER_LEN + 5..HEADER_LEN + 13].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(decode(&bytes), Err(DecodeError::TickOverflow));
     }
 
@@ -433,5 +555,115 @@ mod tests {
         assert_eq!(load(&path).unwrap(), Some(log));
         assert!(!dir.join("intents.mcit.tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn pos(x: i32, y: i32, z: i32) -> WorldPos {
+        WorldPos { x, y, z }
+    }
+
+    fn action_strategy() -> impl Strategy<Value = Action> {
+        prop_oneof![
+            (any::<i32>(), any::<i32>(), any::<i32>())
+                .prop_map(|(x, y, z)| Action::Break(pos(x, y, z))),
+            (any::<i32>(), any::<i32>(), any::<i32>(), any::<u16>()).prop_map(
+                |(x, y, z, block)| Action::Place {
+                    pos: pos(x, y, z),
+                    block: BlockId(block)
+                }
+            ),
+            any::<u8>().prop_map(Action::Craft),
+            Just(Action::Eat),
+        ]
+    }
+
+    /// `steps` plus actions on rising ticks; gaps of zero put several on one tick.
+    fn log_with_actions(steps: &[(u8, u64, i8, bool)], actions: &[(u64, Action)]) -> IntentLog {
+        let mut log = log_of(steps);
+        let mut tick = 0;
+        for &(gap, action) in actions {
+            tick += gap;
+            log.record_action(Tick(tick), action).unwrap();
+        }
+        log
+    }
+
+    proptest! {
+        #[test]
+        fn actions_survive_a_round_trip_with_the_runs(
+            steps in steps(),
+            actions in prop::collection::vec((0u64..3, action_strategy()), 0..40),
+        ) {
+            let log = log_with_actions(&steps, &actions);
+            prop_assert_eq!(decode(&encode(&log)), Ok(log));
+        }
+
+        #[test]
+        fn a_file_cut_inside_an_action_keeps_every_record_before_it(
+            actions in prop::collection::vec((0u64..3, action_strategy()), 1..20),
+            cut in 1usize..8,
+        ) {
+            let log = log_with_actions(&[], &actions);
+            let bytes = encode(&log);
+            let last = log.actions().last().copied().unwrap();
+            let mut whole = IntentLog::default();
+            for entry in &log.actions()[..log.actions().len() - 1] {
+                whole.record_action(entry.tick, entry.action).unwrap();
+            }
+            let mut one = Vec::new();
+            push_actions(&mut one, &[last]);
+            prop_assume!(cut < one.len());
+            let cut_file = &bytes[..bytes.len() - cut];
+            prop_assert_eq!(decode(cut_file), Err(DecodeError::Truncated));
+            prop_assert_eq!(decode_recovering(cut_file), Ok((whole, one.len() - cut)));
+        }
+    }
+
+    #[test]
+    fn an_unknown_tag_or_action_kind_is_rejected() {
+        let mut bytes = encode(&IntentLog::default());
+        bytes.push(9);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadTag(9)));
+
+        let mut bytes = encode(&IntentLog::default());
+        bytes.push(TAG_ACTION);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.push(9);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadActionKind(9)));
+    }
+
+    #[test]
+    fn actions_that_go_back_in_time_are_rejected() {
+        let mut bytes = encode(&IntentLog::default());
+        for tick in [10, 5] {
+            push_actions(
+                &mut bytes,
+                &[ActionEntry {
+                    tick: Tick(tick),
+                    action: Action::Eat,
+                }],
+            );
+        }
+        assert!(matches!(decode(&bytes), Err(DecodeError::OutOfOrder(_))));
+    }
+
+    #[test]
+    fn a_version_one_file_is_still_read_as_untagged_runs() {
+        let mut log = IntentLog::default();
+        for tick in 0..3 {
+            log.record(ZOMBIE, Tick(tick), walking(2)).unwrap();
+        }
+        // The version 1 layout: the old header, then the run without its tag.
+        let mut bytes = encode(&log);
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        bytes.remove(HEADER_LEN);
+        assert_eq!(bytes.len(), HEADER_LEN + RUN_LEN);
+        assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn version_zero_is_rejected() {
+        let mut bytes = encode(&IntentLog::default());
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedVersion(0)));
     }
 }

@@ -34,6 +34,7 @@
 | 2026-10-30 | Saved intent tracks | Own `MCIT` file of runs (one intent held over consecutive ticks); written on exit, replacing the last session's | ✅ Confirmed |
 | 2026-10-30 | Streamed intent tracks | Settled entries appended to a numbered session file during play; same v1 format, memory bounded | ✅ Confirmed |
 | 2026-10-31 | Kept intent sessions | Keep the newest 20 numbered files, pruned at startup | ✅ Confirmed |
+| 2026-10-31 | Recorded actions | Intentions (target block, recipe, eat) in the same session file, version 2 | ✅ Confirmed |
 
 ---
 
@@ -993,6 +994,39 @@ One credible approach, so no options were presented: keep the newest 20 files an
 - `simulation::stream`: `prune_sessions(dir, keep)`, plus a shared `session_numbers` helper that `next_session_path` now uses too. Files that are not numbered `.mcit` files are never touched.
 - `app`: `MAX_SESSIONS = 20`, and the call before the new stream is created.
 - Test: pruning removes only the lowest numbers, leaves other files alone, and treats a missing folder as empty. The window was not run by the assistant.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-31 | Initial entry | deltaog-117 |
+
+---
+
+### Recording Actions in Intent Tracks
+
+**Date:** 2026-10-31
+**Status:** Confirmed
+
+#### Context / Background
+A replay fed back walking and jumping only, so it matched the original run only if the world began exactly as before. Breaking, placing, crafting and eating were not in the file.
+
+#### Decision & Rationale
+Three options were presented; the choice was **A: record the player's intention in the same session file**. B (record the exact changes) fails whenever the world differs, because the recorded old values no longer fit. C (a second file) can disagree with the first after a crash and needs its own write and recovery code.
+- An action names its target, not the click: the camera's look direction is not recorded, so "break the block at (x, y, z)" is what can be played back. A replay works out the result from the world it finds, so a break with no block there is refused like a click at empty air.
+- Live play and replay share one path. A click works out its target block, then calls the same `perform` a replay calls, so what is recorded is what a replay does.
+- An action is stamped with the tick it happens before, and a replay performs it before that tick's steps, which is the order it had live.
+- Only actions that worked are recorded, so a click at air costs nothing in the file.
+- Keys and mouse do not act during a replay, as `F` already did not; otherwise a stray click would change the world under the replay.
+
+**Trade-offs accepted:** a replay in a different world gives a different run, not an identical one. Hits on a mob and rewinds are still not recorded. A craft stores a position in the recipe table, so adding recipes in the middle of the table would change what an old session crafts.
+
+#### Implementation Notes
+- File format version 2: a tag byte before each record (1 run, 2 action). Version 1 files are read as untagged runs. A file cut short mid-record is still recovered up to the cut, now for actions too.
+- New `simulation::action::Action`; `IntentLog` gains an ordered action list (several actions may share a tick); `IntentStream` writes settled actions with the runs and keeps the newest in memory for the ordering check.
+- `inventory::service` gains `gather_events_at` and `place_events_at`, which share their code with the look-direction versions.
+- Tests: round trips with random actions, cuts inside an action, bad tags and kinds, actions out of order, a version 1 file, streaming across flushes, and one integration test that a streamed session replays its actions on their ticks. The existing torn-tail replay test now appends a real cut-short run, since a bare byte 7 is now an unknown tag.
+- The window was not run by the assistant. Try it by playing a short session with a break, a place, a craft and a meal, then `cargo run -- --replay N`.
 
 #### Review / Update Log
 

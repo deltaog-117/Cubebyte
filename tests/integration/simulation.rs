@@ -5,6 +5,8 @@ use minecraft_clone::player::model::Player;
 use minecraft_clone::player::service::step;
 use minecraft_clone::shared::clock::{FixedClock, Tick};
 use minecraft_clone::shared::intent::{AXIS_MAX, Intent, Walk};
+use minecraft_clone::shared::voxel::{BlockId, WorldPos};
+use minecraft_clone::simulation::action::Action;
 use minecraft_clone::simulation::intent_log::ActorId;
 use minecraft_clone::simulation::model::Simulation;
 use minecraft_clone::simulation::replay::Replay;
@@ -95,4 +97,50 @@ proptest! {
         prop_assert_eq!(tick, intents.len() as u64);
         prop_assert_eq!(live, replayed);
     }
+}
+
+#[test]
+fn a_streamed_session_replays_its_actions_on_their_ticks() -> Result<(), String> {
+    let dir =
+        TempDir(std::env::temp_dir().join(format!("mcit-replay-actions-{}", std::process::id())));
+    let path = dir.0.join("0001.mcit");
+    let pos = WorldPos { x: 3, y: 4, z: -5 };
+    let acts = [
+        (2, Action::Break(pos)),
+        (
+            2,
+            Action::Place {
+                pos,
+                block: BlockId::STONE,
+            },
+        ),
+        (5, Action::Craft(1)),
+        (9, Action::Eat),
+    ];
+
+    let mut stream = IntentStream::new(path.clone());
+    for tick in 0..12 {
+        for (when, action) in acts {
+            if when == tick {
+                stream
+                    .record_action(Tick(tick), action)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        stream
+            .record(ActorId::PLAYER, Tick(tick), Intent::default())
+            .map_err(|e| e.to_string())?;
+    }
+    stream.finish().map_err(|e| e.to_string())?;
+
+    let replay = Replay::load(&path).map_err(|e| e.to_string())?;
+    for tick in 0..12 {
+        let expected: Vec<Action> = acts
+            .iter()
+            .filter(|(when, _)| *when == tick)
+            .map(|&(_, action)| action)
+            .collect();
+        assert_eq!(replay.actions_at(Tick(tick)).collect::<Vec<_>>(), expected);
+    }
+    Ok(())
 }

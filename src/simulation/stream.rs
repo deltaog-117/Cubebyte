@@ -5,10 +5,11 @@
 //! entries settle. Reading the whole history means reading the file and then the tail still
 //! in memory. What keeps that true:
 //!
-//! - the file is always the header plus whole runs, up to `good_len`;
+//! - the file is always the header plus whole records, up to `good_len`;
 //! - an entry leaves memory only after the run holding it was written;
 //! - each track's newest entry stays in memory, so a run is never cut off before it ends and
-//!   the rising-ticks rule keeps checking the next record;
+//!   the rising-ticks rule keeps checking the next record; the newest action stays too, for
+//!   the same ordering check;
 //! - a failed write is cut back to `good_len` before anything else is written, or, if it
 //!   cannot be cut back, nothing more is written to that file.
 //!
@@ -23,8 +24,9 @@ use thiserror::Error;
 
 use crate::shared::clock::Tick;
 use crate::shared::intent::Intent;
+use crate::simulation::action::Action;
 use crate::simulation::intent_log::{ActorId, IntentLog, RecordError};
-use crate::simulation::persist::{HEADER, push_runs};
+use crate::simulation::persist::{HEADER, push_actions, push_runs};
 
 /// Entries held in memory before they are written out. At this size an idle hour costs a
 /// handful of small writes, and a crash loses a minute or two of play at most.
@@ -141,13 +143,30 @@ impl IntentStream {
         Ok(())
     }
 
-    /// Writes everything but each track's newest entry and drops it from memory.
+    /// Adds `action` on `tick`. It is written out with the next flush of intents, which any
+    /// running game reaches within moments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::Record`] if `tick` is before the latest action's tick.
+    pub fn record_action(&mut self, tick: Tick, action: Action) -> Result<(), StreamError> {
+        self.tail.record_action(tick, action)?;
+        Ok(())
+    }
+
+    /// Writes everything but each track's newest entry and the newest action, and drops it
+    /// from memory.
     fn flush(&mut self) -> io::Result<()> {
         let mut runs = Vec::new();
         for (actor, track) in self.tail.tracks() {
             let settled = track.split_last().map_or(&[][..], |(_, rest)| rest);
             push_runs(&mut runs, actor, settled);
         }
+        let actions = self.tail.actions();
+        push_actions(
+            &mut runs,
+            actions.split_last().map_or(&[][..], |(_, rest)| rest),
+        );
         self.append(&runs)?;
         self.tail.retain_newest();
         self.flush_at = self.limit;
@@ -178,6 +197,7 @@ impl IntentStream {
         for (actor, track) in self.tail.tracks() {
             push_runs(&mut runs, actor, track);
         }
+        push_actions(&mut runs, self.tail.actions());
         self.append(&runs)?;
         self.sink.map_or(Ok(()), |sink| sink.file.sync_all())
     }
@@ -339,6 +359,53 @@ mod tests {
                 prop_assert_eq!(track, &reference.track(actor)[..track.len()]);
             }
         }
+    }
+
+    proptest! {
+        #[test]
+        fn actions_reach_the_file_in_order_across_flushes(
+            steps in steps(),
+            gaps in prop::collection::vec(0u64..3, 0..30),
+            limit in 1usize..12,
+        ) {
+            let dir = TempDir::new();
+            let mut stream = IntentStream::with_limit(dir.session(), limit);
+            let mut reference = play(&mut stream, &steps);
+            let mut tick = 0;
+            for (index, gap) in gaps.into_iter().enumerate() {
+                tick += gap;
+                let action = Action::Craft(index as u8);
+                stream.record_action(Tick(tick), action).unwrap();
+                reference.record_action(Tick(tick), action).unwrap();
+                // More play between actions makes flushes fall between them.
+                stream.record(ActorId::PLAYER, Tick(10_000 + index as u64), Intent::default()).unwrap();
+                reference.record(ActorId::PLAYER, Tick(10_000 + index as u64), Intent::default()).unwrap();
+            }
+            stream.finish().unwrap();
+
+            let expected = (!reference.is_empty()).then_some(reference);
+            prop_assert_eq!(load(&dir.session()).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn an_action_going_back_in_time_is_refused_and_changes_nothing() {
+        let dir = TempDir::new();
+        let mut stream = IntentStream::with_limit(dir.session(), 100);
+        stream.record_action(Tick(5), Action::Eat).unwrap();
+        let refused = stream.record_action(Tick(4), Action::Eat);
+        assert!(matches!(refused, Err(StreamError::Record(_))));
+        assert_eq!(stream.tail.actions().len(), 1);
+    }
+
+    #[test]
+    fn a_session_that_only_acts_still_leaves_a_file() {
+        let dir = TempDir::new();
+        let mut stream = IntentStream::new(dir.session());
+        stream.record_action(Tick(1), Action::Eat).unwrap();
+        stream.finish().unwrap();
+        let log = load(&dir.session()).unwrap().unwrap();
+        assert_eq!(log.actions().len(), 1);
     }
 
     #[test]

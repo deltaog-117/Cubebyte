@@ -1,9 +1,11 @@
 //! Playing a saved session back: the intents it recorded for the player and each mob, looked
 //! up by tick.
 //!
-//! A replay only supplies intents. The caller feeds them to fresh bodies in place of the
-//! keyboard and the mob's own choices, which reproduces the run as long as the world is the
-//! same as when it was recorded; edits, crafting and eating are not in the tracks.
+//! A replay supplies intents and actions. The caller feeds the intents to fresh bodies in
+//! place of the keyboard and the mob's own choices, and performs the actions on their ticks,
+//! which reproduces the run as long as the world is the same as when it was recorded. An
+//! action that no longer fits the world is refused like any other, so a different world
+//! gives a different run, not a crash. Hits on a mob and rewinds are not in the session.
 
 use std::fs;
 use std::io;
@@ -13,6 +15,7 @@ use thiserror::Error;
 
 use crate::shared::clock::Tick;
 use crate::shared::intent::Intent;
+use crate::simulation::action::Action;
 use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::persist::{DecodeError, decode_recovering};
 
@@ -72,6 +75,11 @@ impl Replay {
     /// actor was not there, or the session ended.
     pub fn intent(&self, actor: ActorId, tick: Tick) -> Option<Intent> {
         self.log.intent_at(actor, tick)
+    }
+
+    /// The actions taken on `tick`, in order. Empty when there were none.
+    pub fn actions_at(&self, tick: Tick) -> impl Iterator<Item = Action> + '_ {
+        self.log.actions_at(tick).iter().map(|entry| entry.action)
     }
 }
 
@@ -167,6 +175,20 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_gives_the_actions_of_a_tick_in_order() {
+        let mut log = log_from(0, 3);
+        for (tick, action) in [(1, Action::Eat), (1, Action::Craft(2)), (2, Action::Eat)] {
+            assert_eq!(log.record_action(Tick(tick), action), Ok(()));
+        }
+        let Ok(replay) = Replay::try_new(log) else {
+            panic!("a track from tick 0 must be accepted");
+        };
+        let at_one: Vec<_> = replay.actions_at(Tick(1)).collect();
+        assert_eq!(at_one, [Action::Eat, Action::Craft(2)]);
+        assert_eq!(replay.actions_at(Tick(0)).count(), 0);
+    }
+
+    #[test]
     fn a_session_without_the_first_tick_is_refused() {
         assert!(matches!(
             Replay::try_new(IntentLog::default()),
@@ -191,7 +213,8 @@ mod tests {
     fn a_file_cut_short_replays_the_steps_before_the_cut() {
         let file = TempFile::new();
         let mut bytes = encode(&log_from(0, 4));
-        bytes.extend_from_slice(&[7, 7, 7]);
+        // The start of a run (tag 1) that the crash cut short.
+        bytes.extend_from_slice(&[1, 7, 7]);
         assert!(fs::write(&file.0, bytes).is_ok());
         let Ok(replay) = Replay::load(&file.0) else {
             panic!("a torn tail must still load");

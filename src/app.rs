@@ -17,7 +17,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
-use crate::building::service::REACH;
+use crate::building::service::{REACH, break_target, place_target};
 use crate::combat::service::{Outcome, hit, respawn, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
@@ -29,7 +29,7 @@ use crate::events::replay::replay_chunk;
 use crate::events::rewind::{log_action, rewind_events};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
-use crate::inventory::service::{StockError, gather_events, place_events};
+use crate::inventory::service::{StockError, gather_events_at, place_events_at};
 use crate::items::registry;
 use crate::mobs::model::Zombie;
 use crate::mobs::service as mobs;
@@ -43,7 +43,8 @@ use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::Event;
 use crate::shared::intent::Walk;
-use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
+use crate::shared::voxel::{BlockId, CHUNK_SIZE, ChunkPos, WorldPos};
+use crate::simulation::action::Action;
 use crate::simulation::intent_log::ActorId;
 use crate::simulation::model::Simulation;
 use crate::simulation::replay::{ArgsError, Replay, ReplayError, replay_session};
@@ -334,38 +335,19 @@ impl App {
         if button == MouseButton::Left && running.hit_zombie(origin, direction) {
             return;
         }
-        let planned = match button {
-            MouseButton::Left => {
-                gather_events(&running.world, &running.inventory, origin, direction)
+        let action = match button {
+            MouseButton::Left => break_target(&running.world, origin, direction).map(Action::Break),
+            MouseButton::Right => {
+                place_target(&running.world, origin, direction).map(|pos| Action::Place {
+                    pos,
+                    block: selected.id(),
+                })
             }
-            MouseButton::Right => place_events(
-                &running.world,
-                &running.inventory,
-                origin,
-                direction,
-                selected,
-            ),
             _ => return,
         };
-        match planned {
-            Ok((pos, events)) => {
-                if !running.commit_or_warn(&events) {
-                    return;
-                }
-                running.inventory_dirty = true;
-                running.remesh_around(pos);
-                running.refresh_title();
-            }
-            // Clicking at empty air, with nothing to place, or with a full pack is normal,
-            // not a fault.
-            Err(
-                StockError::Edit(
-                    EditError::NothingInReach | EditError::NoFace | EditError::Occupied,
-                )
-                | StockError::Full
-                | StockError::Missing,
-            ) => {}
-            Err(error) => tracing::warn!(%error, "edit rejected"),
+        // Clicking at empty air, or from inside a block, is normal, not a fault.
+        if let Ok(action) = action {
+            running.act(action);
         }
     }
 
@@ -384,8 +366,10 @@ impl App {
         if steps > 0 {
             let shown = (running.stats.health(), running.stats.hunger());
             for step_index in 0..u64::from(steps) {
+                let tick = Tick(first + step_index);
+                running.replay_actions(tick);
                 running.stats.step();
-                running.step_zombie(Tick(first + step_index));
+                running.step_zombie(tick);
             }
             if running.stats.is_dead() {
                 running.die();
@@ -701,25 +685,102 @@ impl Running {
 
     /// Crafts `id` once. Missing ingredients or a full pack are normal, not a fault.
     fn craft_recipe(&mut self, id: RecipeId) {
-        let Ok(events) = craft_events(&self.inventory, id) else {
-            return;
-        };
-        if self.commit_or_warn(&events) {
-            self.inventory_dirty = true;
-            self.refresh_title();
-        }
+        self.act(Action::Craft(id.0));
     }
 
     /// Eats one food item. Being full or having no food is normal, not a fault.
     fn eat_food(&mut self) {
-        let Ok(meal) = eat_events(&self.inventory, &self.stats) else {
-            return;
-        };
-        if self.commit_or_warn(&meal.events) {
-            self.stats.restore_hunger(meal.restored);
-            self.inventory_dirty = true;
-            self.refresh_title();
+        self.act(Action::Eat);
+    }
+
+    /// Does `action` for the player now. While a replay runs the keys and the mouse do not
+    /// act, since the replay supplies every action itself.
+    fn act(&mut self, action: Action) {
+        if self.replay.is_none() {
+            self.perform(self.simulation.tick(), action);
         }
+    }
+
+    /// Performs what the replay recorded for `tick`, before that tick's steps, as the player
+    /// did it then.
+    fn replay_actions(&mut self, tick: Tick) {
+        let due: Vec<Action> = self
+            .replay
+            .as_ref()
+            .map(|replay| replay.actions_at(tick).collect())
+            .unwrap_or_default();
+        for action in due {
+            self.perform(tick, action);
+        }
+    }
+
+    /// Does `action` on `tick`, and keeps it in the intent log if it worked. A refusal (no
+    /// block there, nothing to place, a missing ingredient) changes and records nothing.
+    fn perform(&mut self, tick: Tick, action: Action) {
+        let done = match action {
+            Action::Break(pos) => self.break_at(pos),
+            Action::Place { pos, block } => self.place_at(pos, block),
+            Action::Craft(recipe) => self.craft_once(RecipeId(recipe)),
+            Action::Eat => self.eat_once(),
+        };
+        if !done {
+            return;
+        }
+        if let Err(error) = self.intents.record_action(tick, action) {
+            tracing::warn!(%error, "cannot record an action");
+        }
+        self.inventory_dirty = true;
+        self.refresh_title();
+    }
+
+    /// Breaks the block at `pos` and keeps what it yields. Reports whether it did.
+    fn break_at(&mut self, pos: WorldPos) -> bool {
+        let planned = gather_events_at(&self.world, &self.inventory, pos);
+        let Some(events) = unless_routine(planned) else {
+            return false;
+        };
+        if !self.commit_or_warn(&events) {
+            return false;
+        }
+        self.remesh_around(pos);
+        true
+    }
+
+    /// Places `block` at `pos`, spending one from the pack. Reports whether it did.
+    fn place_at(&mut self, pos: WorldPos, block: BlockId) -> bool {
+        let Ok(block) = SolidBlock::try_new(block) else {
+            tracing::warn!(?block, "cannot place a block that is not solid");
+            return false;
+        };
+        let planned = place_events_at(&self.world, &self.inventory, pos, block);
+        let Some(events) = unless_routine(planned) else {
+            return false;
+        };
+        if !self.commit_or_warn(&events) {
+            return false;
+        }
+        self.remesh_around(pos);
+        true
+    }
+
+    /// Crafts `id` once. Reports whether it did.
+    fn craft_once(&mut self, id: RecipeId) -> bool {
+        let Ok(events) = craft_events(&self.inventory, id) else {
+            return false;
+        };
+        self.commit_or_warn(&events)
+    }
+
+    /// Eats one food item. Reports whether it did.
+    fn eat_once(&mut self) -> bool {
+        let Ok(meal) = eat_events(&self.inventory, &self.stats) else {
+            return false;
+        };
+        if !self.commit_or_warn(&meal.events) {
+            return false;
+        }
+        self.stats.restore_hunger(meal.restored);
+        true
     }
 
     /// Shows health, hunger, the carried items and the selected recipe in the window title
@@ -852,6 +913,25 @@ const NEIGHBOURS: [[i32; 3]; 6] = [
     [0, 0, 1],
     [0, 0, -1],
 ];
+
+/// The plan, or `None` if the edit was refused. Aiming at air, a full pack and having nothing
+/// to place are normal play; anything else is reported.
+fn unless_routine<T>(planned: Result<T, StockError>) -> Option<T> {
+    planned
+        .inspect_err(|error| {
+            let routine = matches!(
+                error,
+                StockError::Edit(
+                    EditError::NothingInReach | EditError::NoFace | EditError::Occupied
+                ) | StockError::Full
+                    | StockError::Missing
+            );
+            if !routine {
+                tracing::warn!(%error, "edit rejected");
+            }
+        })
+        .ok()
+}
 
 /// The saved edits at `path`, or an empty log when there is no save yet. Chunks replay
 /// their own edits as they stream in, so this is all a restart needs.
