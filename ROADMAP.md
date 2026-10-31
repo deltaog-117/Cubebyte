@@ -39,6 +39,7 @@ Items are organized by priority, not by timeline.
 - ✅ Saving intent tracks: the intent log has a versioned file format (`MCIT`) that stores runs of one intent, so idle stretches cost almost nothing; the window writes `intents.mcit` on exit and a reloaded track replays the run bit for bit
 - ✅ Streaming intent tracks: settled entries are appended to a numbered session file (`intents/0001.mcit`, ...) as play goes on, so memory is bounded, a crash loses little, older sessions are kept, and a file cut short by a crash can be read back with `decode_recovering`
 - ✅ Replaying intent tracks: `cargo run -- --replay 3` loads `intents/0003.mcit` and drives the player and the zombie from it; when the recording has no step for a tick, the keys are live again from where the replay stopped, and the new play is recorded to a fresh session file that holds the replayed steps too
+- ✅ Limiting kept intent sessions: at startup the game deletes the oldest `intents/NNNN.mcit` files so at most 20 remain, the new session included
 
 ---
 
@@ -46,7 +47,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
-- **Saving intent tracks** – Three slices done (see Completed): the file format, streaming to numbered session files, and replay at startup. Still to do: a limit on how many old sessions are kept (today all are), and recording the edits, crafting and eating that a replay does not reproduce (it matches only if the world is the same as when the run started).
+- **Saving intent tracks** – Four slices done (see Completed): the file format, streaming to numbered session files, replay at startup, and a limit of 20 kept sessions. Still to do: recording the edits, crafting and eating that a replay does not reproduce (it matches only if the world is the same as when the run started).
 
 ---
 

@@ -191,27 +191,51 @@ impl IntentStream {
 ///
 /// Returns the I/O error if `dir` exists but cannot be listed, or if every number is taken.
 pub fn next_session_path(dir: &Path) -> io::Result<PathBuf> {
-    let mut newest = 0u32;
-    match fs::read_dir(dir) {
-        Ok(entries) => {
-            for entry in entries {
-                let path = entry?.path();
-                let number = path
-                    .extension()
-                    .filter(|extension| *extension == EXTENSION)
-                    .and_then(|_| path.file_stem())
-                    .and_then(OsStr::to_str)
-                    .and_then(|stem| stem.parse::<u32>().ok());
-                newest = newest.max(number.unwrap_or(0));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    let newest = session_numbers(dir)?.into_iter().max().unwrap_or(0);
     let next = newest
         .checked_add(1)
         .ok_or_else(|| io::Error::other("every session number is taken"))?;
     Ok(session_path(dir, next))
+}
+
+/// The numbers of the session files in `dir`, in no particular order. A missing `dir` has
+/// none; other files are skipped.
+fn session_numbers(dir: &Path) -> io::Result<Vec<u32>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut numbers = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let number = path
+            .extension()
+            .filter(|extension| *extension == EXTENSION)
+            .and_then(|_| path.file_stem())
+            .and_then(OsStr::to_str)
+            .and_then(|stem| stem.parse::<u32>().ok());
+        numbers.extend(number);
+    }
+    Ok(numbers)
+}
+
+/// Deletes the oldest session files in `dir` until at most `keep` remain, and returns how
+/// many it deleted. The newest are the highest numbers, which [`next_session_path`] hands
+/// out in order. Files that are not session files are left alone.
+///
+/// # Errors
+///
+/// Returns the I/O error if `dir` cannot be listed or a file cannot be deleted. Files
+/// deleted before the error stay deleted.
+pub fn prune_sessions(dir: &Path, keep: usize) -> io::Result<usize> {
+    let mut numbers = session_numbers(dir)?;
+    numbers.sort_unstable();
+    let surplus = numbers.len().saturating_sub(keep);
+    for &number in &numbers[..surplus] {
+        fs::remove_file(session_path(dir, number))?;
+    }
+    Ok(surplus)
 }
 
 /// The path of session `number` in `dir`, the name [`next_session_path`] gives it.
@@ -405,6 +429,23 @@ mod tests {
             fs::write(dir.0.join(name), b"").unwrap();
         }
         assert_eq!(next_session_path(&dir.0).unwrap(), dir.0.join("0008.mcit"));
+    }
+
+    #[test]
+    fn pruning_deletes_the_oldest_sessions_and_nothing_else() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        for name in ["0001.mcit", "0002.mcit", "0010.mcit", "notes.txt", "x.mcit"] {
+            fs::write(dir.0.join(name), b"").unwrap();
+        }
+        assert_eq!(prune_sessions(&dir.0, 2).unwrap(), 1);
+        assert!(!dir.0.join("0001.mcit").exists());
+        for name in ["0002.mcit", "0010.mcit", "notes.txt", "x.mcit"] {
+            assert!(dir.0.join(name).exists(), "{name}");
+        }
+        assert_eq!(prune_sessions(&dir.0, 2).unwrap(), 0);
+        assert_eq!(prune_sessions(&dir.0, 0).unwrap(), 2);
+        assert_eq!(prune_sessions(&dir.0.join("missing"), 0).unwrap(), 0);
     }
 
     #[test]

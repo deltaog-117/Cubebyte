@@ -47,7 +47,7 @@ use crate::shared::voxel::{CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::intent_log::ActorId;
 use crate::simulation::model::Simulation;
 use crate::simulation::replay::{ArgsError, Replay, ReplayError, replay_session};
-use crate::simulation::stream::{IntentStream, next_session_path, session_path};
+use crate::simulation::stream::{IntentStream, next_session_path, prune_sessions, session_path};
 use crate::survival::model::Stats;
 use crate::survival::service::eat_events;
 use crate::ui::draw::overlay;
@@ -67,6 +67,10 @@ const INVENTORY_PATH: &str = "inventory.mcin";
 /// Where intent tracks are kept, relative to the working directory: one numbered file per
 /// session, because ticks restart at zero each session and earlier sessions are kept.
 const INTENTS_DIR: &str = "intents";
+
+/// Most session files kept in [`INTENTS_DIR`], the one being recorded included. A session of
+/// idle play is a few bytes, but an active one is not, and nothing else ever deletes them.
+const MAX_SESSIONS: usize = 20;
 
 /// Chunks kept loaded in each horizontal direction around the camera.
 const LOAD_RADIUS: u8 = 4;
@@ -219,6 +223,10 @@ impl App {
 
         let log = open_log(Path::new(SAVE_PATH))?;
         let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
+        // Makes room for the new session. A replayed session is already in memory by now.
+        if let Err(error) = prune_sessions(Path::new(INTENTS_DIR), MAX_SESSIONS - 1) {
+            tracing::warn!(%error, "cannot delete old intent sessions");
+        }
         let intents = IntentStream::new(
             next_session_path(Path::new(INTENTS_DIR)).map_err(AppError::SaveIntents)?,
         );

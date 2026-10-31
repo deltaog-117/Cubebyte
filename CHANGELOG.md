@@ -120,6 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Property tests that a saved log decodes to an equal log with the same bytes each time, that a file cut inside a run is rejected, that arbitrary bytes never panic the reader, and that replaying a saved and reloaded player track reproduces the run exactly
 - `simulation::replay`: `Replay` loads a numbered session file (a file cut short by a crash gives the steps before the cut) and looks up what the player or a mob asked for on a tick; `replay_session` reads `--replay <number>` from the command line; `stream::session_path` names a session file
 - `cargo run -- --replay 3` plays `intents/0003.mcit` back: the player and the zombie move by the recorded steps, and the first tick with no recorded player step hands the keys back; the window title says while a replay runs
+- `stream::prune_sessions` deletes the oldest numbered intent session files down to a given count; the game keeps at most 20 (the one being recorded included) and prunes at startup
 
 ### Changed
 - `app` writes intent tracks through `IntentStream` into `intents/NNNN.mcit`, one file per session, instead of replacing `intents.mcit` on exit; `simulation::persist` keeps the same format (version 1) and its `save` and `load`

@@ -33,6 +33,7 @@
 | 2026-10-29 | Bounded log and redo | Fold old actions into a per-chunk base of final blocks, keep 256 rewindable; redo from an in-memory stack | ✅ Confirmed |
 | 2026-10-30 | Saved intent tracks | Own `MCIT` file of runs (one intent held over consecutive ticks); written on exit, replacing the last session's | ✅ Confirmed |
 | 2026-10-30 | Streamed intent tracks | Settled entries appended to a numbered session file during play; same v1 format, memory bounded | ✅ Confirmed |
+| 2026-10-31 | Kept intent sessions | Keep the newest 20 numbered files, pruned at startup | ✅ Confirmed |
 
 ---
 
@@ -972,3 +973,29 @@ Decisions made while building it, which differ from the plan given before coding
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-30 | Initial entry | deltaog-117 |
+
+---
+
+### Limiting Kept Intent Sessions
+
+**Date:** 2026-10-31
+**Status:** Confirmed
+
+#### Context / Background
+Every game start adds a numbered file to `intents/` and nothing deleted them. The replay slice listed this as an open trade-off.
+
+#### Decision & Rationale
+One credible approach, so no options were presented: keep the newest 20 files and delete the older ones when the game starts. Session numbers only go up, so "oldest" is simply the lowest numbers. Pruning at startup, not at exit, means a crash cannot skip it, and it leaves room for the new session by keeping 19 old ones. A replayed session is already loaded into memory before the window opens, so pruning cannot take it away.
+
+**Trade-offs accepted:** the limit is a constant, not a setting. Replaying `--replay N` for a session older than the newest 20 will not work after a few more runs. A failed deletion only logs a warning and play goes on.
+
+#### Implementation Notes
+- `simulation::stream`: `prune_sessions(dir, keep)`, plus a shared `session_numbers` helper that `next_session_path` now uses too. Files that are not numbered `.mcit` files are never touched.
+- `app`: `MAX_SESSIONS = 20`, and the call before the new stream is created.
+- Test: pruning removes only the lowest numbers, leaves other files alone, and treats a missing folder as empty. The window was not run by the assistant.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-10-31 | Initial entry | deltaog-117 |
