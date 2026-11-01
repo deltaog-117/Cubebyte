@@ -1,9 +1,11 @@
 //! Taking hits, dying and starting over, and how hard the held items hit.
 
 use crate::combat::model::Damage;
+use crate::events::apply::slot_events;
 use crate::inventory::model::Inventory;
 use crate::items::registry;
-use crate::survival::model::Stats;
+use crate::shared::event::Event;
+use crate::survival::model::{METER_MAX, Stats};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -20,6 +22,34 @@ pub fn hit(stats: &mut Stats, damage: Damage) -> Outcome {
     } else {
         Outcome::Survived
     }
+}
+
+/// The event for `damage` taken at the current health, which is the points health really
+/// loses: none when the player is already dead.
+pub fn hit_events(stats: &Stats, damage: Damage) -> Vec<Event> {
+    let lost = stats.health_loss(damage.points());
+    if lost == 0 {
+        Vec::new()
+    } else {
+        vec![Event::HealthChanged { by: lost }]
+    }
+}
+
+/// The events [`respawn`] amounts to: both meters refilled and the pack emptied. Moving the
+/// player to the spawn point and restarting the stats clock are left to the caller, which
+/// knows where the spawn is and owns the clock.
+pub fn respawn_events(stats: &Stats, inventory: &Inventory) -> Vec<Event> {
+    let mut events = Vec::new();
+    let health = stats.health_gain(METER_MAX);
+    if health != 0 {
+        events.push(Event::HealthChanged { by: health });
+    }
+    let hunger = stats.hunger_gain(METER_MAX);
+    if hunger != 0 {
+        events.push(Event::HungerChanged { by: hunger });
+    }
+    events.extend(slot_events(inventory, &Inventory::default()));
+    events
 }
 
 /// Starts the player over: full meters and an empty inventory.
@@ -85,5 +115,34 @@ mod tests {
         assert_eq!(strike(&inventory), Damage::FIST);
         inventory.add(ItemId::SWORD, 1).unwrap();
         assert_eq!(strike(&inventory).points(), 4);
+    }
+
+    #[test]
+    fn a_hit_event_carries_the_health_really_lost() {
+        let mut stats = Stats::default();
+        assert_eq!(
+            hit_events(&stats, damage(5)),
+            [Event::HealthChanged { by: -5 }]
+        );
+        stats.hurt(18);
+        assert_eq!(
+            hit_events(&stats, damage(5)),
+            [Event::HealthChanged { by: -2 }]
+        );
+        stats.hurt(2);
+        assert!(hit_events(&stats, damage(5)).is_empty());
+    }
+
+    #[test]
+    fn respawn_events_refill_the_meters_and_empty_the_pack() {
+        let (mut stats, mut inventory) = (Stats::default(), Inventory::default());
+        inventory.add(ItemId::STONE, 30).unwrap();
+        hit(&mut stats, damage(255));
+
+        let events = respawn_events(&stats, &inventory);
+
+        assert_eq!(events[0], Event::HealthChanged { by: 20 });
+        assert!(events.len() > 1);
+        assert!(respawn_events(&Stats::default(), &Inventory::default()).is_empty());
     }
 }

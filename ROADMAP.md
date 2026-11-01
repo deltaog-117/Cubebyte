@@ -41,6 +41,7 @@ Items are organized by priority, not by timeline.
 - ✅ Replaying intent tracks: `cargo run -- --replay 3` loads `intents/0003.mcit` and drives the player and the zombie from it; when the recording has no step for a tick, the keys are live again from where the replay stopped, and the new play is recorded to a fresh session file that holds the replayed steps too
 - ✅ Limiting kept intent sessions: at startup the game deletes the oldest `intents/NNNN.mcit` files so at most 20 remain, the new session included
 - ✅ Recording hits and rewinds in intent tracks: hits on the zombie (named by the zombie's id), `Z` and `Y` are saved in the session file (version 3; versions 1 and 2 still load) and performed again by a replay, so a replay of a run that used them no longer drifts
+- ✅ Meters under events: hunger and health changes are events that carry the points really moved (`HungerChanged`, `HealthChanged`), so a meal, a zombie's hit, the hunger that drains on its own and a respawn all go through the one `events::apply` door and the log; the passive ones are logged but `Z` steps over them, so undoing a meal still works after hunger has drained; a respawn is a barrier that `Z` cannot rewind past; the saved log is version 5
 - ✅ Recording actions in intent tracks: breaking, placing, crafting and eating are saved in the session file (version 2; version 1 files still load) as the target block, the recipe or the meal, on the tick they happened; a replay performs them again and records them in its own new session, and keys and mouse do not act while it runs
 
 ---
@@ -58,13 +59,14 @@ Items are organized by priority, not by timeline.
 - **Time rewind** – First two slices done (see Completed): `Z` undoes one action at a time, `Y` brings it back, and the log keeps the last 256 actions rewindable. Still to do:
   - keeping the folded-away history (an archive file) for a timelapse or timeline forks; today it is discarded;
   - saving the redo stack, which is forgotten on restart;
-  - undoing what is not an event yet: walking, hunger, health and respawn (a rewind refused after a respawn, because the pack no longer matches, is logged and skipped);
+  - undoing what is not an event yet: walking;
+  - a rewind of a meal is refused (and logged) when the undo would push a meter out of 0 to 20, for example right after eating at near-zero hunger;
   - rewinding edits in chunks that are not loaded.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
 - **World interface for scripts** – First slice done (see Completed): teleport, give item and set block, each logged with its old value, checked for permission and range, and capped per tick. Still to do:
   - spawning mobs, which needs mobs under the event log (today there is one `Option<Zombie>` in `app`);
-  - the other event-less changes: breaking, placing, crafting and eating are events now; still without events are the hunger and health meters (eating restores hunger outside the events), respawn, and walking and mob movement, so rewind cannot yet undo them;
+  - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain and respawn are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
   - reads (look, find, query);
   - a cost per action (fuel or energy) and a cooldown, tied to time as a resource;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
@@ -102,8 +104,8 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, add reads and a cost per action, then bring the meters (hunger, health) and respawn under events. The language comes after.
-2. **Time rewind, next slice** – Undo what is not an event yet (hunger, health, respawn), then rewind edits in unloaded chunks.
+1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, then add reads and a cost per action. The language comes after.
+2. **Time rewind, next slice** – Rewind edits in unloaded chunks, then save the redo stack.
 
 ---
 

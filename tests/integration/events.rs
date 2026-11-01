@@ -1,9 +1,11 @@
 use glam::Vec3;
 use minecraft_clone::building::model::SolidBlock;
 use minecraft_clone::building::service::{break_block, place_block};
+use minecraft_clone::combat::model::Damage;
+use minecraft_clone::combat::service::{hit_events, respawn_events};
 use minecraft_clone::crafting::registry::RecipeId;
 use minecraft_clone::crafting::service::{craft, craft_events};
-use minecraft_clone::events::apply::{Stage, apply, apply_all};
+use minecraft_clone::events::apply::{Stage, apply, apply_all, slot_events};
 use minecraft_clone::events::log::{ActionKind, EventLog};
 use minecraft_clone::events::persist::{decode, encode};
 use minecraft_clone::events::redo::RedoStack;
@@ -13,10 +15,11 @@ use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::inventory::service::{
     gather_block, gather_events, place_events, place_from_stock,
 };
+use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::player::model::Player;
 use minecraft_clone::shared::event::Event;
 use minecraft_clone::shared::voxel::{BlockId, ChunkPos, WorldPos};
-use minecraft_clone::survival::model::Stats;
+use minecraft_clone::survival::model::{Meter, Stats};
 use minecraft_clone::survival::service::{eat, eat_events};
 use minecraft_clone::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use minecraft_clone::world::model::World;
@@ -109,6 +112,7 @@ proptest! {
             stats_direct.step();
         }
         let mut stats_events = stats_direct;
+        let stats_start = stats_direct;
         let (mut world_direct, mut log_direct, mut pack_direct) =
             (start.clone(), EventLog::new(), Inventory::default());
         let mut world = start.clone();
@@ -121,30 +125,28 @@ proptest! {
                 Play::Gather(x, y, z) => {
                     let dir = Vec3::new(x, y, z);
                     let direct = gather_block(&mut world_direct, &mut log_direct, &mut pack_direct, eye, dir).ok();
-                    (direct.is_some(), gather_events(&world, &pack, eye, dir).ok().map(|(_, e)| (e, 0)))
+                    (direct.is_some(), gather_events(&world, &pack, eye, dir).ok().map(|(_, e)| e))
                 }
                 Play::Place(x, y, z) => {
                     let dir = Vec3::new(x, y, z);
                     let direct = place_from_stock(&mut world_direct, &mut log_direct, &mut pack_direct, eye, dir, SolidBlock::STONE).ok();
-                    (direct.is_some(), place_events(&world, &pack, eye, dir, SolidBlock::STONE).ok().map(|(_, e)| (e, 0)))
+                    (direct.is_some(), place_events(&world, &pack, eye, dir, SolidBlock::STONE).ok().map(|(_, e)| e))
                 }
                 Play::Craft(id) => {
                     let direct = craft(&mut pack_direct, RecipeId(id)).ok();
-                    (direct.is_some(), craft_events(&pack, RecipeId(id)).ok().map(|e| (e, 0)))
+                    (direct.is_some(), craft_events(&pack, RecipeId(id)).ok())
                 }
                 Play::Eat => {
                     let direct = eat(&mut pack_direct, &mut stats_direct).ok();
                     let meal = eat_events(&pack, &stats_events).ok();
-                    let restored = meal.as_ref().map_or(0, |m| m.restored);
-                    (direct.is_some(), meal.map(|m| (m.events, restored)))
+                    (direct.is_some(), meal.map(|m| m.events))
                 }
             };
             // Both paths accept or refuse the same steps.
             prop_assert_eq!(planned.0, planned.1.is_some());
-            if let Some((events, restored)) = planned.1 {
-                let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack };
+            if let Some(events) = planned.1 {
+                let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events };
                 prop_assert_eq!(apply_all(&mut stage, &events), Ok(()));
-                stats_events.restore_hunger(restored);
                 applied.extend(events);
             }
             prop_assert_eq!(&world, &world_direct);
@@ -153,11 +155,12 @@ proptest! {
         }
 
         for event in applied.iter().rev() {
-            let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack };
+            let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events };
             prop_assert_eq!(apply(&mut stage, &event.inverse()), Ok(()));
         }
         prop_assert_eq!(world, start);
         prop_assert_eq!(pack, Inventory::default());
+        prop_assert_eq!(stats_events, stats_start);
     }
 }
 
@@ -268,4 +271,72 @@ fn inverting_a_run_twice_gives_the_run_back() {
     let events = action_events(&mut world, &[(0, 0, 0, 1), (0, 0, 0, 2), (1, 0, 0, 3)]);
 
     assert_eq!(inverse_run(&inverse_run(&events)), events);
+}
+
+/// The parts of the game events change, with the log they are written to.
+struct Game {
+    world: World,
+    player: Player,
+    pack: Inventory,
+    stats: Stats,
+    log: EventLog,
+}
+
+impl Game {
+    fn commit(&mut self, events: &[Event], kind: ActionKind) {
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.pack,
+            stats: &mut self.stats,
+        };
+        assert_eq!(apply_all(&mut stage, events), Ok(()));
+        log_action(&mut self.log, events, kind);
+    }
+}
+
+// A meal is an edit; the hunger that drains and the zombie hit that land after it are
+// passive. `Z` undoes the meal only, leaving both in place, and a respawn closes the history:
+// nothing before it can be rewound.
+#[test]
+fn rewind_undoes_a_meal_across_passive_changes_and_stops_at_a_respawn() {
+    let mut game = Game {
+        world: World::default(),
+        player: Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
+        pack: Inventory::default(),
+        stats: Stats::default(),
+        log: EventLog::new(),
+    };
+    for _ in 0..600 * 10 {
+        game.stats.step();
+    }
+    game.pack.add(ItemId::BREAD, 2).unwrap();
+    let (hungry, start_pack) = (game.stats, game.pack.clone());
+
+    let meal = eat_events(&game.pack, &game.stats).unwrap();
+    game.commit(&meal.events, ActionKind::Edit);
+    game.commit(&[Event::HungerChanged { by: -1 }], ActionKind::Passive);
+    let blow = hit_events(&game.stats, Damage::try_new(6).unwrap());
+    game.commit(&blow, ActionKind::Passive);
+
+    let undo = rewind_events(&game.log).unwrap();
+    game.commit(&undo, ActionKind::Rewind);
+
+    assert_eq!(game.pack, start_pack);
+    assert_eq!(game.stats.hunger().value(), hungry.hunger().value() - 1);
+    assert_eq!(game.stats.health().value(), hungry.health().value() - 6);
+    assert_eq!(rewind_events(&game.log), None);
+
+    let mut more = game.pack.clone();
+    more.add(ItemId::DIRT, 3).unwrap();
+    let gift = slot_events(&game.pack, &more);
+    game.commit(&gift, ActionKind::Edit);
+    assert!(rewind_events(&game.log).is_some());
+    let over = respawn_events(&game.stats, &game.pack);
+    game.commit(&over, ActionKind::Respawn);
+
+    assert_eq!(game.stats.health(), Meter::FULL);
+    assert_eq!(game.stats.hunger(), Meter::FULL);
+    assert!(game.pack.is_empty());
+    assert_eq!(rewind_events(&game.log), None);
 }

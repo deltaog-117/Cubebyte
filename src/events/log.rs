@@ -12,6 +12,12 @@ pub enum ActionKind {
     Edit,
     /// The undoing of the latest edit that had not been undone yet.
     Rewind,
+    /// A change the world made by itself: hunger draining, a mob's hit. Rewind steps over
+    /// it, so it can never be the thing `Z` undoes, though it stays in the log.
+    Passive,
+    /// The player died and started over. Rewind stops here: what came before no longer
+    /// matches the pack and the meters, so there is nothing left to undo past it.
+    Respawn,
 }
 
 /// Where an action's events end in the log.
@@ -161,13 +167,15 @@ impl EventLog {
     }
 
     /// The events of the latest edit that no later rewind has undone, in the order they
-    /// happened. Each rewind cancels the closest edit before it, like matching brackets, so
+    /// happened, or `None` if a respawn comes first. Each rewind cancels the closest edit before it, like matching brackets, so
     /// rewinding again steps back through older edits instead of redoing the last one.
     pub fn latest_live_edit(&self) -> Option<&[Event]> {
         let mut undone = 0usize;
         for (index, mark) in self.marks.iter().enumerate().rev() {
             match mark.kind {
                 ActionKind::Rewind => undone += 1,
+                ActionKind::Passive => {}
+                ActionKind::Respawn => return None,
                 ActionKind::Edit if undone > 0 => undone -= 1,
                 ActionKind::Edit => {
                     let start = index
@@ -302,5 +310,32 @@ mod tests {
         assert_eq!(log.len(), 2);
         let chunk = ChunkPos { x: 0, y: 0, z: 0 };
         assert!(log.chunk_events(chunk).eq([&block]));
+    }
+
+    #[test]
+    fn rewind_steps_over_passive_actions_and_stops_at_a_respawn() {
+        let mut log = EventLog::new();
+        log.push(set(1, 0, 1));
+        log.end_action(ActionKind::Edit);
+        log.push(Event::HungerChanged { by: -1 });
+        log.end_action(ActionKind::Passive);
+        log.push(set(2, 0, 1));
+        log.end_action(ActionKind::Edit);
+        log.push(Event::HealthChanged { by: -3 });
+        log.end_action(ActionKind::Passive);
+
+        // The passive hit sits after the edit but is not part of it, and not before it either.
+        assert_eq!(log.latest_live_edit(), Some(&[set(2, 0, 1)][..]));
+
+        log.push(Event::HealthChanged { by: 3 });
+        log.end_action(ActionKind::Respawn);
+        assert_eq!(log.latest_live_edit(), None);
+
+        log.push(set(3, 0, 1));
+        log.end_action(ActionKind::Edit);
+        assert_eq!(log.latest_live_edit(), Some(&[set(3, 0, 1)][..]));
+        log.push(set(3, 1, 0));
+        log.end_action(ActionKind::Rewind);
+        assert_eq!(log.latest_live_edit(), None);
     }
 }

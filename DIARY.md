@@ -35,6 +35,7 @@
 | 2026-10-30 | Streamed intent tracks | Settled entries appended to a numbered session file during play; same v1 format, memory bounded | ✅ Confirmed |
 | 2026-10-31 | Kept intent sessions | Keep the newest 20 numbered files, pruned at startup | ✅ Confirmed |
 | 2026-10-31 | Recorded actions | Intentions (target block, recipe, eat) in the same session file, version 2 | ✅ Confirmed |
+| 2026-11-01 | Meters under events | Delta events with the points really moved; passive changes logged but skipped by rewind; respawn is a barrier | ✅ Confirmed |
 
 ---
 
@@ -1065,3 +1066,34 @@ The approach was clear (new action kinds in the existing record), so no options 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-10-31 | Initial entry | deltaog-117 |
+
+---
+
+### Meters Under Events
+
+**Date:** 2026-11-01
+**Status:** Confirmed
+
+#### Context / Background
+Hunger, health and respawn changed outside the event log, so rewind could not undo them and scripts could not see them. The difficulty is that meters also change on their own (hunger drains every 30 s, starvation hits every 5 s), so an event that says "from X to Y" goes stale within seconds and would block `Z` on the newest edit for good.
+
+#### Decision & Rationale
+Three options were compared: A, absolute set events like blocks and slots; B, change events with everything logged; C, change events for deliberate changes only. B was chosen.
+- An event carries the points the meter really moved (a meal at 18 of 20 logs +2, not the food's 4). Its inverse is the opposite change, so undoing a meal after a drain still leaves the drain in place: the meter lands where it would have without the meal.
+- The hunger drain, starvation and a mob's hit are logged too, as a new passive action kind. Rewind steps over them, so `Z` never undoes damage and the log still describes every change to the state.
+- A respawn is one action of its own kind that rewind cannot cross: what came before no longer matches the pack and the meters. `Z` now reports nothing to undo there, where it used to be refused and logged.
+
+**Trade-offs accepted:** an undo that would push a meter out of 0 to 20 is refused (for example undoing a meal when hunger has since drained below what the meal gave), which is rare but can leave `Z` waiting on that meal. Passive actions share the 256-action history window with edits. The meters are still not saved or replayed from the log at startup, as before.
+
+#### Implementation Notes
+- `Stats::advance` returns what a step drains without applying it; `Stats::step` is built on it, and a property test shows both reach the same stats. The step count is a clock, not a meter: a respawn restarts it directly, as before.
+- Log format version 5: tags 7 and 8 for the meter events, 9 and 10 for the passive and respawn action ends. Older files are still read.
+- `Stage` gained the stats; `eat_events` now returns the hunger change with the slot changes, and `Running` no longer restores hunger on the side.
+- Tests: a property test that a run of mixed events undoes in reverse and replays to the same state, the meter events in the event and file round trips, and an integration test that rewinds a meal across a drain and a hit and stops at a respawn.
+- The window was not run by the assistant. Try it by eating, waiting, taking a hit and pressing `Z`.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-01 | Initial entry | deltaog-117 |

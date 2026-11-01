@@ -2,6 +2,10 @@
 //!
 //! Stats change only by [`Stats::step`], once per simulation step, and use no randomness
 //! and no wall-clock time, so a replay of the same steps gives the same stats.
+//!
+//! The game changes the meters through events: [`Stats::advance`] says what a step drains
+//! without applying it, and [`Stats::shift_hunger`] and [`Stats::shift_health`] apply the
+//! change an event carries.
 
 use thiserror::Error;
 
@@ -22,6 +26,21 @@ pub struct Meter(u8);
 #[error("a meter holds 0..={METER_MAX}, not {0}")]
 pub struct OutOfRange(pub u8);
 
+/// A change that would take a meter out of `0..=METER_MAX`.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("a meter at {value} cannot move by {by}: it holds 0..={METER_MAX}")]
+pub struct ShiftRefused {
+    pub value: u8,
+    pub by: i8,
+}
+
+/// What one step takes from each meter, as the signed change to apply: 0 or -1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Drain {
+    pub hunger: i8,
+    pub health: i8,
+}
+
 impl Meter {
     pub const FULL: Self = Self(METER_MAX);
 
@@ -38,6 +57,13 @@ impl Meter {
 
     pub const fn value(self) -> u8 {
         self.0
+    }
+
+    /// The meter moved by `by`, or `None` if that leaves `0..=METER_MAX`.
+    fn shifted(self, by: i8) -> Option<Self> {
+        u8::try_from(i16::from(self.0) + i16::from(by))
+            .ok()
+            .and_then(|value| Self::try_new(value).ok())
     }
 
     /// Raises the meter by `amount`, stopping at [`METER_MAX`].
@@ -92,15 +118,74 @@ impl Stats {
         self.health.0 == 0
     }
 
-    /// Advances one simulation step.
-    pub fn step(&mut self) {
+    /// Starts the step count over, so the next hunger drain is a full period away. The
+    /// count is a clock, not a meter, so no event carries it.
+    pub fn restart_clock(&mut self) {
+        self.steps = 0;
+    }
+
+    /// How far hunger would really rise if `amount` were restored: less than `amount` near
+    /// the top, which is what an event records.
+    pub fn hunger_gain(self, amount: u8) -> i8 {
+        i8::try_from(self.hunger.fill(amount).0 - self.hunger.0).unwrap_or(0)
+    }
+
+    /// How far health would really rise if `amount` were restored.
+    pub fn health_gain(self, amount: u8) -> i8 {
+        i8::try_from(self.health.fill(amount).0 - self.health.0).unwrap_or(0)
+    }
+
+    /// How far health would really fall if `amount` were taken, as a negative number.
+    pub fn health_loss(self, amount: u8) -> i8 {
+        i8::try_from(self.health.0 - self.health.drain(amount).0).map_or(0, |lost| -lost)
+    }
+
+    /// Moves hunger by `by`, as an event says it moved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShiftRefused`], changing nothing, if that leaves `0..=METER_MAX`.
+    pub fn shift_hunger(&mut self, by: i8) -> Result<(), ShiftRefused> {
+        self.hunger = self.hunger.shifted(by).ok_or(ShiftRefused {
+            value: self.hunger.0,
+            by,
+        })?;
+        Ok(())
+    }
+
+    /// Moves health by `by`, as an event says it moved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ShiftRefused`], changing nothing, if that leaves `0..=METER_MAX`.
+    pub fn shift_health(&mut self, by: i8) -> Result<(), ShiftRefused> {
+        self.health = self.health.shifted(by).ok_or(ShiftRefused {
+            value: self.health.0,
+            by,
+        })?;
+        Ok(())
+    }
+
+    /// Counts one simulation step and returns what it drains, without draining it: the
+    /// caller applies the change as events. Nothing is drained from a meter already at 0.
+    pub fn advance(&mut self) -> Drain {
         self.steps += 1;
-        if self.steps.is_multiple_of(HUNGER_PERIOD) {
-            self.hunger = self.hunger.drain(1);
+        let hunger_drop = self.steps.is_multiple_of(HUNGER_PERIOD) && self.hunger.0 > 0;
+        let hunger_after = self.hunger.0 - u8::from(hunger_drop);
+        // Starvation reads hunger after this step's drain, so the last point of hunger and
+        // the first starving hit can fall on the same step.
+        let starving = hunger_after == 0 && self.steps.is_multiple_of(STARVE_PERIOD);
+        Drain {
+            hunger: -i8::from(hunger_drop),
+            health: -i8::from(starving && self.health.0 > 0),
         }
-        if self.hunger.value() == 0 && self.steps.is_multiple_of(STARVE_PERIOD) {
-            self.health = self.health.drain(1);
-        }
+    }
+
+    /// Advances one simulation step and drains the meters directly.
+    pub fn step(&mut self) {
+        let drain = self.advance();
+        self.hunger = self.hunger.drain(drain.hunger.unsigned_abs());
+        self.health = self.health.drain(drain.health.unsigned_abs());
     }
 }
 
@@ -169,7 +254,59 @@ mod tests {
         assert_eq!(stats.hunger(), Meter::FULL);
     }
 
+    #[test]
+    fn a_shift_that_leaves_the_range_is_refused_and_changes_nothing() {
+        let mut stats = Stats::default();
+        assert_eq!(
+            stats.shift_hunger(1),
+            Err(ShiftRefused {
+                value: METER_MAX,
+                by: 1
+            })
+        );
+        stats.hurt(METER_MAX);
+        assert_eq!(
+            stats.shift_health(-1),
+            Err(ShiftRefused { value: 0, by: -1 })
+        );
+        assert_eq!(stats.health().value(), 0);
+        assert_eq!(stats.shift_health(i8::MIN).map_err(|e| e.by), Err(i8::MIN));
+    }
+
+    #[test]
+    fn gains_and_losses_stop_where_the_meter_stops() {
+        let mut stats = run(HUNGER_PERIOD * 2);
+        assert_eq!(stats.hunger_gain(5), 2);
+        assert_eq!(stats.hunger_gain(1), 1);
+        stats.hurt(15);
+        assert_eq!(stats.health_loss(9), -5);
+        assert_eq!(stats.health_loss(3), -3);
+        assert_eq!(Stats::default().health_loss(0), 0);
+    }
+
     proptest! {
+        #[test]
+        fn applying_the_advance_drain_matches_step(steps in 0u64..40_000) {
+            let (mut stepped, mut advanced) = (Stats::default(), Stats::default());
+            for _ in 0..steps {
+                stepped.step();
+                let drain = advanced.advance();
+                advanced.shift_hunger(drain.hunger).unwrap();
+                advanced.shift_health(drain.health).unwrap();
+            }
+            prop_assert_eq!(stepped, advanced);
+        }
+
+        #[test]
+        fn a_shift_and_its_opposite_cancel(start in 0u64..30_000, by in -20i8..=20) {
+            let mut stats = run(start);
+            let before = stats;
+            if stats.shift_hunger(by).is_ok() {
+                prop_assert_eq!(stats.shift_hunger(-by), Ok(()));
+            }
+            prop_assert_eq!(stats, before);
+        }
+
         #[test]
         fn meters_stay_in_range_and_never_rise(steps in 0u64..40_000) {
             let stats = run(steps);

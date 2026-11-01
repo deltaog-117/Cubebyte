@@ -146,6 +146,7 @@ mod tests {
     use crate::events::apply::apply;
     use crate::inventory::model::Inventory;
     use crate::scripting::model::{MAX_EFFECTS, Permission};
+    use crate::survival::model::Stats;
     use crate::world::model::World;
 
     const EVERYTHING: Permissions = Permissions::NONE
@@ -157,6 +158,7 @@ mod tests {
         world: World,
         player: Player,
         inventory: Inventory,
+        stats: Stats,
         log: EventLog,
     }
 
@@ -179,6 +181,7 @@ mod tests {
                 world,
                 player: Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap(),
                 inventory: Inventory::default(),
+                stats: Stats::default(),
                 log: EventLog::new(),
             }
         }
@@ -197,6 +200,7 @@ mod tests {
                 world: &mut self.world,
                 player: &mut self.player,
                 inventory: &mut self.inventory,
+                stats: &mut self.stats,
             };
             run(commands, granted, limits, &mut stage, &mut self.log)
         }
@@ -448,6 +452,7 @@ mod tests {
                     world: &mut replayed.world,
                     player: &mut replayed.player,
                     inventory: &mut replayed.inventory,
+                    stats: &mut replayed.stats,
                 };
                 prop_assert_eq!(apply(&mut stage, event), Ok(()));
             }
@@ -461,6 +466,7 @@ mod tests {
                     world: &mut live.world,
                     player: &mut live.player,
                     inventory: &mut live.inventory,
+                    stats: &mut live.stats,
                 };
                 prop_assert_eq!(apply(&mut stage, &event.inverse()), Ok(()));
             }

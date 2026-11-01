@@ -125,6 +125,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `inventory::service::gather_events_at` and `place_events_at`: break or place at a named position instead of along a look direction; a break needs a block there, a place needs an empty cell
 - A replay now performs the recorded breaks, placements, crafts and meals on their ticks, and the new session records them again; keys and mouse do not act during a replay
 - `Action::Strike(ActorId)`, `Action::Rewind` and `Action::Redo`: hits on a mob and the `Z`/`Y` rewinds are saved in the session file (kinds 5, 6 and 7) and performed again by a replay; a strike names the zombie it hit, so it is refused if that zombie is gone
+- `Event::HungerChanged` and `Event::HealthChanged`: a meter moved by a signed number of points, the amount it really moved (a meal at 18 of 20 logs +2); their inverse is the opposite change, so a meal can be undone after hunger has drained
+- `Stats::advance` (what one step drains, without draining it), `shift_hunger`, `shift_health`, `hunger_gain`, `health_gain`, `health_loss` and `restart_clock`; `Stats::step` now drains through `advance` and behaves as before
+- `events::apply::Stage` holds the stats, and `StageError::Meter` refuses a meter change that would leave 0 to 20
+- `combat::service::hit_events` and `respawn_events`: the events for a hit and for starting over (meters refilled, pack emptied)
+- `ActionKind::Passive` (changes the world made by itself; rewind steps over them) and `ActionKind::Respawn` (rewind stops here)
 
 ### Changed
 - The intent file is now version 3, which adds the strike, rewind and redo action kinds. Versions 1 and 2 are still read unchanged
@@ -154,3 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `app::Running::commit` logs each applied list as one edit
 - `events::persist` writes version 4 (tag 6 holds a base block) and reads versions 1 to 4; `events::replay::replay_chunk` applies a chunk's base blocks before its events. Version 4 files cannot be read by older builds
 - The zombie takes its recorded step during a replay and decides for itself once the session has none; `F` (free flight) is ignored during a replay, because a flight leaves no steps in the track
+- `eat_events` now includes the hunger the meal gives, so eating is a single all-or-nothing change of slots and hunger
+- `app` logs the hunger drain and a zombie's hit as passive actions, and a death as a respawn action (meters, pack and a move to the spawn point); the redo stack is cleared on death
+- `events::persist` writes version 5 (tags 7 and 8 hold the meter events, tags 9 and 10 end a passive action and a respawn) and reads versions 1 to 5

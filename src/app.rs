@@ -18,7 +18,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::{REACH, break_target, place_target};
-use crate::combat::service::{Outcome, hit, respawn, strike};
+use crate::combat::service::{Outcome, hit_events, respawn, respawn_events, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
 use crate::events::apply::{Stage, StageError, apply_all};
@@ -41,7 +41,7 @@ use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
-use crate::shared::event::Event;
+use crate::shared::event::{Event, Spot};
 use crate::shared::intent::Walk;
 use crate::shared::voxel::{BlockId, CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::action::Action;
@@ -369,7 +369,7 @@ impl App {
             for step_index in 0..u64::from(steps) {
                 let tick = Tick(first + step_index);
                 running.replay_actions(tick);
-                running.stats.step();
+                running.step_stats();
                 running.step_zombie(tick);
             }
             if running.stats.is_dead() {
@@ -464,9 +464,25 @@ impl Running {
         }
     }
 
-    /// Starts the player over at the spawn point with full meters and an empty pack.
+    /// Starts the player over at the spawn point with full meters and an empty pack. The
+    /// respawn is logged as a barrier, so `Z` cannot reach back past it.
     fn die(&mut self) {
-        respawn(&mut self.stats, &mut self.inventory);
+        let mut events = respawn_events(&self.stats, &self.inventory);
+        let (from, to) = (
+            Spot::from_vec3(self.player.position()),
+            Spot::from_vec3(self.spawn.position()),
+        );
+        if from != to {
+            events.push(Event::PlayerMoved { old: from, new: to });
+        }
+        if let Err(error) = self.commit_as(&events, ActionKind::Respawn) {
+            // The events were just worked out from this state, so a refusal is a bug; the
+            // player still starts over, only the log misses it.
+            tracing::warn!(%error, "respawn rejected");
+            respawn(&mut self.stats, &mut self.inventory);
+        }
+        self.stats.restart_clock();
+        self.redo.clear();
         self.inventory_dirty = true;
         self.deaths += 1;
         self.zombie = None;
@@ -501,7 +517,8 @@ impl Running {
             if let Some(damage) =
                 mobs::step_with(zombie, intent, target, &self.world, TICK_STEP.as_secs_f32())
             {
-                hit(&mut self.stats, damage);
+                let events = hit_events(&self.stats, damage);
+                self.commit_passive(&events);
             }
             self.record(self.zombie_actor, tick, intent);
         }
@@ -631,12 +648,36 @@ impl Running {
         Ok(())
     }
 
+    /// Applies and logs a change the world made by itself, such as hunger draining or a
+    /// zombie's hit. It is not an edit, so `Z` never undoes it and the redo stack stays. The
+    /// events were just worked out from the current state, so a refusal is a bug: it is
+    /// logged and play goes on.
+    fn commit_passive(&mut self, events: &[Event]) {
+        if let Err(error) = self.commit_as(events, ActionKind::Passive) {
+            tracing::warn!(%error, "passive change rejected");
+        }
+    }
+
+    /// Counts one step of survival and applies what it drains as passive events.
+    fn step_stats(&mut self) {
+        let drain = self.stats.advance();
+        let mut events = Vec::new();
+        if drain.hunger != 0 {
+            events.push(Event::HungerChanged { by: drain.hunger });
+        }
+        if drain.health != 0 {
+            events.push(Event::HealthChanged { by: drain.health });
+        }
+        self.commit_passive(&events);
+    }
+
     /// [`Self::commit`] for an action of any `kind`.
     fn commit_as(&mut self, events: &[Event], kind: ActionKind) -> Result<(), StageError> {
         let mut stage = Stage {
             world: &mut self.world,
             player: &mut self.player,
             inventory: &mut self.inventory,
+            stats: &mut self.stats,
         };
         apply_all(&mut stage, events)?;
         log_action(&mut self.log, events, kind);
@@ -644,8 +685,9 @@ impl Running {
     }
 
     /// Steps back the latest edit still in effect. Reports whether it did. Nothing left to
-    /// undo is normal; a refusal (the state moved on in a way no event records, such as a
-    /// respawn) is logged.
+    /// undo is normal, and so is a respawn in the way; a refusal (the state moved on in a way
+    /// no event records, such as walking, or a meter that the undo would push out of range)
+    /// is logged.
     fn rewind(&mut self) -> bool {
         let Some(events) = rewind_events(&self.log) else {
             return false;
@@ -796,11 +838,7 @@ impl Running {
         let Ok(meal) = eat_events(&self.inventory, &self.stats) else {
             return false;
         };
-        if !self.commit_or_warn(&meal.events) {
-            return false;
-        }
-        self.stats.restore_hunger(meal.restored);
-        true
+        self.commit_or_warn(&meal.events)
     }
 
     /// Shows health, hunger, the carried items and the selected recipe in the window title

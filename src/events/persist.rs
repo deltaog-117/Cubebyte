@@ -18,6 +18,10 @@
 //! | 4 | edit ends | none: the events since the last end form one edit |
 //! | 5 | rewind ends | none: the events since the last end undo the latest live edit |
 //! | 6 | base block | x, y, z (4 each), block (2): what the folded-away history left there |
+//! | 7 | hunger changed | by (1, signed) |
+//! | 8 | health changed | by (1, signed) |
+//! | 9 | passive ends | none: the events since the last end happened without the player acting |
+//! | 10 | respawn ends | none: the events since the last end are the player starting over |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
@@ -25,7 +29,8 @@
 //! files have no action ends, so their history cannot be rewound. Tag 6 came with version 4:
 //! the log folds its oldest actions into base blocks to stay bounded, and a chunk is rebuilt
 //! from its base blocks first, then its events. Base blocks may appear anywhere in the file,
-//! since they sit under every event whatever their place; the writer puts them first.
+//! since they sit under every event whatever their place; the writer puts them first. Tags 7
+//! to 10 came with version 5, when hunger and health became events.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,7 +44,7 @@ use crate::shared::voxel::{BlockId, WorldPos};
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -54,6 +59,10 @@ const TAG_SLOT_SET: u8 = 3;
 const TAG_EDIT_END: u8 = 4;
 const TAG_REWIND_END: u8 = 5;
 const TAG_BASE_BLOCK: u8 = 6;
+const TAG_HUNGER_CHANGED: u8 = 7;
+const TAG_HEALTH_CHANGED: u8 = 8;
+const TAG_PASSIVE_END: u8 = 9;
+const TAG_RESPAWN_END: u8 = 10;
 
 /// Bytes a base block takes in a file, tag included.
 const BASE_RECORD_LEN: usize = 1 + 3 * 4 + 2;
@@ -64,6 +73,7 @@ const fn record_len(event: &Event) -> usize {
         Event::BlockSet { .. } => 1 + 3 * 4 + 2 + 2,
         Event::PlayerMoved { .. } => 1 + 6 * 4,
         Event::SlotSet { .. } => 1 + 1 + 3 + 3,
+        Event::HungerChanged { .. } | Event::HealthChanged { .. } => 1 + 1,
     }
 }
 
@@ -122,6 +132,14 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
                 bytes.push(TAG_REWIND_END);
                 continue;
             }
+            Record::ActionEnd(ActionKind::Passive) => {
+                bytes.push(TAG_PASSIVE_END);
+                continue;
+            }
+            Record::ActionEnd(ActionKind::Respawn) => {
+                bytes.push(TAG_RESPAWN_END);
+                continue;
+            }
         };
         match event {
             Event::BlockSet { pos, old, new } => {
@@ -145,6 +163,14 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
                     bytes.extend_from_slice(&held.item.to_le_bytes());
                     bytes.push(held.count);
                 }
+            }
+            Event::HungerChanged { by } => {
+                bytes.push(TAG_HUNGER_CHANGED);
+                bytes.extend_from_slice(&by.to_le_bytes());
+            }
+            Event::HealthChanged { by } => {
+                bytes.push(TAG_HEALTH_CHANGED);
+                bytes.extend_from_slice(&by.to_le_bytes());
             }
         }
     }
@@ -209,6 +235,14 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 },
                 BlockId(u16::from_le_bytes(reader.take()?)),
             ),
+            TAG_HUNGER_CHANGED if version >= 5 => log.push(Event::HungerChanged {
+                by: i8::from_le_bytes(reader.take()?),
+            }),
+            TAG_HEALTH_CHANGED if version >= 5 => log.push(Event::HealthChanged {
+                by: i8::from_le_bytes(reader.take()?),
+            }),
+            TAG_PASSIVE_END if version >= 5 => log.end_action(ActionKind::Passive),
+            TAG_RESPAWN_END if version >= 5 => log.end_action(ActionKind::Respawn),
             TAG_EDIT_END if version >= 3 => log.end_action(ActionKind::Edit),
             TAG_REWIND_END if version >= 3 => log.end_action(ActionKind::Rewind),
             other => return Err(DecodeError::UnknownEvent(other)),
@@ -298,6 +332,8 @@ mod tests {
                         count: new.1
                     },
                 }),
+            any::<i8>().prop_map(|by| Event::HungerChanged { by }),
+            any::<i8>().prop_map(|by| Event::HealthChanged { by }),
         ]
     }
 
@@ -417,6 +453,31 @@ mod tests {
     }
 
     #[test]
+    fn passive_and_respawn_ends_survive_a_save() {
+        let mut log = EventLog::new();
+        log.push(Event::HungerChanged { by: -1 });
+        log.end_action(ActionKind::Passive);
+        log.push(Event::HealthChanged { by: 20 });
+        log.end_action(ActionKind::Respawn);
+
+        let SavedLog { log: back, .. } = decode(&encode(1, &log)).unwrap();
+
+        assert_eq!(back, log);
+        assert_eq!(back.latest_live_edit(), None);
+    }
+
+    #[test]
+    fn a_version_four_file_with_a_meter_event_is_rejected() {
+        let mut bytes = encode(1, &log_of(&[Event::HungerChanged { by: -1 }]));
+        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
+
+        assert_eq!(
+            decode(&bytes),
+            Err(DecodeError::UnknownEvent(TAG_HUNGER_CHANGED))
+        );
+    }
+
+    #[test]
     fn a_file_cut_inside_the_header_is_rejected() {
         let bytes = encode(7, &EventLog::new());
         for len in 0..HEADER_LEN {
@@ -470,8 +531,8 @@ mod tests {
     #[test]
     fn an_unknown_tag_is_rejected() {
         let mut bytes = encode(7, &EventLog::new());
-        bytes.extend_from_slice(&[9; BLOCK_RECORD_LEN]);
-        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(9)));
+        bytes.extend_from_slice(&[11; BLOCK_RECORD_LEN]);
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(11)));
     }
 
     #[test]

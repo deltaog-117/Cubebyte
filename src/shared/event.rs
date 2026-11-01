@@ -70,6 +70,12 @@ pub enum Event {
     /// Inventory slot `slot` went from holding `old` to holding `new`. A change to several
     /// slots is several events, so undo restores which slot held what, not just the totals.
     SlotSet { slot: u8, old: Held, new: Held },
+    /// Hunger moved by `by` points, the amount it really moved (a meal at 18 of 20 logs +2,
+    /// not the food's 4). A change, not a set, because hunger also drains on its own: undoing
+    /// a meal must still work after the drain, which a recorded old value could not allow.
+    HungerChanged { by: i8 },
+    /// Health moved by `by` points, as for [`Event::HungerChanged`].
+    HealthChanged { by: i8 },
 }
 
 impl Event {
@@ -78,7 +84,10 @@ impl Event {
     pub fn chunk(self) -> Option<ChunkPos> {
         match self {
             Self::BlockSet { pos, .. } => Some(pos.split().0),
-            Self::PlayerMoved { .. } | Self::SlotSet { .. } => None,
+            Self::PlayerMoved { .. }
+            | Self::SlotSet { .. }
+            | Self::HungerChanged { .. }
+            | Self::HealthChanged { .. } => None,
         }
     }
 
@@ -95,6 +104,14 @@ impl Event {
                 slot,
                 old: new,
                 new: old,
+            },
+            // Wrapping keeps inverting twice the identity for -128, which no meter can hold
+            // and `apply` refuses anyway.
+            Self::HungerChanged { by } => Self::HungerChanged {
+                by: by.wrapping_neg(),
+            },
+            Self::HealthChanged { by } => Self::HealthChanged {
+                by: by.wrapping_neg(),
             },
         }
     }
@@ -140,6 +157,8 @@ mod tests {
                         count: new.1
                     },
                 }),
+            any::<i8>().prop_map(|by| Event::HungerChanged { by }),
+            any::<i8>().prop_map(|by| Event::HealthChanged { by }),
         ]
     }
 
@@ -179,6 +198,8 @@ mod tests {
 
     #[test]
     fn only_block_events_have_a_chunk() {
+        assert_eq!(Event::HungerChanged { by: 3 }.chunk(), None);
+        assert_eq!(Event::HealthChanged { by: -3 }.chunk(), None);
         let spot = Spot::from_vec3(Vec3::ZERO);
         assert_eq!(
             Event::PlayerMoved {

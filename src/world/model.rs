@@ -125,7 +125,10 @@ impl World {
     /// `old` block it was recorded against. The world is left unchanged.
     pub fn apply(&mut self, event: &Event) -> Result<(), ApplyError> {
         match *event {
-            Event::PlayerMoved { .. } | Event::SlotSet { .. } => Ok(()),
+            Event::PlayerMoved { .. }
+            | Event::SlotSet { .. }
+            | Event::HungerChanged { .. }
+            | Event::HealthChanged { .. } => Ok(()),
             Event::BlockSet { pos, old, new } => {
                 let found = self.block_at(pos);
                 if found != old {

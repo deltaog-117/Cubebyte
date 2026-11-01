@@ -9,6 +9,7 @@ use minecraft_clone::scripting::model::{Command, Limits, Permission, Permissions
 use minecraft_clone::scripting::service::run;
 use minecraft_clone::shared::event::Event;
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
+use minecraft_clone::survival::model::Stats;
 use minecraft_clone::world::model::World;
 use proptest::prelude::*;
 
@@ -60,12 +61,14 @@ proptest! {
         let mut world = floor();
         let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
         let mut inventory = Inventory::default();
+        let mut stats = Stats::default();
         let mut log = EventLog::new();
         for commands in &ticks {
             let mut stage = Stage {
                 world: &mut world,
                 player: &mut player,
                 inventory: &mut inventory,
+                stats: &mut stats,
             };
             run(commands, granted, Limits::standard(), &mut stage, &mut log);
         }
@@ -76,11 +79,13 @@ proptest! {
         let mut replayed_world = floor();
         let mut replayed_player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
         let mut replayed_inventory = Inventory::default();
+        let mut replayed_stats = Stats::default();
         for event in saved.log.iter() {
             let mut stage = Stage {
                 world: &mut replayed_world,
                 player: &mut replayed_player,
                 inventory: &mut replayed_inventory,
+                stats: &mut replayed_stats,
             };
             prop_assert_eq!(apply(&mut stage, event), Ok(()));
         }

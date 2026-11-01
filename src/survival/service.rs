@@ -36,9 +36,10 @@ pub fn eat(inventory: &mut Inventory, stats: &mut Stats) -> Result<ItemId, EatEr
 #[derive(Debug, PartialEq, Eq)]
 pub struct Meal {
     pub item: ItemId,
-    /// The hunger points the meal gives back; the caller restores them once `events` apply.
+    /// The hunger points the food is worth. Near a full stomach fewer are gained, and
+    /// `events` carry the points really gained.
     pub restored: u8,
-    /// The slot change that spends the food.
+    /// The slot change that spends the food, then the hunger it restores.
     pub events: Vec<Event>,
 }
 
@@ -51,10 +52,16 @@ pub fn eat_events(inventory: &Inventory, stats: &Stats) -> Result<Meal, EatError
     let (item, restored) = pick_food(inventory, stats)?;
     let mut after = inventory.clone();
     after.take(item, 1).map_err(|_| EatError::NoFood)?;
+    let mut events = slot_events(inventory, &after);
+    // Hunger below full means at least a point is gained; a food worth nothing gains none.
+    let gained = stats.hunger_gain(restored);
+    if gained != 0 {
+        events.push(Event::HungerChanged { by: gained });
+    }
     Ok(Meal {
         item,
         restored,
-        events: slot_events(inventory, &after),
+        events,
     })
 }
 
@@ -97,6 +104,21 @@ mod tests {
 
         assert_eq!(inventory.count_of(ItemId::BREAD), 1);
         assert_eq!(stats.hunger().value(), before + 4);
+    }
+
+    #[test]
+    fn a_meal_logs_the_hunger_really_gained() {
+        let mut inventory = Inventory::default();
+        inventory.add(ItemId::BREAD, 1).unwrap();
+        let mut stats = Stats::default();
+        for _ in 0..HUNGER_PERIOD * 2 {
+            stats.step();
+        }
+
+        let meal = eat_events(&inventory, &stats).unwrap();
+
+        assert_eq!(meal.restored, 4);
+        assert_eq!(meal.events.last(), Some(&Event::HungerChanged { by: 2 }));
     }
 
     #[test]

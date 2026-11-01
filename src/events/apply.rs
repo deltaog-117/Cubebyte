@@ -1,7 +1,7 @@
 //! Applying any event to the game state it changes.
 //!
 //! [`apply`] is the one door every change goes through: blocks to the world, jumps to the
-//! player, slot changes to the inventory. Each event records what it replaced, so an event
+//! player, slot changes to the inventory, meter changes to the stats. Each event records what it replaced, so an event
 //! applied to a state that has moved on is refused instead of guessed at, and a refused event
 //! leaves the state exactly as it was.
 
@@ -12,6 +12,7 @@ use crate::items::registry::ItemId;
 use crate::player::model::{Player, PlayerError};
 use crate::player::service::teleport;
 use crate::shared::event::{Event, Held, Spot};
+use crate::survival::model::{ShiftRefused, Stats};
 use crate::world::model::{ApplyError, World};
 
 /// The parts of the game state events change, borrowed together for one application.
@@ -19,6 +20,7 @@ pub struct Stage<'a> {
     pub world: &'a mut World,
     pub player: &'a mut Player,
     pub inventory: &'a mut Inventory,
+    pub stats: &'a mut Stats,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -42,6 +44,10 @@ pub enum StageError {
     /// An item that is not defined, or a count that is zero or above the item's stack limit.
     #[error("{0:?} is not a stack the game can hold")]
     BadHeld(Held),
+    /// A meter change that would leave the meter's range, for example undoing a meal after
+    /// hunger has since drained below what the meal gave.
+    #[error(transparent)]
+    Meter(#[from] ShiftRefused),
 }
 
 /// Applies `event` to `stage`.
@@ -54,6 +60,7 @@ pub enum StageError {
 /// - [`StageError::BadSlot`] when the slot is past the last one.
 /// - [`StageError::StaleSlot`] when the slot holds something other than the event's `old`.
 /// - [`StageError::BadHeld`] when the event's `new` is not a stack the game can hold.
+/// - [`StageError::Meter`] when a meter change would leave `0..=20`.
 ///
 /// The stage is left unchanged on any error.
 pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
@@ -88,6 +95,8 @@ pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
             *stage.inventory = Inventory::from_slots(slots);
             Ok(())
         }
+        Event::HungerChanged { by } => Ok(stage.stats.shift_hunger(by)?),
+        Event::HealthChanged { by } => Ok(stage.stats.shift_health(by)?),
     }
 }
 
@@ -153,6 +162,7 @@ mod tests {
     use super::*;
     use crate::inventory::model::SLOTS;
     use crate::shared::voxel::{BlockId, WorldPos};
+    use crate::survival::model::METER_MAX;
 
     const ITEMS: [ItemId; 3] = [ItemId::STONE, ItemId::DIRT, ItemId::GRASS];
 
@@ -160,6 +170,7 @@ mod tests {
         world: World,
         player: Player,
         inventory: Inventory,
+        stats: Stats,
     }
 
     impl State {
@@ -168,6 +179,7 @@ mod tests {
                 world: World::default(),
                 player: Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
                 inventory: Inventory::default(),
+                stats: Stats::default(),
             }
         }
 
@@ -176,6 +188,7 @@ mod tests {
                 world: &mut self.world,
                 player: &mut self.player,
                 inventory: &mut self.inventory,
+                stats: &mut self.stats,
             }
         }
 
@@ -190,6 +203,8 @@ mod tests {
         Move((f32, f32, f32)),
         Add(usize, u32),
         Remove(usize, u32),
+        Hunger(i8),
+        Health(i8),
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -198,6 +213,8 @@ mod tests {
             (-500.0f32..500.0, -50.0f32..50.0, -500.0f32..500.0).prop_map(Op::Move),
             (0usize..3, 1u32..200).prop_map(|(item, count)| Op::Add(item, count)),
             (0usize..3, 1u32..200).prop_map(|(item, count)| Op::Remove(item, count)),
+            (-20i8..=20).prop_map(Op::Hunger),
+            (-20i8..=20).prop_map(Op::Health),
         ]
     }
 
@@ -231,6 +248,25 @@ mod tests {
                     .unwrap();
                 slot_events(&state.inventory, &after)
             }
+            // A change that would leave the range is dropped, as a real source never makes it.
+            Op::Hunger(by) => state
+                .stats
+                .hunger()
+                .value()
+                .checked_add_signed(by)
+                .filter(|&value| value <= METER_MAX)
+                .map(|_| Event::HungerChanged { by })
+                .into_iter()
+                .collect(),
+            Op::Health(by) => state
+                .stats
+                .health()
+                .value()
+                .checked_add_signed(by)
+                .filter(|&value| value <= METER_MAX)
+                .map(|_| Event::HealthChanged { by })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -257,6 +293,7 @@ mod tests {
             prop_assert_eq!(&state.world, &start_world);
             prop_assert_eq!(state.player, start_player);
             prop_assert_eq!(state.inventory, Inventory::default());
+            prop_assert_eq!(state.stats, Stats::default());
         }
 
         #[test]
@@ -280,6 +317,7 @@ mod tests {
             prop_assert_eq!(replayed.world, live.world);
             prop_assert_eq!(replayed.player, live.player);
             prop_assert_eq!(replayed.inventory, live.inventory);
+            prop_assert_eq!(replayed.stats, live.stats);
         }
 
         #[test]
@@ -361,6 +399,34 @@ mod tests {
             })
         );
         assert_eq!(state.inventory, before);
+    }
+
+    #[test]
+    fn a_meter_change_out_of_range_is_refused_and_changes_nothing() {
+        let mut state = State::new();
+
+        let result = state.apply(&Event::HungerChanged { by: 1 });
+
+        assert!(matches!(result, Err(StageError::Meter(_))));
+        assert_eq!(state.stats, Stats::default());
+        assert!(state.apply(&Event::HealthChanged { by: -3 }).is_ok());
+        assert_eq!(state.stats.health().value(), METER_MAX - 3);
+        assert!(state.apply(&Event::HealthChanged { by: -18 }).is_err());
+    }
+
+    #[test]
+    fn undoing_a_meal_after_hunger_drained_leaves_the_drain_in_place() {
+        let mut state = State::new();
+        let drain = Event::HungerChanged { by: -1 };
+        // Hunger 20 -> 10, a meal of +4, then one more drain.
+        assert_eq!(state.apply(&Event::HungerChanged { by: -10 }), Ok(()));
+        let eat = Event::HungerChanged { by: 4 };
+        assert_eq!(state.apply(&eat), Ok(()));
+        assert_eq!(state.apply(&drain), Ok(()));
+
+        assert_eq!(state.apply(&eat.inverse()), Ok(()));
+
+        assert_eq!(state.stats.hunger().value(), METER_MAX - 10 - 1);
     }
 
     #[test]
