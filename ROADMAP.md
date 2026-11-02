@@ -86,6 +86,18 @@ Items are organized by priority, not by timeline.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
   - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
   - Name still open; "Nibble" is the leading candidate.
+  - Design goal, reach: the one language for everything players can script, doing the work of both Java mods and redstone in Minecraft and of Lua in Roblox Studio. It runs inside the game and reaches everything the world interface exposes; the interface is the real boundary, so a new thing in the game gets reads and commands and the language reaches it with no change to the language. Redstone-style logic (see Logic and automation) is built on top of it.
+  - Design goal, frontend: it is also the friendly front end to the deeper game functions, so players who never write code still use it, through blocks, the command line, quick-hacks and ready-made scripts. Each of those is Nibble underneath, so a no-coder can open what they used, read it and edit it, and learn by using.
+  - Prerequisite: walking and mob movement must become events first (see the backlog), or scripts cannot drive or undo them.
+  - Design principles, more granular than Roblox and easier than Kogama (Kogama places and configures ready-made objects, with a ceiling; Roblox scripts against a huge API in a separate app, with a wall):
+    - every action is an event with a fixed shape, and each one is a block, a command and a hook point, so a script can react to or change anything down to one block or one meter point, with the same few verbs meaning the same everywhere;
+    - one thing at three zoom levels: click a ready-made hack, open it as blocks, open it as text; there is no ceiling and never a blank page;
+    - open the hood on anything: every ready-made object or hack shows its script, so players learn from what they already use;
+    - built in, not a separate Studio: players edit while playing, in the same window, and see the change at once;
+    - rewind is the debugger: `Z` undoes a script run, and a script can be stepped through and replayed, so trying risky changes is cheap;
+    - friendly errors, whole numbers only and a step budget, so scripts cannot freeze the game or fail in confusing ways;
+    - scope by region, chunk, mob or block kind (builds on local rewind zones), so "only here" is simple to say;
+    - keep early costs (fuel and waits) low and tunable, so the limits keep scripts fair without punishing small experiments.
 - **Quick-hacks** – Watch Dogs-style actions. Aim at a thing or a place and pick a hack from a menu (unlock, distract, go to this coordinate). Each hack is a ready-made script a player can open, read and edit, so players learn by using code first and writing it later. Two ways to trigger one:
   - a specific command aimed at a target, which the command line reads as, for example, "go" to that coordinate;
   - the command-line menu, fetching what the player asks for.
@@ -101,6 +113,17 @@ Items are organized by priority, not by timeline.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
 - **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
 - **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
+- **Graphics upgrade** – Today blocks are flat colours with no lighting. Done after the current items, in this order. Light and shading are computed from world state and never logged, so replay and rewind are untouched; the mesher keeps producing plain vertex data with no `wgpu` types, so these stay testable without a GPU.
+  - per-face shading (top brighter, sides darker) and a sun direction;
+  - sky colour and distance fog (the Kogama-style bright, simple look);
+  - vertex ambient occlusion: darken corners and edges (the biggest gain for the cost);
+  - texture atlas with nearest-neighbour sampling (the Minecraft pixel look; needs an art style first);
+  - sky gradient or skybox with a sun and clouds;
+  - translucent water and glass in a separate sorted pass;
+  - block light and sky light, flood-filled per chunk (day and night, caves, torches);
+  - real-time shadow mapping from the sun (the Roblox look);
+  - post-processing: bloom, tone mapping, anti-aliasing;
+  - better mobs: models built from parts, with animation.
 
 ---
 
@@ -139,6 +162,13 @@ Recommended order, row 1 first.
 | 11 | Script-driven crafting | Needs the scripting language | M |
 | 12 | Shareable blueprints | Needs scripts and the event log | M |
 | 13 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 14 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
+| 15 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
+| 16 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 17 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 18 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 19 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 20 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 
