@@ -55,6 +55,22 @@ impl Held {
     pub const EMPTY: Self = Self { item: 0, count: 0 };
 }
 
+/// Who a mob is. Ids are handed out in order and never reused in a session, so an event about
+/// a mob that is gone cannot land on a newer one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MobId(pub u32);
+
+impl MobId {
+    /// The first id handed out.
+    pub const FIRST: Self = Self(1);
+
+    /// The id after this one. It stops at the largest value instead of wrapping onto an id
+    /// already used.
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 /// One change to the game. Each carries what it replaced, so it can be undone without a
 /// snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +92,16 @@ pub enum Event {
     HungerChanged { by: i8 },
     /// Health moved by `by` points, as for [`Event::HungerChanged`].
     HealthChanged { by: i8 },
+    /// Mob `id` appeared at `at` with `health`. Its inverse is [`Event::MobRemoved`].
+    MobSpawned { id: MobId, at: Spot, health: u8 },
+    /// Mob `id` left the world while standing at `at` with `health`: killed, dropped for
+    /// being too far away, or cleared at a respawn. Undoing it puts the mob back as it was.
+    /// Walking is not an event, so `at` is where the mob stood when it went, and applying
+    /// the event does not check it; `id` and `health` are checked.
+    MobRemoved { id: MobId, at: Spot, health: u8 },
+    /// Mob `id` gained (`by` above zero) or lost health, by the amount it really moved. A
+    /// change, not a set, like the player's meters.
+    MobHealthChanged { id: MobId, by: i8 },
 }
 
 impl Event {
@@ -87,7 +113,10 @@ impl Event {
             Self::PlayerMoved { .. }
             | Self::SlotSet { .. }
             | Self::HungerChanged { .. }
-            | Self::HealthChanged { .. } => None,
+            | Self::HealthChanged { .. }
+            | Self::MobSpawned { .. }
+            | Self::MobRemoved { .. }
+            | Self::MobHealthChanged { .. } => None,
         }
     }
 
@@ -111,6 +140,12 @@ impl Event {
                 by: by.wrapping_neg(),
             },
             Self::HealthChanged { by } => Self::HealthChanged {
+                by: by.wrapping_neg(),
+            },
+            Self::MobSpawned { id, at, health } => Self::MobRemoved { id, at, health },
+            Self::MobRemoved { id, at, health } => Self::MobSpawned { id, at, health },
+            Self::MobHealthChanged { id, by } => Self::MobHealthChanged {
+                id,
                 by: by.wrapping_neg(),
             },
         }
@@ -159,6 +194,22 @@ mod tests {
                 }),
             any::<i8>().prop_map(|by| Event::HungerChanged { by }),
             any::<i8>().prop_map(|by| Event::HealthChanged { by }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<u8>()).prop_map(|(id, at, health)| {
+                Event::MobSpawned {
+                    id: MobId(id),
+                    at: Spot::from_bits(at),
+                    health,
+                }
+            }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<u8>()).prop_map(|(id, at, health)| {
+                Event::MobRemoved {
+                    id: MobId(id),
+                    at: Spot::from_bits(at),
+                    health,
+                }
+            }),
+            (any::<u32>(), any::<i8>())
+                .prop_map(|(id, by)| Event::MobHealthChanged { id: MobId(id), by }),
         ]
     }
 
@@ -215,5 +266,39 @@ mod tests {
             new: Held { item: 1, count: 1 },
         };
         assert_eq!(slot.chunk(), None);
+        let mob = MobId::FIRST;
+        let at = spot;
+        assert_eq!(
+            Event::MobSpawned {
+                id: mob,
+                at,
+                health: 20
+            }
+            .chunk(),
+            None
+        );
+        assert_eq!(
+            Event::MobRemoved {
+                id: mob,
+                at,
+                health: 0
+            }
+            .chunk(),
+            None
+        );
+        assert_eq!(Event::MobHealthChanged { id: mob, by: -2 }.chunk(), None);
+    }
+
+    #[test]
+    fn a_spawn_and_a_removal_undo_each_other() {
+        let (id, at) = (MobId::FIRST, Spot::from_vec3(Vec3::ONE));
+        let spawned = Event::MobSpawned { id, at, health: 20 };
+        assert_eq!(spawned.inverse(), Event::MobRemoved { id, at, health: 20 });
+    }
+
+    #[test]
+    fn mob_ids_stop_at_the_largest_value() {
+        assert_eq!(MobId::FIRST.next(), MobId(2));
+        assert_eq!(MobId(u32::MAX).next(), MobId(u32::MAX));
     }
 }

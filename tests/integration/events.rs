@@ -16,8 +16,10 @@ use minecraft_clone::inventory::service::{
     gather_block, gather_events, place_events, place_from_stock,
 };
 use minecraft_clone::items::registry::ItemId;
+use minecraft_clone::mobs::model::Mobs;
+use minecraft_clone::mobs::service::{clear_events, despawn_event, spawn_event, strike_events};
 use minecraft_clone::player::model::Player;
-use minecraft_clone::shared::event::Event;
+use minecraft_clone::shared::event::{Event, MobId};
 use minecraft_clone::shared::voxel::{BlockId, ChunkPos, WorldPos};
 use minecraft_clone::survival::model::{Meter, Stats};
 use minecraft_clone::survival::service::{eat, eat_events};
@@ -145,7 +147,7 @@ proptest! {
             // Both paths accept or refuse the same steps.
             prop_assert_eq!(planned.0, planned.1.is_some());
             if let Some(events) = planned.1 {
-                let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events };
+                let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events, mobs: &mut Mobs::default() };
                 prop_assert_eq!(apply_all(&mut stage, &events), Ok(()));
                 applied.extend(events);
             }
@@ -155,7 +157,7 @@ proptest! {
         }
 
         for event in applied.iter().rev() {
-            let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events };
+            let mut stage = Stage { world: &mut world, player: &mut player, inventory: &mut pack, stats: &mut stats_events, mobs: &mut Mobs::default() };
             prop_assert_eq!(apply(&mut stage, &event.inverse()), Ok(()));
         }
         prop_assert_eq!(world, start);
@@ -279,6 +281,7 @@ struct Game {
     player: Player,
     pack: Inventory,
     stats: Stats,
+    mobs: Mobs,
     log: EventLog,
 }
 
@@ -289,6 +292,7 @@ impl Game {
             player: &mut self.player,
             inventory: &mut self.pack,
             stats: &mut self.stats,
+            mobs: &mut self.mobs,
         };
         assert_eq!(apply_all(&mut stage, events), Ok(()));
         log_action(&mut self.log, events, kind);
@@ -305,6 +309,7 @@ fn rewind_undoes_a_meal_across_passive_changes_and_stops_at_a_respawn() {
         player: Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
         pack: Inventory::default(),
         stats: Stats::default(),
+        mobs: Mobs::default(),
         log: EventLog::new(),
     };
     for _ in 0..600 * 10 {
@@ -339,4 +344,62 @@ fn rewind_undoes_a_meal_across_passive_changes_and_stops_at_a_respawn() {
     assert_eq!(game.stats.hunger(), Meter::FULL);
     assert!(game.pack.is_empty());
     assert_eq!(rewind_events(&game.log), None);
+}
+
+// A zombie appears, is hit and is killed as passive events: `Z` steps over them, the saved
+// log carries them without a restart bringing the zombie back, and undoing them in reverse
+// puts the zombie back exactly as it was.
+#[test]
+fn mob_events_are_passive_survive_a_save_and_undo_exactly() {
+    let mut game = Game {
+        world: World::default(),
+        player: Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
+        pack: Inventory::default(),
+        stats: Stats::default(),
+        mobs: Mobs::default(),
+        log: EventLog::new(),
+    };
+    let id = MobId::FIRST;
+    let mut more = game.pack.clone();
+    more.add(ItemId::DIRT, 3).unwrap();
+    let gift = slot_events(&game.pack, &more);
+    game.commit(&gift, ActionKind::Edit);
+
+    game.commit(
+        &[spawn_event(id, Vec3::new(5.5, 1.0, 5.5))],
+        ActionKind::Passive,
+    );
+    let spawned = game.mobs.clone();
+    let hurt = strike_events(id, game.mobs.get(id).unwrap(), Damage::try_new(4).unwrap());
+    game.commit(&hurt, ActionKind::Passive);
+    let killed = strike_events(id, game.mobs.get(id).unwrap(), Damage::try_new(99).unwrap());
+    game.commit(&killed, ActionKind::Passive);
+    assert!(game.mobs.is_empty());
+
+    // `Z` undoes the gift, not the zombie's life and death.
+    let undo = rewind_events(&game.log).unwrap();
+    assert_eq!(undo, inverse_run(&gift));
+
+    // A save and a reload keep every record, and only blocks are replayed into chunks.
+    let saved = decode(&encode(117, &game.log)).unwrap();
+    assert_eq!(saved.log, game.log);
+    let mut chunk = World::default();
+    assert_eq!(
+        replay_chunk(&mut chunk, &saved.log, ChunkPos { x: 0, y: 0, z: 0 }),
+        Ok(())
+    );
+
+    // Undone newest first, the zombie comes back as it was and then goes again.
+    let mut back = hurt.clone();
+    back.extend(killed.iter());
+    for event in back.iter().rev() {
+        game.commit(&[event.inverse()], ActionKind::Rewind);
+    }
+    assert_eq!(game.mobs.get(id).map(|z| z.health()), Some(20));
+    assert_eq!(game.mobs.len(), spawned.len());
+    let clear = clear_events(&game.mobs);
+    game.commit(&clear, ActionKind::Respawn);
+    assert!(game.mobs.is_empty());
+    let drop = despawn_event(id, spawned.get(id).unwrap());
+    assert!(matches!(drop, Event::MobRemoved { health: 20, .. }));
 }

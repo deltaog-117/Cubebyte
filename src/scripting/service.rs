@@ -145,6 +145,7 @@ mod tests {
     use super::*;
     use crate::events::apply::apply;
     use crate::inventory::model::Inventory;
+    use crate::mobs::model::Mobs;
     use crate::scripting::model::{MAX_EFFECTS, Permission};
     use crate::survival::model::Stats;
     use crate::world::model::World;
@@ -201,6 +202,7 @@ mod tests {
                 player: &mut self.player,
                 inventory: &mut self.inventory,
                 stats: &mut self.stats,
+                mobs: &mut Mobs::default(),
             };
             run(commands, granted, limits, &mut stage, &mut self.log)
         }
@@ -453,6 +455,7 @@ mod tests {
                     player: &mut replayed.player,
                     inventory: &mut replayed.inventory,
                     stats: &mut replayed.stats,
+                    mobs: &mut Mobs::default(),
                 };
                 prop_assert_eq!(apply(&mut stage, event), Ok(()));
             }
@@ -467,6 +470,7 @@ mod tests {
                     player: &mut live.player,
                     inventory: &mut live.inventory,
                     stats: &mut live.stats,
+                    mobs: &mut Mobs::default(),
                 };
                 prop_assert_eq!(apply(&mut stage, &event.inverse()), Ok(()));
             }

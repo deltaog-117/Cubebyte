@@ -36,6 +36,7 @@
 | 2026-10-31 | Kept intent sessions | Keep the newest 20 numbered files, pruned at startup | ✅ Confirmed |
 | 2026-10-31 | Recorded actions | Intentions (target block, recipe, eat) in the same session file, version 2 | ✅ Confirmed |
 | 2026-11-01 | Meters under events | Delta events with the points really moved; passive changes logged but skipped by rewind; respawn is a barrier | ✅ Confirmed |
+| 2026-11-02 | Mobs under events | A `Mobs` store with ids; spawn, remove and health-change events through the one door; position is not checked | ✅ Confirmed |
 
 ---
 
@@ -1097,3 +1098,34 @@ Three options were compared: A, absolute set events like blocks and slots; B, ch
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-11-01 | Initial entry | deltaog-117 |
+
+---
+
+### Mobs Under Events
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+The game held one `Option<Zombie>` in `app`, changed by direct calls. Scripts cannot spawn what the log does not describe, and rewind cannot undo what the log does not record. The hard part is that walking is not an event yet, so a mob's position when an event is applied is not the one it had when the event was made.
+
+#### Decision & Rationale
+Three options were compared: A, a store of mobs with spawn, removal and health-change events; B, the single `Option<Zombie>` with spawn and remove events; C, A plus a move event on every tick. A was chosen.
+- A spawn and a removal are each other's inverse, and a hit is a change in health by the points really lost, like the meters. A kill is the health change followed by a removal at zero health, so undoing it in reverse puts the zombie back at the health it had.
+- Applying a removal checks the mob's id and health but not its position. Checking position would make undoing a spawn fail for any mob that has walked, and walking is not an event. The removal still records where the mob stood, so an undo puts it back there.
+- Spawns, hits, kills, drops for distance and the clearing at a respawn are all passive actions (the clear joins the respawn action). `Z` steps over them, as it did when hits were direct calls, and the redo stack is kept.
+- A mob's id is also its actor id in the intent log, so recorded hits still find their target and a replay spawns the same ids in the same order.
+
+**Trade-offs accepted:** the store holds only zombies, so another kind of mob will need either a second store or a kind field. Mob events are logged but never replayed: a restart starts with no mobs, as before, and the log keeps them as history. They share the 256-action window with edits and meters, and a zombie's life costs three or four records. The game still spawns one zombie at a time; the store and the events allow many, but no rule asks for more yet.
+
+#### Implementation Notes
+- `Mobs::spawn`, `remove` and `shift_health` are the only ways to change the store; `get_mut` hands out a mob to step, whose health only the `mobs` feature can write, and nothing there does. `mobs::service::strike` was removed for `strike_events`, and `aimed_at` became `aim_distance` so a click picks the nearest of several mobs.
+- Log format version 6: tags 11 to 13. Older files are still read; the unknown-tag test now uses tag 14.
+- Tests: a run of mixed block, player, pack, meter and mob events undoes in reverse and replays to the same state; stale mob events are refused and change nothing; the new records round-trip through a file and are refused in a version 5 file; an integration test kills a zombie through the door, and another follows a zombie's life through a save, a rewind that steps over it, and an exact undo.
+- The window was not run by the assistant. Try it by waiting ten seconds for a zombie, hitting it until it dies, and dying to one, then watching the next one appear.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |

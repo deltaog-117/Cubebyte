@@ -130,8 +130,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events::apply::Stage` holds the stats, and `StageError::Meter` refuses a meter change that would leave 0 to 20
 - `combat::service::hit_events` and `respawn_events`: the events for a hit and for starting over (meters refilled, pack emptied)
 - `ActionKind::Passive` (changes the world made by itself; rewind steps over them) and `ActionKind::Respawn` (rewind stops here)
+- `Event::MobSpawned`, `MobRemoved` and `MobHealthChanged`, with `shared::event::MobId`: a mob appearing, leaving (killed, dropped or cleared at a respawn) and gaining or losing health by the points it really moved; a spawn and a removal are each other's inverse, and a removal remembers the mob's health so an undo brings it back as it was
+- `mobs::model::Mobs`, the store of every living mob by id, changed only through `spawn`, `remove` and `shift_health`; a removal checks the mob's id and health but not where it stands, since walking is not an event
+- `mobs::service::strike_events`, `spawn_event`, `despawn_event` and `clear_events`: the events for a hit (only the health really lost, then a removal when none is left), a new zombie, a dropped one and clearing every mob
+- `events::apply::Stage` holds the mobs, and `StageError::Mob` refuses a mob event for a mob that is missing, already there, or whose health differs
+- Event log format version 6: tags 11 to 13 for the mob events. Older files are still read; a restart does not bring mobs back, since only block events replay into chunks
 
 ### Changed
+- `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
+- `mobs::service::strike` is replaced by `strike_events`, and `aimed_at` by `aim_distance`, which returns how far the hit is so a click picks the nearest mob
 - The intent file is now version 3, which adds the strike, rewind and redo action kinds. Versions 1 and 2 are still read unchanged
 - `Z`, `Y` and a left click on the zombie now go through the same `perform` path as breaking and placing, so they are recorded when they worked and nothing else is
 - The intent file is now version 2: every record starts with a tag byte (run or action). Version 1 files are still read unchanged

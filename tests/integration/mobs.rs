@@ -1,13 +1,15 @@
 use glam::Vec3;
 use minecraft_clone::combat::model::Damage;
-use minecraft_clone::combat::service::{Outcome, hit};
+use minecraft_clone::combat::service::hit;
 use minecraft_clone::crafting::registry::{RecipeId, next};
 use minecraft_clone::crafting::service::craft;
+use minecraft_clone::events::apply::{Stage, apply_all};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
-use minecraft_clone::mobs::model::Zombie;
-use minecraft_clone::mobs::service::{step, strike};
-use minecraft_clone::shared::event::Event;
+use minecraft_clone::mobs::model::{Mobs, Zombie};
+use minecraft_clone::mobs::service::{spawn_event, step, strike_events};
+use minecraft_clone::player::model::Player;
+use minecraft_clone::shared::event::{Event, MobId};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
 use minecraft_clone::survival::model::Stats;
 use minecraft_clone::world::model::World;
@@ -60,10 +62,36 @@ fn a_chasing_zombie_wears_the_player_down_and_a_sword_beats_it() {
     assert!(crafted);
     assert_eq!(inventory.count_of(ItemId::SWORD), 1);
 
-    let mut fresh = Zombie::try_new(Vec3::new(8.5, 1.0, 0.5)).unwrap();
+    let id = MobId::FIRST;
     let blow = minecraft_clone::combat::service::strike(&inventory);
     assert_eq!(blow, Damage::try_new(4).unwrap());
-    let outcomes: Vec<Outcome> = (0..5).map(|_| strike(&mut fresh, blow)).collect();
-    assert_eq!(outcomes.last(), Some(&Outcome::Died));
-    assert!(outcomes[..4].iter().all(|o| *o == Outcome::Survived));
+    let (mut world, mut player, mut stats) = (
+        World::default(),
+        Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
+        Stats::default(),
+    );
+    let mut mobs = Mobs::default();
+    let mut commit = |mobs: &mut Mobs, events: &[Event]| {
+        let mut stage = Stage {
+            world: &mut world,
+            player: &mut player,
+            inventory: &mut inventory,
+            stats: &mut stats,
+            mobs,
+        };
+        assert_eq!(apply_all(&mut stage, events), Ok(()));
+    };
+    commit(&mut mobs, &[spawn_event(id, Vec3::new(8.5, 1.0, 0.5))]);
+
+    // Four blows leave it alive; the fifth takes the rest and removes it.
+    for _ in 0..4 {
+        let events = strike_events(id, mobs.get(id).unwrap(), blow);
+        assert_eq!(events.len(), 1);
+        commit(&mut mobs, &events);
+        assert!(mobs.get(id).is_some());
+    }
+    let events = strike_events(id, mobs.get(id).unwrap(), blow);
+    assert_eq!(events.len(), 2);
+    commit(&mut mobs, &events);
+    assert!(mobs.is_empty());
 }

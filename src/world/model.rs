@@ -128,7 +128,10 @@ impl World {
             Event::PlayerMoved { .. }
             | Event::SlotSet { .. }
             | Event::HungerChanged { .. }
-            | Event::HealthChanged { .. } => Ok(()),
+            | Event::HealthChanged { .. }
+            | Event::MobSpawned { .. }
+            | Event::MobRemoved { .. }
+            | Event::MobHealthChanged { .. } => Ok(()),
             Event::BlockSet { pos, old, new } => {
                 let found = self.block_at(pos);
                 if found != old {

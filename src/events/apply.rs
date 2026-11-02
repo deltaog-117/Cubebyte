@@ -1,7 +1,8 @@
 //! Applying any event to the game state it changes.
 //!
 //! [`apply`] is the one door every change goes through: blocks to the world, jumps to the
-//! player, slot changes to the inventory, meter changes to the stats. Each event records what it replaced, so an event
+//! player, slot changes to the inventory, meter changes to the stats, spawns, hits and
+//! removals to the mobs. Each event records what it replaced, so an event
 //! applied to a state that has moved on is refused instead of guessed at, and a refused event
 //! leaves the state exactly as it was.
 
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 use crate::inventory::model::{Inventory, Stack};
 use crate::items::registry::ItemId;
+use crate::mobs::model::{MobError, Mobs};
 use crate::player::model::{Player, PlayerError};
 use crate::player::service::teleport;
 use crate::shared::event::{Event, Held, Spot};
@@ -21,6 +23,7 @@ pub struct Stage<'a> {
     pub player: &'a mut Player,
     pub inventory: &'a mut Inventory,
     pub stats: &'a mut Stats,
+    pub mobs: &'a mut Mobs,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -48,6 +51,9 @@ pub enum StageError {
     /// hunger has since drained below what the meal gave.
     #[error(transparent)]
     Meter(#[from] ShiftRefused),
+    /// A mob that is not there, is already there, or has other health than recorded.
+    #[error(transparent)]
+    Mob(#[from] MobError),
 }
 
 /// Applies `event` to `stage`.
@@ -61,6 +67,8 @@ pub enum StageError {
 /// - [`StageError::StaleSlot`] when the slot holds something other than the event's `old`.
 /// - [`StageError::BadHeld`] when the event's `new` is not a stack the game can hold.
 /// - [`StageError::Meter`] when a meter change would leave `0..=20`.
+/// - [`StageError::Mob`] when a spawn names a mob already there, a removal or hit names one
+///   that is not or whose health differs, or a health change would leave `0..=20`.
 ///
 /// The stage is left unchanged on any error.
 pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
@@ -97,6 +105,9 @@ pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
         }
         Event::HungerChanged { by } => Ok(stage.stats.shift_hunger(by)?),
         Event::HealthChanged { by } => Ok(stage.stats.shift_health(by)?),
+        Event::MobSpawned { id, at, health } => Ok(stage.mobs.spawn(id, at.to_vec3(), health)?),
+        Event::MobRemoved { id, health, .. } => Ok(stage.mobs.remove(id, health)?),
+        Event::MobHealthChanged { id, by } => Ok(stage.mobs.shift_health(id, by)?),
     }
 }
 
@@ -160,7 +171,10 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::combat::model::Damage;
     use crate::inventory::model::SLOTS;
+    use crate::mobs::service::{despawn_event, spawn_event, strike_events};
+    use crate::shared::event::MobId;
     use crate::shared::voxel::{BlockId, WorldPos};
     use crate::survival::model::METER_MAX;
 
@@ -171,6 +185,7 @@ mod tests {
         player: Player,
         inventory: Inventory,
         stats: Stats,
+        mobs: Mobs,
     }
 
     impl State {
@@ -180,6 +195,7 @@ mod tests {
                 player: Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap(),
                 inventory: Inventory::default(),
                 stats: Stats::default(),
+                mobs: Mobs::default(),
             }
         }
 
@@ -189,6 +205,7 @@ mod tests {
                 player: &mut self.player,
                 inventory: &mut self.inventory,
                 stats: &mut self.stats,
+                mobs: &mut self.mobs,
             }
         }
 
@@ -205,6 +222,11 @@ mod tests {
         Remove(usize, u32),
         Hunger(i8),
         Health(i8),
+        MobAppears((f32, f32, f32)),
+        /// The `n`th mob (wrapping) takes this many points of damage.
+        MobHit(usize, u8),
+        /// The `n`th mob (wrapping) is dropped.
+        MobDrops(usize),
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -215,6 +237,9 @@ mod tests {
             (0usize..3, 1u32..200).prop_map(|(item, count)| Op::Remove(item, count)),
             (-20i8..=20).prop_map(Op::Hunger),
             (-20i8..=20).prop_map(Op::Health),
+            (-50.0f32..50.0, 0.0f32..20.0, -50.0f32..50.0).prop_map(Op::MobAppears),
+            (0usize..4, 1u8..12).prop_map(|(which, points)| Op::MobHit(which, points)),
+            (0usize..4).prop_map(Op::MobDrops),
         ]
     }
 
@@ -267,7 +292,27 @@ mod tests {
                 .map(|_| Event::HealthChanged { by })
                 .into_iter()
                 .collect(),
+            Op::MobAppears((x, y, z)) => {
+                let id = state
+                    .mobs
+                    .iter()
+                    .last()
+                    .map_or(MobId::FIRST, |(last, _)| last.next());
+                vec![spawn_event(id, Vec3::new(x, y, z))]
+            }
+            Op::MobHit(which, points) => nth_mob(state, which)
+                .map(|(id, zombie)| strike_events(id, zombie, Damage::try_new(points).unwrap()))
+                .unwrap_or_default(),
+            Op::MobDrops(which) => nth_mob(state, which)
+                .map(|(id, zombie)| despawn_event(id, zombie))
+                .into_iter()
+                .collect(),
         }
+    }
+
+    fn nth_mob(state: &State, which: usize) -> Option<(MobId, &crate::mobs::model::Zombie)> {
+        let count = state.mobs.len();
+        state.mobs.iter().nth(which.checked_rem(count)?)
     }
 
     proptest! {
@@ -294,6 +339,7 @@ mod tests {
             prop_assert_eq!(state.player, start_player);
             prop_assert_eq!(state.inventory, Inventory::default());
             prop_assert_eq!(state.stats, Stats::default());
+            prop_assert_eq!(state.mobs, Mobs::default());
         }
 
         #[test]
@@ -318,6 +364,7 @@ mod tests {
             prop_assert_eq!(replayed.player, live.player);
             prop_assert_eq!(replayed.inventory, live.inventory);
             prop_assert_eq!(replayed.stats, live.stats);
+            prop_assert_eq!(replayed.mobs, live.mobs);
         }
 
         #[test]
@@ -484,5 +531,38 @@ mod tests {
 
         assert!(matches!(result, Err(StageError::StaleSlot { slot: 1, .. })));
         assert!(state.inventory.is_empty());
+    }
+
+    #[test]
+    fn a_mob_event_for_the_wrong_mob_or_health_is_refused_and_changes_nothing() {
+        let mut state = State::new();
+        let id = MobId::FIRST;
+        let at = Spot::from_vec3(Vec3::new(3.0, 2.0, 1.0));
+        assert_eq!(
+            state.apply(&Event::MobSpawned { id, at, health: 20 }),
+            Ok(())
+        );
+        let before = state.mobs.clone();
+
+        for stale in [
+            Event::MobSpawned { id, at, health: 20 },
+            Event::MobRemoved { id, at, health: 19 },
+            Event::MobRemoved {
+                id: MobId(9),
+                at,
+                health: 20,
+            },
+            Event::MobHealthChanged { id, by: 1 },
+            Event::MobHealthChanged {
+                id: MobId(9),
+                by: -1,
+            },
+        ] {
+            assert!(
+                matches!(state.apply(&stale), Err(StageError::Mob(_))),
+                "{stale:?}"
+            );
+            assert_eq!(state.mobs, before);
+        }
     }
 }

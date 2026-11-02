@@ -1,7 +1,9 @@
 //! The zombie's rules: chase, hit, take hits, spawn and despawn.
 //!
 //! Nothing here reads wall-clock time. Spawning draws from a stream the caller forks from
-//! the simulation, so the same stream always puts the zombie in the same place.
+//! the simulation, so the same stream always puts the zombie in the same place. Mobs appear,
+//! lose health and leave through events, so the functions that decide those things return
+//! the events and leave applying them to the caller.
 
 use std::num::NonZeroU64;
 
@@ -10,9 +12,9 @@ use glam::{Vec2, Vec3};
 use crate::blocks::registry::is_solid;
 use crate::building::raycast;
 use crate::combat::model::Damage;
-use crate::combat::service::Outcome;
-use crate::mobs::model::{HALF_WIDTH, HEIGHT, Zombie};
+use crate::mobs::model::{HALF_WIDTH, HEIGHT, MAX_HEALTH, Mobs, Zombie};
 use crate::shared::body::{self, Intent};
+use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
 use crate::shared::math::ray_box;
 use crate::shared::rng::Rng;
@@ -135,37 +137,73 @@ fn solid(world: &World, [x, y, z]: [i32; 3]) -> bool {
     is_solid(world.block_at(WorldPos { x, y, z }))
 }
 
-/// Takes `damage` from the zombie's health. Hitting a dead zombie reports `Died` again and
-/// changes nothing.
-pub fn strike(zombie: &mut Zombie, damage: Damage) -> Outcome {
-    zombie.health = zombie.health.saturating_sub(damage.points());
-    if zombie.health == 0 {
-        Outcome::Died
-    } else {
-        Outcome::Survived
+/// The events for `damage` landing on zombie `id`: the health it really loses, and its
+/// removal when that leaves it with none. Damage past what is left is not counted, so the
+/// events undo to exactly the health it had.
+pub fn strike_events(id: MobId, zombie: &Zombie, damage: Damage) -> Vec<Event> {
+    let health = zombie.health();
+    let taken = damage.points().min(health);
+    let mut events = Vec::new();
+    if taken > 0 {
+        // A zombie has at most `MAX_HEALTH`, so what it can lose fits a signed byte.
+        let by = i8::try_from(taken).map_or(i8::MIN, i8::wrapping_neg);
+        events.push(Event::MobHealthChanged { id, by });
+    }
+    if taken == health {
+        events.push(removal(id, zombie, 0));
+    }
+    events
+}
+
+/// The event for a new zombie `id` at `at`, with full health.
+pub fn spawn_event(id: MobId, at: Vec3) -> Event {
+    Event::MobSpawned {
+        id,
+        at: Spot::from_vec3(at),
+        health: MAX_HEALTH,
     }
 }
 
-/// Whether the ray from `origin` along `direction` hits the zombie within `reach` before it
-/// hits any block. `alpha` blends the zombie's box the way it is drawn, so the player hits
-/// what they see.
-pub fn aimed_at(
+/// The event that drops zombie `id` as it is.
+pub fn despawn_event(id: MobId, zombie: &Zombie) -> Event {
+    removal(id, zombie, zombie.health())
+}
+
+/// The events that take every mob out of the world.
+pub fn clear_events(mobs: &Mobs) -> Vec<Event> {
+    mobs.iter()
+        .map(|(id, zombie)| despawn_event(id, zombie))
+        .collect()
+}
+
+fn removal(id: MobId, zombie: &Zombie, health: u8) -> Event {
+    Event::MobRemoved {
+        id,
+        at: Spot::from_vec3(zombie.position()),
+        health,
+    }
+}
+
+/// How far along the ray from `origin` along `direction` it hits the zombie, if it does so
+/// within `reach` before it hits any block. `alpha` blends the zombie's box the way it is
+/// drawn, so the player hits what they see.
+pub fn aim_distance(
     zombie: &Zombie,
     world: &World,
     origin: Vec3,
     direction: Vec3,
     reach: f32,
     alpha: f32,
-) -> bool {
+) -> Option<f32> {
     let (min, max) = zombie.bounds(alpha);
-    let Some(distance) = ray_box(origin, direction, min, max).filter(|&d| d <= reach) else {
-        return false;
-    };
+    let distance = ray_box(origin, direction, min, max).filter(|&d| d <= reach)?;
     let Some(hit) = raycast::cast(world, origin, direction, reach) else {
-        return true;
+        return Some(distance);
     };
     let cell = Vec3::new(hit.block.x as f32, hit.block.y as f32, hit.block.z as f32);
-    ray_box(origin, direction, cell, cell + Vec3::ONE).is_none_or(|block| distance <= block)
+    ray_box(origin, direction, cell, cell + Vec3::ONE)
+        .is_none_or(|block| distance <= block)
+        .then_some(distance)
 }
 
 /// Whether the zombie should be dropped: too far from the player, or fallen out of the world.
@@ -314,14 +352,71 @@ mod tests {
         assert!(zombie.position().x > 4.0, "x = {}", zombie.position().x);
     }
 
+    fn apply_all(mobs: &mut Mobs, events: &[Event]) {
+        for event in events {
+            match *event {
+                Event::MobSpawned { id, at, health } => {
+                    mobs.spawn(id, at.to_vec3(), health).unwrap();
+                }
+                Event::MobRemoved { id, health, .. } => mobs.remove(id, health).unwrap(),
+                Event::MobHealthChanged { id, by } => mobs.shift_health(id, by).unwrap(),
+                other => panic!("not a mob event: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn strikes_take_health_and_the_last_one_kills() {
-        let mut zombie = zombie_at(0.5, 0.5);
-        assert_eq!(strike(&mut zombie, damage(4)), Outcome::Survived);
-        assert_eq!(zombie.health(), MAX_HEALTH - 4);
-        assert_eq!(strike(&mut zombie, damage(u8::MAX)), Outcome::Died);
-        assert_eq!(zombie.health(), 0);
-        assert_eq!(strike(&mut zombie, damage(1)), Outcome::Died);
+        let id = MobId::FIRST;
+        let mut mobs = Mobs::default();
+        apply_all(&mut mobs, &[spawn_event(id, Vec3::new(0.5, 1.0, 0.5))]);
+
+        let events = strike_events(id, mobs.get(id).unwrap(), damage(4));
+        assert_eq!(events, [Event::MobHealthChanged { id, by: -4 }]);
+        apply_all(&mut mobs, &events);
+        assert_eq!(mobs.get(id).map(Zombie::health), Some(MAX_HEALTH - 4));
+
+        let events = strike_events(id, mobs.get(id).unwrap(), damage(u8::MAX));
+        assert_eq!(events.len(), 2, "the last hit takes the rest, then removes");
+        assert_eq!(
+            events[0],
+            Event::MobHealthChanged {
+                id,
+                by: -((MAX_HEALTH - 4) as i8)
+            }
+        );
+        apply_all(&mut mobs, &events);
+        assert!(mobs.is_empty());
+    }
+
+    #[test]
+    fn striking_a_mob_and_undoing_it_restores_it_exactly() {
+        let id = MobId::FIRST;
+        let mut mobs = Mobs::default();
+        apply_all(&mut mobs, &[spawn_event(id, Vec3::new(0.5, 1.0, 0.5))]);
+        let before = mobs.clone();
+
+        let events = strike_events(id, mobs.get(id).unwrap(), damage(u8::MAX));
+        apply_all(&mut mobs, &events);
+        let undo: Vec<Event> = events.iter().rev().map(|event| event.inverse()).collect();
+        apply_all(&mut mobs, &undo);
+
+        assert_eq!(mobs, before);
+    }
+
+    #[test]
+    fn clearing_removes_every_mob_and_undoes_to_the_same_mobs() {
+        let mut mobs = Mobs::default();
+        let spawns = [MobId(1), MobId(5)].map(|id| spawn_event(id, Vec3::new(0.5, 1.0, 0.5)));
+        apply_all(&mut mobs, &spawns);
+        let before = mobs.clone();
+
+        let events = clear_events(&mobs);
+        apply_all(&mut mobs, &events);
+        assert!(mobs.is_empty());
+        let undo: Vec<Event> = events.iter().map(|event| event.inverse()).collect();
+        apply_all(&mut mobs, &undo);
+        assert_eq!(mobs, before);
     }
 
     #[test]
@@ -329,20 +424,15 @@ mod tests {
         let mut world = floor();
         let zombie = zombie_at(6.5, 0.5);
         let eye = Vec3::new(0.5, 2.62, 0.5);
-        assert!(aimed_at(&zombie, &world, eye, Vec3::X, 8.0, 1.0));
-        assert!(
-            !aimed_at(&zombie, &world, eye, Vec3::X, 4.0, 1.0),
-            "out of reach"
-        );
-        assert!(
-            !aimed_at(&zombie, &world, eye, Vec3::Z, 8.0, 1.0),
-            "looking away"
-        );
+        let aimed = |world: &World, direction, reach| {
+            aim_distance(&zombie, world, eye, direction, reach, 1.0)
+        };
+        let distance = aimed(&world, Vec3::X, 8.0).expect("in reach");
+        assert!((distance - 5.7).abs() < 1e-3, "distance {distance}");
+        assert_eq!(aimed(&world, Vec3::X, 4.0), None, "out of reach");
+        assert_eq!(aimed(&world, Vec3::Z, 8.0), None, "looking away");
         set(&mut world, 3, 2, 0);
-        assert!(
-            !aimed_at(&zombie, &world, eye, Vec3::X, 8.0, 1.0),
-            "wall between"
-        );
+        assert_eq!(aimed(&world, Vec3::X, 8.0), None, "wall between");
     }
 
     #[test]

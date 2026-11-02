@@ -22,6 +22,9 @@
 //! | 8 | health changed | by (1, signed) |
 //! | 9 | passive ends | none: the events since the last end happened without the player acting |
 //! | 10 | respawn ends | none: the events since the last end are the player starting over |
+//! | 11 | mob spawned | mob id (4), x, y, z bits (4 each), health (1) |
+//! | 12 | mob removed | mob id (4), x, y, z bits (4 each), health (1) |
+//! | 13 | mob health changed | mob id (4), by (1, signed) |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
@@ -30,7 +33,9 @@
 //! the log folds its oldest actions into base blocks to stay bounded, and a chunk is rebuilt
 //! from its base blocks first, then its events. Base blocks may appear anywhere in the file,
 //! since they sit under every event whatever their place; the writer puts them first. Tags 7
-//! to 10 came with version 5, when hunger and health became events.
+//! to 10 came with version 5, when hunger and health became events. Tags 11 to 13 came with
+//! version 6, when mobs did. A restart does not bring mobs back: only block events are replayed
+//! into chunks, so these records stay in the file as history.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -38,13 +43,13 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::events::log::{ActionKind, EventLog, Record};
-use crate::shared::event::{Event, Held, Spot};
+use crate::shared::event::{Event, Held, MobId, Spot};
 use crate::shared::voxel::{BlockId, WorldPos};
 
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -63,6 +68,9 @@ const TAG_HUNGER_CHANGED: u8 = 7;
 const TAG_HEALTH_CHANGED: u8 = 8;
 const TAG_PASSIVE_END: u8 = 9;
 const TAG_RESPAWN_END: u8 = 10;
+const TAG_MOB_SPAWNED: u8 = 11;
+const TAG_MOB_REMOVED: u8 = 12;
+const TAG_MOB_HEALTH_CHANGED: u8 = 13;
 
 /// Bytes a base block takes in a file, tag included.
 const BASE_RECORD_LEN: usize = 1 + 3 * 4 + 2;
@@ -74,6 +82,8 @@ const fn record_len(event: &Event) -> usize {
         Event::PlayerMoved { .. } => 1 + 6 * 4,
         Event::SlotSet { .. } => 1 + 1 + 3 + 3,
         Event::HungerChanged { .. } | Event::HealthChanged { .. } => 1 + 1,
+        Event::MobSpawned { .. } | Event::MobRemoved { .. } => 1 + 4 + 3 * 4 + 1,
+        Event::MobHealthChanged { .. } => 1 + 4 + 1,
     }
 }
 
@@ -172,6 +182,24 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
                 bytes.push(TAG_HEALTH_CHANGED);
                 bytes.extend_from_slice(&by.to_le_bytes());
             }
+            Event::MobSpawned { id, at, health } | Event::MobRemoved { id, at, health } => {
+                let spawned = matches!(event, Event::MobSpawned { .. });
+                bytes.push(if spawned {
+                    TAG_MOB_SPAWNED
+                } else {
+                    TAG_MOB_REMOVED
+                });
+                bytes.extend_from_slice(&id.0.to_le_bytes());
+                for bits in at.to_bits() {
+                    bytes.extend_from_slice(&bits.to_le_bytes());
+                }
+                bytes.push(health);
+            }
+            Event::MobHealthChanged { id, by } => {
+                bytes.push(TAG_MOB_HEALTH_CHANGED);
+                bytes.extend_from_slice(&id.0.to_le_bytes());
+                bytes.extend_from_slice(&by.to_le_bytes());
+            }
         }
     }
     bytes
@@ -239,6 +267,24 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 by: i8::from_le_bytes(reader.take()?),
             }),
             TAG_HEALTH_CHANGED if version >= 5 => log.push(Event::HealthChanged {
+                by: i8::from_le_bytes(reader.take()?),
+            }),
+            TAG_MOB_SPAWNED | TAG_MOB_REMOVED if version >= 6 => {
+                let id = MobId(u32::from_le_bytes(reader.take()?));
+                let at = Spot::from_bits([
+                    u32::from_le_bytes(reader.take()?),
+                    u32::from_le_bytes(reader.take()?),
+                    u32::from_le_bytes(reader.take()?),
+                ]);
+                let [health] = reader.take()?;
+                log.push(if tag == TAG_MOB_SPAWNED {
+                    Event::MobSpawned { id, at, health }
+                } else {
+                    Event::MobRemoved { id, at, health }
+                });
+            }
+            TAG_MOB_HEALTH_CHANGED if version >= 6 => log.push(Event::MobHealthChanged {
+                id: MobId(u32::from_le_bytes(reader.take()?)),
                 by: i8::from_le_bytes(reader.take()?),
             }),
             TAG_PASSIVE_END if version >= 5 => log.end_action(ActionKind::Passive),
@@ -334,6 +380,22 @@ mod tests {
                 }),
             any::<i8>().prop_map(|by| Event::HungerChanged { by }),
             any::<i8>().prop_map(|by| Event::HealthChanged { by }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<u8>()).prop_map(|(id, at, health)| {
+                Event::MobSpawned {
+                    id: MobId(id),
+                    at: Spot::from_bits(at),
+                    health,
+                }
+            }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<u8>()).prop_map(|(id, at, health)| {
+                Event::MobRemoved {
+                    id: MobId(id),
+                    at: Spot::from_bits(at),
+                    health,
+                }
+            }),
+            (any::<u32>(), any::<i8>())
+                .prop_map(|(id, by)| Event::MobHealthChanged { id: MobId(id), by }),
         ]
     }
 
@@ -478,6 +540,30 @@ mod tests {
     }
 
     #[test]
+    fn a_version_five_file_with_a_mob_event_is_rejected() {
+        let events = [
+            Event::MobSpawned {
+                id: MobId::FIRST,
+                at: Spot::from_bits([0; 3]),
+                health: 20,
+            },
+            Event::MobHealthChanged {
+                id: MobId::FIRST,
+                by: -2,
+            },
+        ];
+        for (event, tag) in events
+            .into_iter()
+            .zip([TAG_MOB_SPAWNED, TAG_MOB_HEALTH_CHANGED])
+        {
+            let mut bytes = encode(1, &log_of(&[event]));
+            bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
+
+            assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(tag)));
+        }
+    }
+
+    #[test]
     fn a_file_cut_inside_the_header_is_rejected() {
         let bytes = encode(7, &EventLog::new());
         for len in 0..HEADER_LEN {
@@ -531,8 +617,8 @@ mod tests {
     #[test]
     fn an_unknown_tag_is_rejected() {
         let mut bytes = encode(7, &EventLog::new());
-        bytes.extend_from_slice(&[11; BLOCK_RECORD_LEN]);
-        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(11)));
+        bytes.extend_from_slice(&[14; BLOCK_RECORD_LEN]);
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(14)));
     }
 
     #[test]

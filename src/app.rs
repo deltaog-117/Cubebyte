@@ -18,7 +18,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::{REACH, break_target, place_target};
-use crate::combat::service::{Outcome, hit_events, respawn, respawn_events, strike};
+use crate::combat::service::{hit_events, respawn, respawn_events, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
 use crate::events::apply::{Stage, StageError, apply_all};
@@ -31,7 +31,7 @@ use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
 use crate::items::registry;
-use crate::mobs::model::Zombie;
+use crate::mobs::model::Mobs;
 use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
 use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
@@ -41,7 +41,7 @@ use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
-use crate::shared::event::{Event, Spot};
+use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
 use crate::shared::voxel::{BlockId, CHUNK_SIZE, ChunkPos, WorldPos};
 use crate::simulation::action::Action;
@@ -177,14 +177,12 @@ struct Running {
     /// Whether the inventory differs from what is on disk, so exit knows to save it.
     inventory_dirty: bool,
     stats: Stats,
-    /// The one hostile mob, if it is alive.
-    zombie: Option<Zombie>,
-    /// Steps left before the next zombie appears.
+    /// Every hostile mob that is alive; they come and go through events.
+    mobs: Mobs,
+    /// Steps left before the next zombie appears, counted while no mob is alive.
     zombie_timer: u32,
-    /// Who the current zombie is in the intent log.
-    zombie_actor: ActorId,
-    /// The id the next zombie will get.
-    next_actor: ActorId,
+    /// The id the next zombie will get. It is also the mob's actor in the intent log.
+    next_mob: MobId,
     /// What the player and each zombie asked for on every step; settled steps are written to
     /// this session's file as play goes on.
     intents: IntentStream,
@@ -253,10 +251,9 @@ impl App {
             inventory,
             inventory_dirty: false,
             stats: Stats::default(),
-            zombie: None,
+            mobs: Mobs::default(),
             zombie_timer: ZOMBIE_DELAY_STEPS,
-            zombie_actor: ActorId::PLAYER.next(),
-            next_actor: ActorId::PLAYER.next(),
+            next_mob: MobId::FIRST,
             intents,
             replay,
             recipe: RecipeId::FIRST,
@@ -332,8 +329,10 @@ impl App {
             return;
         }
         let (origin, direction) = (running.camera.position, running.camera.forward());
-        if button == MouseButton::Left && running.aimed_at_zombie(origin, direction) {
-            running.act(Action::Strike(running.zombie_actor));
+        if button == MouseButton::Left
+            && let Some(id) = running.aimed_mob(origin, direction)
+        {
+            running.act(Action::Strike(actor_of(id)));
             return;
         }
         let action = match button {
@@ -402,7 +401,7 @@ impl App {
             running.camera.position = running.player.eye(running.simulation.alpha());
         }
         running.stream(MAX_LOADS_PER_FRAME);
-        running.show_zombie();
+        running.show_mobs();
         running.show_panel(self.cursor);
         running.renderer.render(&running.camera)
     }
@@ -468,6 +467,7 @@ impl Running {
     /// respawn is logged as a barrier, so `Z` cannot reach back past it.
     fn die(&mut self) {
         let mut events = respawn_events(&self.stats, &self.inventory);
+        events.extend(mobs::clear_events(&self.mobs));
         let (from, to) = (
             Spot::from_vec3(self.player.position()),
             Spot::from_vec3(self.spawn.position()),
@@ -480,12 +480,12 @@ impl Running {
             // player still starts over, only the log misses it.
             tracing::warn!(%error, "respawn rejected");
             respawn(&mut self.stats, &mut self.inventory);
+            self.mobs = Mobs::default();
         }
         self.stats.restart_clock();
         self.redo.clear();
         self.inventory_dirty = true;
         self.deaths += 1;
-        self.zombie = None;
         self.zombie_timer = ZOMBIE_DELAY_STEPS;
         self.player = self.spawn;
         self.flying = false;
@@ -493,35 +493,52 @@ impl Running {
         self.refresh_title();
     }
 
-    /// Moves the zombie one step and lets it hit the player, or counts down to the next one.
+    /// Moves every mob one step and lets it hit the player, or counts down to the next
+    /// zombie while there is none.
     fn step_zombie(&mut self, tick: Tick) {
         let target = self.player.position();
-        let Some(zombie) = self.zombie.as_mut() else {
+        if self.mobs.is_empty() {
             self.zombie_timer = self.zombie_timer.saturating_sub(1);
             if self.zombie_timer == 0 {
                 self.spawn_zombie(target);
             }
             return;
+        }
+        let ids: Vec<MobId> = self.mobs.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            self.step_mob(id, tick, target);
+        }
+        if self.mobs.is_empty() {
+            self.zombie_timer = ZOMBIE_DELAY_STEPS;
+        }
+    }
+
+    /// Moves mob `id` one step towards `target` and lets it hit the player, or drops it when
+    /// it is too far away.
+    fn step_mob(&mut self, id: MobId, tick: Tick, target: Vec3) {
+        let actor = actor_of(id);
+        let Some(zombie) = self.mobs.get_mut(id) else {
+            return;
         };
         if mobs::despawns(zombie, target) {
-            self.zombie = None;
-            self.zombie_timer = ZOMBIE_DELAY_STEPS;
-        } else {
-            // Past the recorded steps, for instance after the original zombie was hit and
-            // killed, it decides for itself.
-            let intent = self
-                .replay
-                .as_ref()
-                .and_then(|replay| replay.intent(self.zombie_actor, tick))
-                .unwrap_or_else(|| mobs::decide(zombie, target, &self.world));
-            if let Some(damage) =
-                mobs::step_with(zombie, intent, target, &self.world, TICK_STEP.as_secs_f32())
-            {
-                let events = hit_events(&self.stats, damage);
-                self.commit_passive(&events);
-            }
-            self.record(self.zombie_actor, tick, intent);
+            let event = mobs::despawn_event(id, zombie);
+            self.commit_passive(&[event]);
+            return;
         }
+        // Past the recorded steps, for instance after the original zombie was hit and
+        // killed, it decides for itself.
+        let intent = self
+            .replay
+            .as_ref()
+            .and_then(|replay| replay.intent(actor, tick))
+            .unwrap_or_else(|| mobs::decide(zombie, target, &self.world));
+        if let Some(damage) =
+            mobs::step_with(zombie, intent, target, &self.world, TICK_STEP.as_secs_f32())
+        {
+            let events = hit_events(&self.stats, damage);
+            self.commit_passive(&events);
+        }
+        self.record(actor, tick, intent);
     }
 
     /// What the player does on `tick`: the recorded step while a replay has one, otherwise
@@ -557,51 +574,58 @@ impl Running {
             .simulation
             .stream(ZOMBIE_STREAM ^ self.simulation.tick().0);
         let at = mobs::spawn_point(&mut rng, target, |x, z| self.terrain.height_at(x, z));
-        match Zombie::try_new(at) {
-            Ok(zombie) => {
-                self.zombie = Some(zombie);
-                self.zombie_actor = self.next_actor;
-                self.next_actor = self.next_actor.next();
-            }
-            Err(error) => tracing::warn!(%error, "cannot place a zombie"),
-        }
+        let id = self.next_mob;
+        self.commit_passive(&[mobs::spawn_event(id, at)]);
+        self.next_mob = id.next();
     }
 
-    /// Whether the crosshair is on the zombie, so the click hits it and does not also break
-    /// the block behind it.
-    fn aimed_at_zombie(&self, origin: Vec3, direction: Vec3) -> bool {
-        self.zombie.as_ref().is_some_and(|zombie| {
-            mobs::aimed_at(
-                zombie,
-                &self.world,
-                origin,
-                direction,
-                REACH,
-                self.simulation.alpha(),
-            )
-        })
+    /// The mob the crosshair is on, nearest first, so the click hits it and does not also
+    /// break the block behind it.
+    fn aimed_mob(&self, origin: Vec3, direction: Vec3) -> Option<MobId> {
+        self.mobs
+            .iter()
+            .filter_map(|(id, zombie)| {
+                mobs::aim_distance(
+                    zombie,
+                    &self.world,
+                    origin,
+                    direction,
+                    REACH,
+                    self.simulation.alpha(),
+                )
+                .map(|distance| (id, distance))
+            })
+            .min_by(|(_, near), (_, far)| near.total_cmp(far))
+            .map(|(id, _)| id)
     }
 
-    /// Hits the zombie `actor` with the best weapon in the pack. Reports whether it did: it
-    /// did not if that zombie is gone.
-    fn strike_zombie(&mut self, actor: ActorId) -> bool {
+    /// Hits mob `id` with the best weapon in the pack. Reports whether it did: it did not if
+    /// that mob is gone. The hit and a kill are logged as passive events, so `Z` does not
+    /// undo them.
+    fn strike_mob(&mut self, id: MobId) -> bool {
         let damage = strike(&self.inventory);
-        let Some(zombie) = self.zombie.as_mut().filter(|_| self.zombie_actor == actor) else {
+        let Some(zombie) = self.mobs.get(id) else {
             return false;
         };
-        if mobs::strike(zombie, damage) == Outcome::Died {
-            self.zombie = None;
+        let events = mobs::strike_events(id, zombie, damage);
+        self.commit_passive(&events);
+        if self.mobs.is_empty() {
             self.zombie_timer = ZOMBIE_DELAY_STEPS;
         }
         true
     }
 
-    /// Draws the zombie as a green box, or nothing when there is none.
-    fn show_zombie(&mut self) {
-        let (vertices, indices) = self.zombie.map_or_else(Default::default, |zombie| {
-            let (min, max) = zombie.bounds(self.simulation.alpha());
-            box_mesh(min, max, ZOMBIE_COLOR)
-        });
+    /// Draws every mob as a green box, or nothing when there are none.
+    fn show_mobs(&mut self) {
+        let alpha = self.simulation.alpha();
+        let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+        for (_, zombie) in self.mobs.iter() {
+            let (min, max) = zombie.bounds(alpha);
+            let (more_vertices, more_indices) = box_mesh(min, max, ZOMBIE_COLOR);
+            let first = vertices.len() as u32;
+            indices.extend(more_indices.into_iter().map(|index| first + index));
+            vertices.extend(more_vertices);
+        }
         self.renderer.set_entities(&vertices, &indices);
     }
 
@@ -678,6 +702,7 @@ impl Running {
             player: &mut self.player,
             inventory: &mut self.inventory,
             stats: &mut self.stats,
+            mobs: &mut self.mobs,
         };
         apply_all(&mut stage, events)?;
         log_action(&mut self.log, events, kind);
@@ -781,7 +806,7 @@ impl Running {
             Action::Place { pos, block } => self.place_at(pos, block),
             Action::Craft(recipe) => self.craft_once(RecipeId(recipe)),
             Action::Eat => self.eat_once(),
-            Action::Strike(actor) => self.strike_zombie(actor),
+            Action::Strike(actor) => self.strike_mob(mob_of(actor)),
             Action::Rewind => self.rewind(),
             Action::Redo => self.redo(),
         };
@@ -947,6 +972,16 @@ impl ApplicationHandler for App {
             running.window.request_redraw();
         }
     }
+}
+
+/// The mob that is intent-log actor `actor`; the inverse of [`actor_of`].
+const fn mob_of(actor: ActorId) -> MobId {
+    MobId(actor.0)
+}
+
+/// The intent-log actor that is mob `id`: mobs take the actor with their own number.
+const fn actor_of(id: MobId) -> ActorId {
+    ActorId(id.0)
 }
 
 /// Hides the pointer and keeps it in the window, for mouse look.

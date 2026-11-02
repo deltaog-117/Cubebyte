@@ -4,6 +4,7 @@ use minecraft_clone::events::log::EventLog;
 use minecraft_clone::events::persist::{decode, encode};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
+use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::Player;
 use minecraft_clone::scripting::model::{Command, Limits, Permission, Permissions};
 use minecraft_clone::scripting::service::run;
@@ -69,6 +70,7 @@ proptest! {
                 player: &mut player,
                 inventory: &mut inventory,
                 stats: &mut stats,
+                mobs: &mut Mobs::default(),
             };
             run(commands, granted, Limits::standard(), &mut stage, &mut log);
         }
@@ -86,6 +88,7 @@ proptest! {
                 player: &mut replayed_player,
                 inventory: &mut replayed_inventory,
                 stats: &mut replayed_stats,
+                mobs: &mut Mobs::default(),
             };
             prop_assert_eq!(apply(&mut stage, event), Ok(()));
         }

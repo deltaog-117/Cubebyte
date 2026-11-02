@@ -43,6 +43,7 @@ Items are organized by priority, not by timeline.
 - ✅ Recording hits and rewinds in intent tracks: hits on the zombie (named by the zombie's id), `Z` and `Y` are saved in the session file (version 3; versions 1 and 2 still load) and performed again by a replay, so a replay of a run that used them no longer drifts
 - ✅ Meters under events: hunger and health changes are events that carry the points really moved (`HungerChanged`, `HealthChanged`), so a meal, a zombie's hit, the hunger that drains on its own and a respawn all go through the one `events::apply` door and the log; the passive ones are logged but `Z` steps over them, so undoing a meal still works after hunger has drained; a respawn is a barrier that `Z` cannot rewind past; the saved log is version 5
 - ✅ Recording actions in intent tracks: breaking, placing, crafting and eating are saved in the session file (version 2; version 1 files still load) as the target block, the recipe or the meal, on the tick they happened; a replay performs them again and records them in its own new session, and keys and mouse do not act while it runs
+- ✅ Mobs under events: a `Mobs` store with ids, and spawning, hits, removal (a kill, a drop for distance, or a clear at respawn) as events through the one `events::apply` door; they are logged as passive actions, so `Z` steps over them, and undoing them in reverse restores the mobs exactly; the saved log is version 6
 
 ---
 
@@ -65,8 +66,8 @@ Items are organized by priority, not by timeline.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
 - **World interface for scripts** – First slice done (see Completed): teleport, give item and set block, each logged with its old value, checked for permission and range, and capped per tick. Still to do:
-  - spawning mobs, which needs mobs under the event log (today there is one `Option<Zombie>` in `app`);
-  - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain and respawn are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
+  - a script command to spawn a mob (mobs are events now, so this is a command, a permission and a limit on top of `Event::MobSpawned`);
+  - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain, respawn and mob spawns, hits and removals are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
   - reads (look, find, query);
   - a cost per action (fuel or energy) and a cooldown, tied to time as a resource;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
@@ -104,7 +105,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **World interface for scripts, next slice** – Put mobs under the event log so scripts can spawn them, then add reads and a cost per action. The language comes after.
+1. **World interface for scripts, next slice** – Add a spawn command now that mobs are events, then reads and a cost per action. The language comes after.
 2. **Time rewind, next slice** – Rewind edits in unloaded chunks, then save the redo stack.
 
 ---
