@@ -1,6 +1,7 @@
 //! The types a typed command is made of.
 
 use crate::items::registry::ItemId;
+use crate::scripting::library::ScriptId;
 use crate::shared::voxel::BlockId;
 
 /// Position of a command in the table. Like block and recipe IDs, a new command is only ever
@@ -21,6 +22,8 @@ pub enum ArgKind {
     Count { max: u16 },
     /// A whole number of blocks from the player's feet, either way.
     Offset,
+    /// The name of a ready-made script or quick-hack.
+    Hack,
 }
 
 /// One word a command takes.
@@ -38,6 +41,7 @@ pub enum Value {
     Mob,
     Count(u16),
     Offset(i32),
+    Hack(ScriptId),
 }
 
 /// What a typed line asks for, with every word already checked.
@@ -65,6 +69,10 @@ pub enum Request {
     /// Zone rewind around the feet, this many block-changing actions back.
     Zone {
         back: u16,
+    },
+    /// Run this script or quick-hack, anchored on what it needs.
+    Hack {
+        script: ScriptId,
     },
 }
 

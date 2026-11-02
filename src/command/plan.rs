@@ -1,6 +1,7 @@
 //! Turning a checked request into something the game already knows how to do.
 
 use crate::command::model::Request;
+use crate::scripting::library::ScriptId;
 use crate::scripting::model::Command;
 use crate::shared::voxel::WorldPos;
 use crate::simulation::action::Action;
@@ -16,6 +17,9 @@ pub enum Plan {
     /// checks a script gets. It waits for the tick so a replay, which runs script commands at
     /// that point of the tick, reproduces it.
     Queue(Command),
+    /// Start this script or quick-hack, anchored on what it needs. The game finds the anchor,
+    /// since the aim is not known here.
+    Hack(ScriptId),
 }
 
 fn at(feet: WorldPos, by: [i32; 3]) -> WorldPos {
@@ -40,6 +44,7 @@ pub fn plan(request: Request, feet: WorldPos) -> Plan {
         Request::Rewind => Plan::Do(Action::Rewind),
         Request::Redo => Plan::Do(Action::Redo),
         Request::Zone { back } => Plan::Do(Action::ZoneRewind { centre: feet, back }),
+        Request::Hack { script } => Plan::Hack(script),
     }
 }
 
@@ -90,6 +95,15 @@ mod tests {
             })
         );
         assert_eq!(plan(Request::Help, feet), Plan::Table);
+    }
+
+    #[test]
+    fn a_hack_is_left_to_the_game_to_anchor() {
+        let script = ScriptId(5);
+        assert_eq!(
+            plan(Request::Hack { script }, cell(1, 2, 3)),
+            Plan::Hack(script)
+        );
     }
 
     proptest! {

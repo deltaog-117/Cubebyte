@@ -26,7 +26,7 @@ pub const ZONE_MAX: u16 = crate::events::rewind::HISTORY_WINDOW as u16;
 /// Furthest an offset may be written, in blocks. Farther is out of any script's range anyway.
 pub const OFFSET_MAX: i32 = 1000;
 
-const COMMANDS: [Spec; 8] = [
+const COMMANDS: [Spec; 9] = [
     Spec {
         name: "help",
         summary: "open this table",
@@ -98,10 +98,19 @@ const COMMANDS: [Spec; 8] = [
     },
     Spec {
         name: "zone",
-        summary: "restore nearby blocks, count edits back",
+        summary: "restore nearby blocks, count back",
         args: &[arg("count", ArgKind::Count { max: ZONE_MAX })],
         build: |values| match *values {
             [Value::Count(back)] => Some(Request::Zone { back }),
+            _ => None,
+        },
+    },
+    Spec {
+        name: "hack",
+        summary: "run a script on what you aim at",
+        args: &[arg("name", ArgKind::Hack)],
+        build: |values| match *values {
+            [Value::Hack(script)] => Some(Request::Hack { script }),
             _ => None,
         },
     },
@@ -151,6 +160,7 @@ mod tests {
             ArgKind::Mob => "zombie".into(),
             ArgKind::Count { .. } => "1".into(),
             ArgKind::Offset => "0".into(),
+            ArgKind::Hack => "tower".into(),
         }
     }
 

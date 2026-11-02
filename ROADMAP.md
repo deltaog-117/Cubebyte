@@ -56,6 +56,8 @@ Items are organized by priority, not by timeline.
 - ✅ Archive of folded-away history: the log hands over the events it folds, with their action ends, and the game appends them on exit to `world.mcea` (after the world file is saved, so nothing is written twice); a frame cut short by a crash is dropped on the next append
 - ✅ Local rewind zones: key `X` puts the blocks in a cube of radius 8 around the player back as they were 1, 3, 10, 30 or 100 block-changing actions ago (`V` picks), as one edit that `Z` takes back whole; it costs 1 fuel plus 1 per started group of 4 blocks restored; blocks only, so the pack and mobs are untouched; saved in intent tracks (version 5) so a replay restores the same region
 - ✅ Command line and command dictionary: `/` opens a typed line and `H` opens it with a table of every command (Tab shows or hides the table); clicking a row runs a command that needs no words or starts one that does; commands are `help`, `give`, `go`, `set`, `spawn`, `rewind`, `redo` and `zone`, defined once in a table that the parser, the dictionary and the error messages all read; positions are blocks from the feet; script commands wait for the next tick and keep the script rules (permission, range, fuel, wait), so a replay reproduces them
+- ✅ Scripting language, first slice (blocks as data): a script is now a `Program`, a checked tree of blocks (do a command, shift the working cell, repeat 1 to 16 times, if a read is below, equal to or above a number); nesting is at most 4 deep and 64 blocks, every loop has a fixed count, and a stepper looks at no more than 32 blocks per tick and 4096 per run, so a program cannot freeze the game and a run that goes on too long is stopped with a message; the four ready-made scripts were rewritten as programs and still give the same commands; commands still go through the same permission, range, fuel and wait checks, so a replay is unchanged
+- ✅ Quick-hacks: a hack is a program anchored on something: the player's feet, the block under the crosshair or the nearest mob; key `G` opens a menu of the hacks that fit what you aim at (`pillar`, `perch`, `dig` for a block, `cage` for a mob), and the new `hack <name>` command runs any script from the command line; the `T` panel lists only the scripts that need no aim, and a `ward` script shows an `if`
 
 ---
 
@@ -83,7 +85,7 @@ Items are organized by priority, not by timeline.
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
   - scripts cannot use reads: the window shows them to the player, but a script plays a fixed list of commands and cannot branch on an answer until the language exists;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
-- **Code as gameplay (scripting)** – A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
+- **Code as gameplay (scripting)** – First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it. Still to do: the clickable block editor (open a hack as blocks and change it), a saved format for programs players make (not needed until the editor exists), a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
   - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
@@ -100,10 +102,10 @@ Items are organized by priority, not by timeline.
     - friendly errors, whole numbers only and a step budget, so scripts cannot freeze the game or fail in confusing ways;
     - scope by region, chunk, mob or block kind (builds on local rewind zones), so "only here" is simple to say;
     - keep early costs (fuel and waits) low and tunable, so the limits keep scripts fair without punishing small experiments.
-- **Quick-hacks** – Watch Dogs-style actions. Aim at a thing or a place and pick a hack from a menu (unlock, distract, go to this coordinate). Each hack is a ready-made script a player can open, read and edit, so players learn by using code first and writing it later. Two ways to trigger one:
+- **Quick-hacks** – First slice done (see Completed). Still to do: aiming at a mob with the crosshair (a hack uses the nearest mob in range today), opening a hack to read and edit it (waits for the block editor), and more hacks as commands grow. Watch Dogs-style actions. Aim at a thing or a place and pick a hack from a menu (unlock, distract, go to this coordinate). Each hack is a ready-made script a player can open, read and edit, so players learn by using code first and writing it later. Two ways to trigger one:
   - a specific command aimed at a target, which the command line reads as, for example, "go" to that coordinate;
   - the command-line menu, fetching what the player asks for.
-- **Command line and command dictionary** – First slice done (see Completed). Still to do: more commands as features arrive (craft, eat, hits), command history with the arrow keys, aiming (`go` to the block under the crosshair), and the vim-like grammar growth (counts, modifiers, targets).
+- **Command line and command dictionary** – First slice done (see Completed); `hack` was added with quick-hacks. Still to do: more commands as features arrive (craft, eat, hits), command history with the arrow keys, aiming (`go` to the block under the crosshair), and the vim-like grammar growth (counts, modifiers, targets).
 - **Programmable mobs** – Craft a "brain" item and script its behavior: follow, guard, farm, haul. The best first use of scripting.
 - **Logic and automation** – Wires, sensors and triggers that scripts can read and write.
 
@@ -140,7 +142,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Scripting language, blocks first** – Builds on the world interface, cost model and command line.
+1. **Block editor for programs** – Open a hack as blocks and change it; builds on the program tree and the panel click pattern.
 
 ---
 
@@ -150,24 +152,23 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
-| 2 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
-| 3 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
-| 4 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 5 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
-| 6 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 7 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
-| 8 | Shaped crafting grid | Builds on the recipe table | M |
-| 9 | Script-driven crafting | Needs the scripting language | M |
-| 10 | Shareable blueprints | Needs scripts and the event log | M |
-| 11 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 12 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
-| 13 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
-| 14 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 15 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 16 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 17 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 18 | Graphics: better mobs | Parts-based models and animation | M |
+| 1 | Block editor for programs | Makes hacks editable; the tree and the panel click pattern are in place | H |
+| 2 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
+| 3 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
+| 4 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
+| 5 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 6 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 7 | Shaped crafting grid | Builds on the recipe table | M |
+| 8 | Script-driven crafting | Needs the scripting language | M |
+| 9 | Shareable blueprints | Needs scripts and the event log | M |
+| 10 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 11 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
+| 12 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
+| 13 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 14 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 15 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 16 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 17 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

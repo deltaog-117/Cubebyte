@@ -321,6 +321,9 @@ pub enum Denied {
     /// The command would change nothing, for example a zero count or a block set to itself.
     #[error("the command would change nothing")]
     NothingToDo,
+    /// A program visited more blocks than one run may.
+    #[error("the program ran for too long and was stopped")]
+    TooLong,
     /// The command was fine but the game state did not accept its event.
     #[error(transparent)]
     Refused(#[from] StageError),

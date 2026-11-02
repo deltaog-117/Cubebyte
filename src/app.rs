@@ -47,11 +47,13 @@ use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
-use crate::scripting::library::{self, ScriptId};
-use crate::scripting::model::{Command, Cooldowns, Denied, Facing, Limits, Pace, Permissions};
+use crate::scripting::library::{self, ScriptId, Target};
+use crate::scripting::model::{
+    Answer, Command, Cooldowns, Denied, Facing, Limits, Pace, Permissions, Query,
+};
 use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
-use crate::scripting::service::run as run_commands;
+use crate::scripting::service::{ask, run as run_commands};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
@@ -65,7 +67,7 @@ use crate::survival::model::Stats;
 use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
 use crate::ui::draw::{command_overlay, overlay, script_overlay};
-use crate::ui::layout::{command_panel, panel, script_panel};
+use crate::ui::layout::{command_panel, hack_panel, panel, script_panel};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -236,6 +238,12 @@ struct Running {
     /// Whether the script panel is open. It shares the free pointer with the crafting panel,
     /// and only one of the two is open at a time.
     scripts_open: bool,
+    /// Whether the quick-hack menu is open (key `G`). Like the script panel, it shares the free
+    /// pointer, and only one panel is open at a time.
+    hacks_open: bool,
+    /// The hacks the menu offers, each with the cell it is anchored on, fixed when the menu
+    /// opened: the pointer is free while it is open, so the aim must not change under a click.
+    hack_menu: Vec<(ScriptId, WorldPos)>,
     /// When each kind of script command may next run.
     cooldowns: Cooldowns,
     /// The ready-made script being played out, one command per ready tick.
@@ -322,6 +330,8 @@ impl App {
             typed: VecDeque::new(),
             panel_open: false,
             scripts_open: false,
+            hacks_open: false,
+            hack_menu: Vec::new(),
             cooldowns: Cooldowns::default(),
             script: None,
             script_note: None,
@@ -385,6 +395,7 @@ impl App {
             }),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             KeyCode::KeyT if down => self.with_running(Running::toggle_scripts),
+            KeyCode::KeyG if down => self.with_running(Running::toggle_hacks),
             KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -729,13 +740,14 @@ impl Running {
 
     /// Whether a panel is open, so the pointer is free and clicks go to the panel.
     fn pointer_free(&self) -> bool {
-        self.panel_open || self.scripts_open || self.commands_open
+        self.panel_open || self.scripts_open || self.hacks_open || self.commands_open
     }
 
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
     fn toggle_panel(&mut self) {
         self.panel_open = !self.panel_open;
         self.scripts_open = false;
+        self.hacks_open = false;
         self.commands_open = false;
         self.sync_pointer();
     }
@@ -744,13 +756,30 @@ impl Running {
     fn toggle_scripts(&mut self) {
         self.scripts_open = !self.scripts_open;
         self.panel_open = false;
+        self.hacks_open = false;
         self.commands_open = false;
+        self.sync_pointer();
+    }
+
+    /// Opens or closes the quick-hack menu. It lists the hacks that fit what the player is
+    /// aiming at right now, and remembers where each would act.
+    fn toggle_hacks(&mut self) {
+        self.hacks_open = !self.hacks_open;
+        self.panel_open = false;
+        self.scripts_open = false;
+        self.commands_open = false;
+        self.hack_menu = if self.hacks_open {
+            self.hack_options()
+        } else {
+            Vec::new()
+        };
         self.sync_pointer();
     }
 
     fn close_panels(&mut self) {
         self.panel_open = false;
         self.scripts_open = false;
+        self.hacks_open = false;
         self.commands_open = false;
         self.sync_pointer();
     }
@@ -779,7 +808,18 @@ impl Running {
         if self.scripts_open {
             let layout = script_panel(self.renderer.size(), &self.inventory, self.script.is_some());
             if let Some(id) = layout.row_at(cursor.0, cursor.1) {
-                self.start_script(id);
+                let feet = self.feet_cell();
+                self.start_from_panel(id, feet);
+            }
+            return;
+        }
+        if self.hacks_open {
+            let layout = self.hack_layout();
+            if let Some(id) = layout.row_at(cursor.0, cursor.1)
+                && let Some(&(_, anchor)) =
+                    self.hack_menu.iter().find(|(menu_id, _)| *menu_id == id)
+            {
+                self.start_from_panel(id, anchor);
             }
             return;
         }
@@ -800,6 +840,10 @@ impl Running {
             let layout = script_panel(size, &self.inventory, self.script.is_some());
             let hovered = layout.row_at(cursor.0, cursor.1);
             script_overlay(&layout, size, hovered)
+        } else if self.hacks_open {
+            let layout = self.hack_layout();
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            script_overlay(&layout, size, hovered)
         } else if self.panel_open {
             let layout = panel(size, &self.inventory);
             let hovered = layout.row_at(cursor.0, cursor.1);
@@ -818,6 +862,7 @@ impl Running {
     fn open_commands(&mut self, table: bool) {
         self.panel_open = false;
         self.scripts_open = false;
+        self.hacks_open = false;
         self.commands_open = true;
         self.command_table = table;
         self.command_status.clear();
@@ -900,6 +945,7 @@ impl Running {
                     "nothing happened - the title may say why".to_owned()
                 };
             }
+            Plan::Hack(id) => self.start_hack(id),
             Plan::Queue(_) if self.typed.len() >= MAX_TYPED => {
                 self.command_status = "too many commands waiting".to_owned();
             }
@@ -959,28 +1005,105 @@ impl Running {
         }
     }
 
-    /// Starts the ready-made script `id` from where the player stands. Nothing starts while
-    /// a replay runs (it supplies every action itself), while another script is playing, or
-    /// when the pack cannot pay for the whole script; the panel greys such rows.
-    fn start_script(&mut self, id: ScriptId) {
-        if self.replay.is_some() || self.script.is_some() {
-            return;
+    /// The layout of the hack menu for the hacks it holds.
+    fn hack_layout(&self) -> crate::ui::layout::ScriptPanel {
+        let ids: Vec<_> = self.hack_menu.iter().map(|&(id, _)| id).collect();
+        hack_panel(
+            self.renderer.size(),
+            &self.inventory,
+            self.script.is_some(),
+            &ids,
+        )
+    }
+
+    /// The block under the crosshair and the cell of the nearest mob in range: what a hack can
+    /// be anchored on besides the player's own feet. Reads change and log nothing.
+    fn aim_context(&mut self) -> (Option<WorldPos>, Option<WorldPos>) {
+        let (origin, direction) = (self.camera.position, self.camera.forward());
+        let aimed = break_target(&self.world, origin, direction).ok();
+        let stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let answers = ask(
+            &[Query::NearestMob],
+            Permissions::ALL,
+            Limits::standard(),
+            Facing::North,
+            &stage,
+        );
+        let mob = match answers.first() {
+            Some(Ok(Answer::Found(found))) => *found,
+            _ => None,
+        };
+        (aimed, mob)
+    }
+
+    /// Every hack that needs aiming and has something to aim at right now, with its anchor.
+    fn hack_options(&mut self) -> Vec<(ScriptId, WorldPos)> {
+        let feet = self.feet_cell();
+        let (aimed, mob) = self.aim_context();
+        library::ids()
+            .filter_map(|id| {
+                let script = library::get(id)?;
+                if script.target == Target::Feet {
+                    return None;
+                }
+                Some((id, library::anchor(script.target, feet, aimed, mob)?))
+            })
+            .collect()
+    }
+
+    /// Starts script `id` anchored on `anchor` from a panel click. Why a start was refused is
+    /// shown in the window title.
+    fn start_from_panel(&mut self, id: ScriptId, anchor: WorldPos) {
+        if let Err(why) = self.start_run(id, anchor) {
+            self.script_note = Some(why);
+            self.refresh_title();
         }
+    }
+
+    /// Starts script or hack `id` from the command line, anchored on what it needs: the feet,
+    /// the block under the crosshair or the nearest mob.
+    fn start_hack(&mut self, id: ScriptId) {
         let Some(def) = library::get(id) else {
             return;
         };
-        if self.inventory.count_of(ItemId::FUEL) < def.fuel_cost() {
-            return;
-        }
-        let feet = self.player.position().floor().as_ivec3();
-        let origin = WorldPos {
-            x: feet.x,
-            y: feet.y,
-            z: feet.z,
+        let feet = self.feet_cell();
+        let (aimed, mob) = self.aim_context();
+        self.command_status = match library::anchor(def.target, feet, aimed, mob) {
+            None => format!("{} needs: {}", def.name, def.target.needs()),
+            Some(anchor) => match self.start_run(id, anchor) {
+                Ok(()) => format!("{} started", def.name),
+                Err(why) => why,
+            },
         };
-        self.script = ScriptRun::new(def.name, def.commands(origin));
+    }
+
+    /// Starts the script `id` with its working cell on `anchor`. Nothing starts while a replay
+    /// runs (it supplies every action itself), while another script is playing, or when the
+    /// pack cannot pay for the most the script can burn; the panels grey such rows.
+    fn start_run(&mut self, id: ScriptId, anchor: WorldPos) -> Result<(), String> {
+        if self.replay.is_some() {
+            return Err("not while a saved run replays".to_owned());
+        }
+        if self.script.is_some() {
+            return Err("a script is already running".to_owned());
+        }
+        let Some(def) = library::get(id) else {
+            return Err("no such script".to_owned());
+        };
+        let needed = def.fuel_cost();
+        if self.inventory.count_of(ItemId::FUEL) < needed {
+            return Err(format!("{} needs {needed} fuel", def.name));
+        }
+        self.script = Some(def.start(anchor));
         self.script_note = None;
         self.refresh_title();
+        Ok(())
     }
 
     /// Offers the running script's next command to the game on `tick`, and keeps each command
@@ -1035,6 +1158,10 @@ impl Running {
             }
             Step::Stopped { reason, .. } => {
                 self.script_note = Some(format!("script {name} stopped: {reason}"));
+                self.refresh_title();
+            }
+            Step::Finished { .. } => {
+                self.script_note = Some(format!("script {name} done"));
                 self.refresh_title();
             }
         }
@@ -1421,7 +1548,7 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, Q read, / or H commands)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, / or H commands)",
                 recipe.name
             ));
         }
@@ -1434,9 +1561,9 @@ impl Running {
         }
         if let Some(script) = &self.script {
             title.push_str(&format!(
-                " | script {} ({} left)",
+                " | script {} ({} done)",
                 script.name(),
-                script.left()
+                script.ran()
             ));
         } else if let Some(note) = &self.script_note {
             title.push_str(&format!(" | {note}"));

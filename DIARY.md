@@ -42,6 +42,7 @@
 | 2026-11-02 | Readout, recorded scripts, priced rewind and the archive | A key for the reads; script commands recorded as they ran; rewind costs 1 fuel plus what it returns, inside the undo; folded history appended to `world.mcea` on exit | ✅ Confirmed |
 | 2026-11-02 | Local rewind zones | Restore a cube around the player to how it stood N block-changing actions ago, as one priced edit; no new log kind | ✅ Confirmed |
 | 2026-11-02 | Command line and command dictionary | One table of commands read by the parser, the dictionary and the errors; typed line and clickable table in one panel; commands become existing actions | ✅ Confirmed |
+| 2026-11-02 | Scripting language, first slice, and quick-hacks | A script is a checked tree of blocks (do, shift, repeat, if) stepped under a budget; a quick-hack is a program anchored on the aimed block or the nearest mob, chosen from a menu or by `hack <name>` | ✅ Confirmed |
 
 ---
 
@@ -1335,6 +1336,47 @@ Quick-hacks and the scripting language both need a way to name and run commands.
 - `Running::script_command` now returns why a command was refused, and `perform` reports whether the action worked, so the status line can say what happened.
 - Tests: the parser answers any text without panicking and every message uses only drawable characters; a typed line cannot hold anything the font lacks; each command in the table builds from sample words; planning offsets cannot overflow; the overlay is well formed with and without the table.
 - The window was not run by the assistant. Try it by pressing `/` and typing `give fuel 3`, `go 0 3 0` and `zone 3`; press `H` and click a row; try a wrong word to see the message.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Scripting Language (Blocks as Data) and Quick-Hacks
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Scripts were fixed lists of steps, and the roadmap wanted a language that can repeat and branch, plus quick-hacks that act on what the player aims at. Both need a program that can be stored, read and later edited. Courses of action for the program: A, a tree of blocks that includes repeat and if; B, the flat list with parameters; C, an embedded engine (Rhai). For the hack menu: X, a typed command only; Y, aim and pick from a menu, plus the command; Z, extra rows in the `T` panel. You chose A and Y.
+
+#### Decision & Rationale
+- **A program is a tree of blocks, checked when it is built.** `Program::try_new` is the only way to make one, so a program with an empty loop, a loop of 0 or 99 times, nesting past 4 levels or more than 64 blocks cannot exist. Blocks, a later typed view and the quick-hacks all use this one form.
+- **Positions count from a working cell.** A run starts with the cell on its anchor (feet, aimed block or mob), and a `Shift` block moves it. This is what lets a loop build a column: without it, a loop that did the same thing three times would do nothing the second time.
+- **The program cannot freeze the game.** Every loop has a fixed count, the stepper looks at no more than 32 blocks in a tick (then waits for the next tick), and a run that has looked at 4096 blocks is stopped with a message. Nesting three repeats of 16 is allowed but runs out of budget, and the test for it shows the message.
+- **The stepper only picks the next command.** Permission, range, fuel and the per-kind waits stay in `service::run`, so a program can do nothing a typed command could not.
+- **An `if` reads the world on the tick it is reached,** through the same `ask` the readout uses, so it costs a read from the per-tick limit and changes nothing. It compares whole numbers: a block reads as its ID.
+- **Replays are untouched.** The intent track still saves the commands that really ran, never the program, so editing a ready-made script cannot change an old recording.
+- **A quick-hack is a program with a target.** `library::anchor` says where it acts, or that there is nothing to act on, and the menu lists only hacks that have an anchor right now. The anchor is fixed when the menu opens, since the pointer is free while it is open and the aim would otherwise move.
+- **The most it can burn is charged up front.** A script starts only if the pack holds the fuel for its dearest way through (the dearer part of each `if`). A run that takes the cheaper way burns less.
+
+**Trade-offs accepted:**
+- No clickable block editor yet; hacks are not editable in the game. It is the next item.
+- No saved format for programs: nothing a player makes exists yet, so there is nothing to save. The ready-made ones are built into the game.
+- A hack aimed at a mob uses the nearest mob in range, not the one under the crosshair.
+- An `if` on a block compares its ID, which reads as a number rather than a name until the editor shows names.
+- Scripts stop at the first refusal that waiting does not cure, as before.
+
+#### Implementation Notes
+- `scripting::program` holds the language; `scripting::library` is now a table of programs with a `Target`; `scripting::runner::ScriptRun` takes commands from a flat list or a program.
+- A built-in program that failed its checks would leave its table slot empty (and log an error) so later IDs do not move; a test requires every slot to be filled.
+- The `hack` command, `G` menu and `ui::layout::hack_panel` reuse the script panel code.
+- Tests: any valid generated program ends (finishes, or is stopped by the budget); a preview is the same each time and shifts exactly with the anchor; no run costs more than the advertised fuel; every `if` runs exactly one part; the original four scripts give the same commands as before; a hack plays out through the real runner, pays its fuel, logs one edit per command and undoes exactly.
+- The check found a bug that was already there: the command table was 4 pixels too wide for a 320-pixel window, and the random size test happened to hit it. The `zone` summary is shorter and a plain test now covers the smallest window.
+- The window was not run by the assistant. Try it by looking at a block and pressing `G`, then click `pillar`; walk next to a zombie and press `G` to see `cage`; type `/hack ward` with and without a mob near.
 
 #### Review / Update Log
 

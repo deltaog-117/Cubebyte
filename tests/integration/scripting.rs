@@ -8,9 +8,11 @@ use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::{Player, PlayerError};
+use minecraft_clone::scripting::library;
 use minecraft_clone::scripting::model::{
     Answer, Command, Cooldowns, Facing, Limits, Pace, Permission, Permissions, Query,
 };
+use minecraft_clone::scripting::runner::{Step, step};
 use minecraft_clone::scripting::service::{ask, run};
 use minecraft_clone::shared::clock::Tick;
 use minecraft_clone::shared::event::{Event, MobId};
@@ -347,4 +349,70 @@ fn a_script_can_find_a_block_and_then_build_next_to_it() {
     assert_eq!(results, [Ok(())]);
     // The fuel the command burned, then the block it set.
     assert_eq!(log.len(), 2);
+}
+
+/// A quick-hack anchored on a block plays out over ticks, pays its fuel, logs one edit per
+/// command, and the log's inverse puts the world and the pack back exactly.
+#[test]
+fn a_hack_runs_to_the_end_and_undoes_exactly() {
+    let mut world = floor();
+    let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).expect("a valid spawn");
+    let mut inventory = fuelled(FUEL);
+    let (mut stats, mut mobs) = (Stats::default(), Mobs::default());
+    let mut log = EventLog::new();
+    let mut next_mob = MobId::FIRST;
+    let mut cooldowns = Cooldowns::default();
+    let before = (world.clone(), inventory.clone());
+    let (_, pillar) = library::find("pillar").expect("the pillar hack exists");
+    let anchor = cell(3, 0, 3);
+    let mut run = Some(pillar.start(anchor));
+    let mut finished = false;
+
+    for tick in 0..200 {
+        let Some(current) = run.take() else { break };
+        let mut stage = Stage {
+            world: &mut world,
+            player: &mut player,
+            inventory: &mut inventory,
+            stats: &mut stats,
+            mobs: &mut mobs,
+        };
+        let mut pace = Pace {
+            tick: Tick(tick),
+            cooldowns: &mut cooldowns,
+        };
+        match step(
+            current,
+            Permissions::ALL,
+            Limits::standard(),
+            &mut pace,
+            &mut stage,
+            &mut log,
+            &mut next_mob,
+        ) {
+            Step::Ran { rest, .. } => run = rest,
+            Step::Waiting { run: waiting, .. } => run = Some(waiting),
+            Step::Finished { .. } => finished = true,
+            Step::Stopped { reason, .. } => panic!("the hack stopped: {reason}"),
+        }
+    }
+
+    assert!(finished, "the hack ends");
+    for y in 1..=3 {
+        assert_eq!(world.block_at(cell(3, y, 3)), BlockId::STONE);
+    }
+    assert_eq!(inventory.count_of(ItemId::FUEL), FUEL - pillar.fuel_cost());
+    assert_eq!(log.actions(), 3);
+
+    let mut undo: Vec<_> = log.iter().map(|event| event.inverse()).collect();
+    undo.reverse();
+    let mut stage = Stage {
+        world: &mut world,
+        player: &mut player,
+        inventory: &mut inventory,
+        stats: &mut stats,
+        mobs: &mut mobs,
+    };
+    assert_eq!(apply_all(&mut stage, &undo), Ok(()));
+    assert_eq!((world, inventory), before);
 }

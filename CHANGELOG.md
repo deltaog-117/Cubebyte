@@ -162,8 +162,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `command`: a command line. `command::table` is the one table of commands (`help`, `give`, `go`, `set`, `spawn`, `rewind`, `redo`, `zone`); `command::parse` reads a typed line into a `Request` with messages that say what to type instead; `command::plan` turns a request into an existing action or script command; `command::line` is the text being typed
 - Keys `/` (command line) and `H` (command line with the table of commands); Tab shows or hides the table, Enter runs, Escape closes; clicking a row runs a command with no words or starts one that needs words
 - `ui::layout::command_panel` and `ui::draw::command_overlay`, and the glyphs `/` and `_` in the built-in font
+- `scripting::program`: the scripting language's program, a tree of `Block`s (do, shift, repeat, if) that `Program::try_new` checks (at least one block, at most 4 levels and 64 blocks, repeats of 1 to 16, shifts within 1000, no empty repeat or then part); `ProgramRun` steps it one command at a time, at most 32 block visits per tick and 4096 per run; `Program::preview` and `Program::fuel_cost` (the most a run can burn)
+- `Denied::TooLong`, for a program that spent its whole visit budget
+- Quick-hacks: `scripting::library` scripts have a `Target` (feet, aimed block, nearest mob); new hacks `pillar`, `perch` and `dig` (block), `cage` (mob) and the `ward` script, which uses an `if`; `library::find`, `ids_for` and `anchor`
+- Key `G` opens the quick-hack menu with the hacks that fit what you aim at; the command `hack <name>` runs any script anchored on what it needs
+- `ui::layout::hack_panel`
+- `ScriptRun::from_program`, `ScriptRun::ran` and `Step::Finished`
 
 ### Changed
+- The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before
+- `ScriptRun` takes its commands from a flat list or from a program; a program reads the world through `ask` when it reaches an `if`
+- The `T` panel lists only scripts that need no aim; the title shows `script name (n done)`
+- The summary of the `zone` command is shorter, so the command table fits the smallest window (320 pixels wide)
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
 - `mobs::service::strike` is replaced by `strike_events`, and `aimed_at` by `aim_distance`, which returns how far the hit is so a click picks the nearest mob
 - The intent file is now version 3, which adds the strike, rewind and redo action kinds. Versions 1 and 2 are still read unchanged
@@ -211,4 +221,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `app` writes `world.mcea` on exit, after the world file is saved
 
 ### Fixed
+- The command table was 4 pixels wider than a 320-pixel window, so its right edge was cut off in the smallest windows
 - Rewinding or redoing an edit in a chunk that had been unloaded was refused, and undoing a break there would have left a one-block chunk that stopped the real chunk from loading. `app` now loads every chunk a rewind or redo touches (generated terrain plus its logged edits) before applying it

@@ -10,13 +10,16 @@ use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self as items, ItemId};
-use crate::scripting::library::{self, ScriptId};
+use crate::scripting::library::{self, ScriptId, Target};
 use crate::ui::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
 
 const TITLE: &str = "crafting";
 const HINT: &str = "click to craft - tab closes";
 const SCRIPT_TITLE: &str = "scripts";
 const SCRIPT_HINT: &str = "click to run - t closes";
+const HACK_TITLE: &str = "hacks";
+const HACK_HINT: &str = "click to run - g closes";
+const HACK_NONE: &str = "aim at a block or a mob - g closes";
 const COMMAND_TITLE: &str = "commands";
 const COMMAND_HINT: &str = "enter runs - tab table - esc closes";
 
@@ -256,14 +259,40 @@ fn describe_script(id: ScriptId) -> Option<String> {
     Some(format!("{} - {} fuel", script.name, script.fuel_cost()))
 }
 
-/// Lays the script panel out centred in a window of `size` pixels, one row per script. A row
-/// can be started when the pack holds the fuel for the whole script and none is running.
+/// Lays the script panel out centred in a window of `size` pixels, one row per script that needs
+/// no aiming. A row can be started when the pack holds the fuel for the whole script and none
+/// is running.
 pub fn script_panel(size: (u32, u32), inventory: &Inventory, running: bool) -> ScriptPanel {
-    let described: Vec<_> = library::ids()
-        .filter_map(|id| Some((id, describe_script(id)?)))
+    let ids: Vec<_> = library::ids_for(Target::Feet).collect();
+    script_rows(size, inventory, running, &ids, SCRIPT_TITLE, SCRIPT_HINT)
+}
+
+/// The quick-hack menu: one row per script in `ids`, which the game picks from what the player
+/// is aiming at. With no rows it says what to aim at.
+pub fn hack_panel(
+    size: (u32, u32),
+    inventory: &Inventory,
+    running: bool,
+    ids: &[ScriptId],
+) -> ScriptPanel {
+    let hint = if ids.is_empty() { HACK_NONE } else { HACK_HINT };
+    script_rows(size, inventory, running, ids, HACK_TITLE, hint)
+}
+
+fn script_rows(
+    size: (u32, u32),
+    inventory: &Inventory,
+    running: bool,
+    ids: &[ScriptId],
+    title: &str,
+    hint: &str,
+) -> ScriptPanel {
+    let described: Vec<_> = ids
+        .iter()
+        .filter_map(|&id| Some((id, describe_script(id)?)))
         .collect();
     let texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
-    let arranged = arrange(size, SCRIPT_TITLE, SCRIPT_HINT, &texts);
+    let arranged = arrange(size, title, hint, &texts);
     let fuel = inventory.count_of(ItemId::FUEL);
     let rows = described
         .into_iter()
@@ -444,6 +473,33 @@ mod tests {
     }
 
     #[test]
+    fn the_command_table_fits_the_smallest_window() {
+        let (width, height) = (320.0, 240.0);
+        let panel = command_panel((320, 240), "", "", true);
+        assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);
+        assert!(panel.rect.y >= 0.0 && panel.rect.y + panel.rect.height <= height);
+    }
+
+    #[test]
+    fn the_script_panel_lists_only_scripts_that_need_no_aim() {
+        let panel = script_panel((1280, 720), &Inventory::default(), false);
+        assert!(panel.rows.iter().all(|row| {
+            library::get(row.script).is_some_and(|script| script.target == Target::Feet)
+        }));
+    }
+
+    #[test]
+    fn the_hack_menu_says_what_to_aim_at_when_it_is_empty() {
+        let empty = hack_panel((1280, 720), &Inventory::default(), false, &[]);
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.hint.text, HACK_NONE);
+        let ids: Vec<_> = library::ids_for(Target::Mob).collect();
+        let full = hack_panel((1280, 720), &Inventory::default(), false, &ids);
+        assert_eq!(full.hint.text, HACK_HINT);
+        assert_eq!(full.title.text, HACK_TITLE);
+    }
+
+    #[test]
     fn a_script_can_start_only_with_its_fuel_and_nothing_running() {
         let mut inventory = Inventory::default();
         inventory.add(ItemId::FUEL, 3).unwrap();
@@ -467,7 +523,7 @@ mod tests {
             size in size(), fx in 0.0f32..1.0, fy in 0.0f32..1.0,
         ) {
             let panel = script_panel(size, &Inventory::default(), false);
-            prop_assert_eq!(panel.rows.len(), library::ids().count());
+            prop_assert_eq!(panel.rows.len(), library::ids_for(Target::Feet).count());
             let (width, height) = (size.0 as f32, size.1 as f32);
             prop_assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);
             prop_assert!(panel.rect.y >= 0.0 && panel.rect.y + panel.rect.height <= height);
@@ -479,6 +535,24 @@ mod tests {
                 prop_assert_eq!(panel.row_at(x, y), Some(row.script));
             }
             prop_assert_eq!(panel.row_at(-1.0, -1.0), None);
+        }
+
+        // The hack menu fits and finds its rows for any list of hacks, empty included, and the
+        // empty menu says what to aim at.
+        #[test]
+        fn hack_rows_fit_and_clicks_find_them(
+            size in size(), fx in 0.0f32..1.0, fy in 0.0f32..1.0, count in 0usize..6,
+        ) {
+            let ids: Vec<_> = library::ids_for(Target::Block).take(count).collect();
+            let panel = hack_panel(size, &Inventory::default(), false, &ids);
+            prop_assert_eq!(panel.rows.len(), ids.len());
+            let (width, height) = (size.0 as f32, size.1 as f32);
+            prop_assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);
+            prop_assert!(panel.rect.y >= 0.0 && panel.rect.y + panel.rect.height <= height);
+            for row in &panel.rows {
+                let (x, y) = (row.rect.x + fx * row.rect.width, row.rect.y + fy * row.rect.height);
+                prop_assert_eq!(panel.row_at(x, y), Some(row.script));
+            }
         }
 
         // Every recipe has a row, rows sit inside the panel and the window, and never overlap.

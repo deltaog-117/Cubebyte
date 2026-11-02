@@ -6,6 +6,7 @@ use crate::blocks::registry as blocks;
 use crate::command::model::{ArgKind, ArgSpec, Request, Value};
 use crate::command::table::{self, OFFSET_MAX};
 use crate::items::registry as items;
+use crate::scripting::library;
 use crate::shared::voxel::BlockId;
 
 /// How many characters of a rejected word an error repeats, so a long paste cannot flood the
@@ -37,6 +38,8 @@ pub enum ParseError {
     UnknownBlock(String),
     #[error("no mob called {0} - try zombie")]
     UnknownMob(String),
+    #[error("no hack called {0} - g lists them")]
+    UnknownHack(String),
     /// The table has a command whose build does not match its arguments: a bug, reported
     /// instead of a crash.
     #[error("the command {0} is broken")]
@@ -113,6 +116,11 @@ fn value_of(arg: &ArgSpec, word: &str) -> Result<Value, ParseError> {
             Value::Count(u16::try_from(value).unwrap_or(max))
         }
         ArgKind::Offset => Value::Offset(number(-OFFSET_MAX, OFFSET_MAX)?),
+        ArgKind::Hack => Value::Hack(
+            library::find(word)
+                .map(|(id, _)| id)
+                .ok_or_else(|| ParseError::UnknownHack(clip(word)))?,
+        ),
     })
 }
 
@@ -148,6 +156,12 @@ mod tests {
         assert_eq!(parse("zone 10"), Ok(Request::Zone { back: 10 }));
         assert_eq!(parse("rewind"), Ok(Request::Rewind));
         assert_eq!(parse("redo"), Ok(Request::Redo));
+        assert_eq!(
+            parse("hack Pillar"),
+            Ok(Request::Hack {
+                script: library::find("pillar").map(|(id, _)| id).unwrap()
+            })
+        );
     }
 
     #[test]
@@ -189,6 +203,10 @@ mod tests {
         assert_eq!(
             parse("spawn cow 0 0 0"),
             Err(ParseError::UnknownMob("cow".into()))
+        );
+        assert_eq!(
+            parse("hack fly"),
+            Err(ParseError::UnknownHack("fly".into()))
         );
         assert!(matches!(
             parse("go 1001 0 0"),
