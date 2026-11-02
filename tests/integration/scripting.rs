@@ -6,9 +6,9 @@ use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::Player;
-use minecraft_clone::scripting::model::{Command, Limits, Permission, Permissions};
-use minecraft_clone::scripting::service::run;
-use minecraft_clone::shared::event::Event;
+use minecraft_clone::scripting::model::{Answer, Command, Limits, Permission, Permissions, Query};
+use minecraft_clone::scripting::service::{ask, run};
+use minecraft_clone::shared::event::{Event, MobId};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
 use minecraft_clone::survival::model::Stats;
 use minecraft_clone::world::model::World;
@@ -47,6 +47,8 @@ fn command() -> impl Strategy<Value = Command> {
                 block: BlockId(id),
             }
         }),
+        (-20i32..20, 1i32..3, -20i32..20)
+            .prop_map(|(x, y, z)| Command::SpawnMob { at: cell(x, y, z) }),
     ]
 }
 
@@ -58,11 +60,14 @@ proptest! {
         let granted = Permissions::NONE
             .with(Permission::Move)
             .with(Permission::Give)
-            .with(Permission::Build);
+            .with(Permission::Build)
+            .with(Permission::Spawn);
         let mut world = floor();
         let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
         let mut inventory = Inventory::default();
         let mut stats = Stats::default();
+        let mut mobs = Mobs::default();
+        let mut next_mob = MobId::FIRST;
         let mut log = EventLog::new();
         for commands in &ticks {
             let mut stage = Stage {
@@ -70,9 +75,16 @@ proptest! {
                 player: &mut player,
                 inventory: &mut inventory,
                 stats: &mut stats,
-                mobs: &mut Mobs::default(),
+                mobs: &mut mobs,
             };
-            run(commands, granted, Limits::standard(), &mut stage, &mut log);
+            run(
+                commands,
+                granted,
+                Limits::standard(),
+                &mut stage,
+                &mut log,
+                &mut next_mob,
+            );
         }
 
         // A restart: only the file survives, and the log is replayed onto the baseline.
@@ -82,13 +94,14 @@ proptest! {
         let mut replayed_player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
         let mut replayed_inventory = Inventory::default();
         let mut replayed_stats = Stats::default();
+        let mut replayed_mobs = Mobs::default();
         for event in saved.log.iter() {
             let mut stage = Stage {
                 world: &mut replayed_world,
                 player: &mut replayed_player,
                 inventory: &mut replayed_inventory,
                 stats: &mut replayed_stats,
-                mobs: &mut Mobs::default(),
+                mobs: &mut replayed_mobs,
             };
             prop_assert_eq!(apply(&mut stage, event), Ok(()));
         }
@@ -96,5 +109,61 @@ proptest! {
         prop_assert_eq!(replayed_world, world);
         prop_assert_eq!(replayed_player, player);
         prop_assert_eq!(replayed_inventory, inventory);
+        prop_assert_eq!(replayed_mobs, mobs);
     }
+}
+
+#[test]
+fn a_script_can_find_a_block_and_then_build_next_to_it() {
+    let mut world = floor();
+    let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
+    let (mut inventory, mut stats, mut mobs) =
+        (Inventory::default(), Stats::default(), Mobs::default());
+    let mut log = EventLog::new();
+    let mut next_mob = MobId::FIRST;
+    let granted = Permissions::NONE
+        .with(Permission::Look)
+        .with(Permission::Build);
+    let marker = Event::BlockSet {
+        pos: cell(4, 1, 0),
+        old: BlockId::AIR,
+        new: BlockId::DIRT,
+    };
+    assert_eq!(world.apply(&marker), Ok(()));
+
+    let mut stage = Stage {
+        world: &mut world,
+        player: &mut player,
+        inventory: &mut inventory,
+        stats: &mut stats,
+        mobs: &mut mobs,
+    };
+    let answers = ask(
+        &[Query::Find {
+            block: BlockId::DIRT,
+        }],
+        granted,
+        Limits::standard(),
+        &stage,
+    );
+    let Ok(Answer::Found(Some(found))) = answers[0] else {
+        panic!("the dirt block is in reach, got {answers:?}");
+    };
+    assert_eq!(found, cell(4, 1, 0));
+    assert!(log.is_empty());
+
+    let next_to = cell(found.x + 1, found.y, found.z);
+    let results = run(
+        &[Command::SetBlock {
+            pos: next_to,
+            block: BlockId::STONE,
+        }],
+        granted,
+        Limits::standard(),
+        &mut stage,
+        &mut log,
+        &mut next_mob,
+    );
+    assert_eq!(results, [Ok(())]);
+    assert_eq!(log.len(), 1);
 }

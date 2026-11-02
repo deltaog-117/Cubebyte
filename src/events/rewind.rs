@@ -6,9 +6,17 @@
 //!
 //! The log keeps only the last [`HISTORY_WINDOW`] actions as history; older ones are folded
 //! away, so a rewind cannot reach past them.
+//!
+//! An edit can sit in a chunk that has since been unloaded. [`touched_chunks`] names the chunks
+//! a rewind (or a redo) changes, so the caller can load the missing ones first: a block event
+//! applied to an unloaded chunk would be refused, or worse, would leave a stray chunk holding
+//! only that block.
+
+use std::collections::HashSet;
 
 use crate::events::log::{ActionKind, EventLog};
 use crate::shared::event::Event;
+use crate::shared::voxel::ChunkPos;
 
 /// How many actions of history the log keeps rewindable. Compaction runs once the log holds
 /// twice this many, so it happens once per window of play and not on every action.
@@ -24,6 +32,16 @@ pub fn inverse_run(events: &[Event]) -> Vec<Event> {
 /// nothing is left to undo.
 pub fn rewind_events(log: &EventLog) -> Option<Vec<Event>> {
     Some(inverse_run(log.latest_live_edit()?))
+}
+
+/// The chunks whose blocks `events` change, each once, in the order they first appear.
+pub fn touched_chunks(events: &[Event]) -> Vec<ChunkPos> {
+    let mut seen = HashSet::new();
+    events
+        .iter()
+        .filter_map(|event| event.chunk())
+        .filter(|&chunk| seen.insert(chunk))
+        .collect()
 }
 
 /// Logs `events` as one action of `kind`, then folds the oldest history away once it has
@@ -157,6 +175,47 @@ mod tests {
             rewind(&mut world, &mut log);
             prop_assert_eq!(&world, &kept);
         }
+    }
+
+    proptest! {
+        #[test]
+        fn a_rewind_applies_to_a_world_rebuilt_from_only_the_chunks_it_touches(
+            actions in prop::collection::vec(
+                prop::collection::vec((-40i32..40, 0u16..4), 1..4),
+                1..6,
+            ),
+        ) {
+            let (mut world, mut log) = (World::default(), EventLog::new());
+            for step in &actions {
+                edit(&mut world, &mut log, step);
+            }
+            let events = rewind_events(&log).unwrap();
+
+            // Every other chunk is unloaded, as after the player walked away.
+            let mut partial = World::default();
+            let touched = touched_chunks(&events);
+            for &chunk in &touched {
+                prop_assert_eq!(replay_chunk(&mut partial, &log, chunk), Ok(()));
+            }
+            for event in &events {
+                prop_assert_eq!(partial.apply(event), Ok(()));
+                world.apply(event).unwrap();
+                if let Event::BlockSet { pos, .. } = *event {
+                    prop_assert_eq!(partial.block_at(pos), world.block_at(pos));
+                }
+            }
+            let distinct: HashSet<_> = touched.iter().collect();
+            prop_assert_eq!(distinct.len(), touched.len());
+        }
+    }
+
+    #[test]
+    fn events_that_change_no_blocks_touch_no_chunk() {
+        let events = [
+            Event::HungerChanged { by: -1 },
+            Event::HealthChanged { by: 2 },
+        ];
+        assert!(touched_chunks(&events).is_empty());
     }
 
     #[test]

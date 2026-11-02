@@ -25,6 +25,7 @@
 //! | 11 | mob spawned | mob id (4), x, y, z bits (4 each), health (1) |
 //! | 12 | mob removed | mob id (4), x, y, z bits (4 each), health (1) |
 //! | 13 | mob health changed | mob id (4), by (1, signed) |
+//! | 14 | redo ends | none: the events since the last end bring an undone edit back |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
@@ -35,7 +36,9 @@
 //! since they sit under every event whatever their place; the writer puts them first. Tags 7
 //! to 10 came with version 5, when hunger and health became events. Tags 11 to 13 came with
 //! version 6, when mobs did. A restart does not bring mobs back: only block events are replayed
-//! into chunks, so these records stay in the file as history.
+//! into chunks, so these records stay in the file as history. Tag 14 came with version 7, so
+//! the redo stack can be rebuilt at startup: a version 6 file marks a redo as a plain edit, and
+//! reads back with an empty stack.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,7 +52,7 @@ use crate::shared::voxel::{BlockId, WorldPos};
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -71,6 +74,7 @@ const TAG_RESPAWN_END: u8 = 10;
 const TAG_MOB_SPAWNED: u8 = 11;
 const TAG_MOB_REMOVED: u8 = 12;
 const TAG_MOB_HEALTH_CHANGED: u8 = 13;
+const TAG_REDO_END: u8 = 14;
 
 /// Bytes a base block takes in a file, tag included.
 const BASE_RECORD_LEN: usize = 1 + 3 * 4 + 2;
@@ -140,6 +144,10 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
             }
             Record::ActionEnd(ActionKind::Rewind) => {
                 bytes.push(TAG_REWIND_END);
+                continue;
+            }
+            Record::ActionEnd(ActionKind::Redo) => {
+                bytes.push(TAG_REDO_END);
                 continue;
             }
             Record::ActionEnd(ActionKind::Passive) => {
@@ -289,6 +297,7 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
             }),
             TAG_PASSIVE_END if version >= 5 => log.end_action(ActionKind::Passive),
             TAG_RESPAWN_END if version >= 5 => log.end_action(ActionKind::Respawn),
+            TAG_REDO_END if version >= 7 => log.end_action(ActionKind::Redo),
             TAG_EDIT_END if version >= 3 => log.end_action(ActionKind::Edit),
             TAG_REWIND_END if version >= 3 => log.end_action(ActionKind::Rewind),
             other => return Err(DecodeError::UnknownEvent(other)),
@@ -617,8 +626,30 @@ mod tests {
     #[test]
     fn an_unknown_tag_is_rejected() {
         let mut bytes = encode(7, &EventLog::new());
-        bytes.extend_from_slice(&[14; BLOCK_RECORD_LEN]);
-        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(14)));
+        bytes.extend_from_slice(&[15; BLOCK_RECORD_LEN]);
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(15)));
+    }
+
+    #[test]
+    fn redo_ends_survive_a_save_and_a_version_six_file_rejects_them() {
+        let block = |old, new| Event::BlockSet {
+            pos: WorldPos { x: 1, y: 0, z: 0 },
+            old: BlockId(old),
+            new: BlockId(new),
+        };
+        let mut log = EventLog::new();
+        log.push(block(0, 1));
+        log.end_action(ActionKind::Edit);
+        log.push(block(1, 0));
+        log.end_action(ActionKind::Rewind);
+        log.push(block(0, 1));
+        log.end_action(ActionKind::Redo);
+
+        let mut bytes = encode(1, &log);
+        assert_eq!(decode(&bytes), Ok(SavedLog { seed: 1, log }));
+
+        bytes[4..6].copy_from_slice(&6u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(TAG_REDO_END)));
     }
 
     #[test]

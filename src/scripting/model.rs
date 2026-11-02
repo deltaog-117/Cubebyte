@@ -14,6 +14,15 @@ pub const RANGE: f32 = 32.0;
 /// cost as much as accepted ones and cannot be spammed for free.
 pub const MAX_EFFECTS: u8 = 8;
 
+/// Most mobs that may be alive when a script asks for one more, so a script cannot flood the
+/// world.
+pub const MAX_MOBS: usize = 8;
+
+/// How far from the player, in blocks along each axis, a [`Query::Find`] searches. It stays
+/// well under [`RANGE`] so a search costs a few tens of thousands of lookups, not hundreds of
+/// thousands.
+pub const FIND_RADIUS: i32 = 16;
+
 /// One thing a script asks the world to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -23,6 +32,36 @@ pub enum Command {
     GiveItem { item: ItemId, count: u16 },
     /// Make the block at `pos` a `block`.
     SetBlock { pos: WorldPos, block: BlockId },
+    /// Put a new zombie at the bottom middle of the block cell `at`.
+    SpawnMob { at: WorldPos },
+}
+
+/// One thing a script asks to know. A query changes nothing and logs nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Query {
+    /// The block at `pos`, which must be within range.
+    Look { pos: WorldPos },
+    /// The nearest block of kind `block` within [`FIND_RADIUS`] of the player.
+    Find { block: BlockId },
+    /// How many of `item` the player carries.
+    Count { item: ItemId },
+    /// The player's health points.
+    Health,
+    /// The player's hunger points.
+    Hunger,
+    /// How many mobs are within range of the player.
+    MobsNear,
+}
+
+/// What a [`Query`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The block a [`Query::Look`] saw.
+    Block(BlockId),
+    /// Where a [`Query::Find`] found its block, or `None` when there is none in reach.
+    Found(Option<WorldPos>),
+    /// A count or meter value.
+    Number(u32),
 }
 
 /// A kind of power a script can be granted.
@@ -31,6 +70,9 @@ pub enum Permission {
     Move,
     Give,
     Build,
+    Spawn,
+    /// Reading the world with a [`Query`].
+    Look,
 }
 
 impl Permission {
@@ -39,6 +81,8 @@ impl Permission {
             Self::Move => 1,
             Self::Give => 2,
             Self::Build => 4,
+            Self::Spawn => 8,
+            Self::Look => 16,
         }
     }
 }
@@ -50,6 +94,7 @@ impl Command {
             Self::Teleport { .. } => Permission::Move,
             Self::GiveItem { .. } => Permission::Give,
             Self::SetBlock { .. } => Permission::Build,
+            Self::SpawnMob { .. } => Permission::Spawn,
         }
     }
 }
@@ -126,6 +171,8 @@ pub enum Denied {
     UnknownItem(u16),
     #[error("block {0} is not defined")]
     UnknownBlock(u16),
+    #[error("the world already holds the most mobs a script may add ({MAX_MOBS})")]
+    TooManyMobs,
     /// A grant is all or nothing, so one that does not fit whole gives nothing.
     #[error("the inventory has room for only {room} of the item")]
     NoRoom { room: u32 },
@@ -143,11 +190,17 @@ mod tests {
 
     use super::*;
 
-    const ALL: [Permission; 3] = [Permission::Move, Permission::Give, Permission::Build];
+    const ALL: [Permission; 5] = [
+        Permission::Move,
+        Permission::Give,
+        Permission::Build,
+        Permission::Spawn,
+        Permission::Look,
+    ];
 
     proptest! {
         #[test]
-        fn permissions_allow_exactly_what_was_granted(mask in 0u8..8) {
+        fn permissions_allow_exactly_what_was_granted(mask in 0u8..32) {
             let granted: Vec<_> = ALL
                 .iter()
                 .enumerate()
@@ -199,6 +252,10 @@ mod tests {
             }
             .permission(),
             Permission::Build
+        );
+        assert_eq!(
+            Command::SpawnMob { at: pos }.permission(),
+            Permission::Spawn
         );
     }
 }

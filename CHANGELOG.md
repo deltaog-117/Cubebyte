@@ -135,6 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mobs::service::strike_events`, `spawn_event`, `despawn_event` and `clear_events`: the events for a hit (only the health really lost, then a removal when none is left), a new zombie, a dropped one and clearing every mob
 - `events::apply::Stage` holds the mobs, and `StageError::Mob` refuses a mob event for a mob that is missing, already there, or whose health differs
 - Event log format version 6: tags 11 to 13 for the mob events. Older files are still read; a restart does not bring mobs back, since only block events replay into chunks
+- `ActionKind::Redo` and event log format version 7 (tag 14 ends a redo): `Y` is logged as its own kind of action, which rewind treats like an edit. Files up to version 6 are still read; a redo in an older file reads as a plain edit
+- `events::redo::RedoStack::from_log`: the redo stack is rebuilt from the log at startup (a rewind pushes, a redo pops, an edit or a respawn empties it), so what `Z` undid can still be brought back by `Y` after a restart
+- `events::rewind::touched_chunks`: the chunks whose blocks a rewind or redo changes, each once
+- `Command::SpawnMob`, `Permission::Spawn`, `Denied::TooManyMobs` and `MAX_MOBS` (8): a script can add a zombie in the open, in range, while fewer than 8 mobs are alive; it is an `Event::MobSpawned`, logged and undone like any other command
+- `mobs::service::blocked`: whether a zombie's box overlaps a solid block
+- `scripting::model::Query`, `Answer`, `Permission::Look` and `FIND_RADIUS` (16), with `scripting::service::ask`: scripts can read a block in range (`Look`), find the nearest block of a kind (`Find`), and ask for an item count, health, hunger or the mobs in range. `ask` takes the stage by shared reference, so it cannot change the game, and it logs nothing; queries count toward the per-tick limit like commands do
 
 ### Changed
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
@@ -169,3 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `eat_events` now includes the hunger the meal gives, so eating is a single all-or-nothing change of slots and hunger
 - `app` logs the hunger drain and a zombie's hit as passive actions, and a death as a respawn action (meters, pack and a move to the spawn point); the redo stack is cleared on death
 - `events::persist` writes version 5 (tags 7 and 8 hold the meter events, tags 9 and 10 end a passive action and a respawn) and reads versions 1 to 5
+- `scripting::service::run` takes the `next_mob` id counter as a last argument, so a spawn command can hand out ids that are never reused; it moves on only when a spawn is accepted
+- `events::persist` writes version 7; the unknown-tag test now uses tag 15, since tag 14 is the redo end
+- `app` rebuilds the redo stack from the log at startup and logs `Y` as a redo
+
+### Fixed
+- Rewinding or redoing an edit in a chunk that had been unloaded was refused, and undoing a break there would have left a one-block chunk that stopped the real chunk from loading. `app` now loads every chunk a rewind or redo touches (generated terrain plus its logged edits) before applying it

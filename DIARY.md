@@ -37,6 +37,7 @@
 | 2026-10-31 | Recorded actions | Intentions (target block, recipe, eat) in the same session file, version 2 | ✅ Confirmed |
 | 2026-11-01 | Meters under events | Delta events with the points really moved; passive changes logged but skipped by rewind; respawn is a barrier | ✅ Confirmed |
 | 2026-11-02 | Mobs under events | A `Mobs` store with ids; spawn, remove and health-change events through the one door; position is not checked | ✅ Confirmed |
+| 2026-11-02 | Redo across restarts and script reads | Redo is its own action kind and the stack is rebuilt from the log; reads are a separate `ask` call that cannot change the game | ✅ Confirmed |
 
 ---
 
@@ -1123,6 +1124,45 @@ Three options were compared: A, a store of mobs with spawn, removal and health-c
 - Log format version 6: tags 11 to 13. Older files are still read; the unknown-tag test now uses tag 14.
 - Tests: a run of mixed block, player, pack, meter and mob events undoes in reverse and replays to the same state; stale mob events are refused and change nothing; the new records round-trip through a file and are refused in a version 5 file; an integration test kills a zombie through the door, and another follows a zombie's life through a save, a rewind that steps over it, and an exact undo.
 - The window was not run by the assistant. Try it by waiting ten seconds for a zombie, hitting it until it dies, and dying to one, then watching the next one appear.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Redo Across Restarts, Script Spawns and Reads, Rewind in Unloaded Chunks
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Four roadmap items were done in one cycle. `Y` forgot everything on a restart. Scripts could write to the world but not read it, and could not add a mob now that mobs are events. A rewind in a chunk the player had walked away from was refused, and an undo of a break there would even have left a one-block chunk behind, because applying a block event to an unloaded chunk creates one, and the real chunk then fails to stream in.
+
+#### Decision & Rationale
+**Redo stack.** Three options were compared: A, a separate small file; B, a section inside `world.mcel`; C, mark a redo in the log and rebuild the stack from it. C was chosen.
+- A redo is logged as its own action kind. Rewind treats it like an edit, so it can be undone again, but a replay of the marks can tell it from a new edit: a rewind pushes, a redo pops, an edit or a respawn empties the stack.
+- Nothing extra is stored, so the stack and the world cannot come from different runs. This was the deciding point over A.
+
+**Script reads.** Three options were compared: A, a separate `Query` call; B, reads inside `Command`; C, a frozen view per tick. A was chosen.
+- `ask` takes the stage by shared reference, so the type system says it cannot change the game, and the rule "every accepted command is logged and undoes exactly" stays true as written.
+- Reads need their own `Look` permission, count toward the per-tick limit (refused ones too), and a `Find` searches a 16-block cube, about 36 thousand lookups at most.
+
+**Spawn command and unloaded chunks.** One credible approach each, so no options were compared.
+- The spawn command follows the other commands: permission, range, a check that the zombie's box is in the open, and a cap of 8 live mobs. Ids are never reused, so `run` takes the app's id counter and moves it on only when a spawn is accepted.
+- A rewind or redo now loads every unloaded chunk it touches (terrain plus logged edits) before applying, and hands it to the streamer, which unloads it again when it is out of range. The log keeps the edits either way.
+
+**Trade-offs accepted:** the redo stack only reaches back as far as the 256 kept actions, like `Z`. The meters are not saved, so a redo of a meal after a restart is refused and the stack is cleared. A `Find` that misses the 16-block cube answers "nothing", even if one exists farther away. Nothing in the window runs scripts yet, so the spawn command and the reads are tested but not played.
+
+#### Implementation Notes
+- Log format version 7: tag 14 ends a redo. Older files are still read, and a redo in them reads as a plain edit, which leaves the stack empty. The unknown-tag test moved to tag 15.
+- `RedoStack::from_log` replays the action marks. A property test runs random edits, rewinds, redos, passive changes and respawns, and checks the rebuilt stack against the one kept live, including after a save and load.
+- `touched_chunks` names the chunks a rewind changes. A property test rebuilds a world from only those chunks and shows the rewind applies cleanly and lands on the same blocks.
+- `Zombie` boxes are checked with `mobs::service::blocked`, which uses the same collision test as the player.
+- Tests: spawn, refused spawn, cap, every read, ties in `Find`, the radius limit, read permission and limit, and a property test that queries never change the game or the log. The scripted-session property test now spawns mobs and checks they replay and undo too.
+- The window was not run by the assistant. Try it by breaking blocks, pressing `Z` twice, quitting and reopening, then `Y`; and by breaking a block, walking away until its chunk unloads, coming back far enough to see it gone from view and pressing `Z`.
 
 #### Review / Update Log
 

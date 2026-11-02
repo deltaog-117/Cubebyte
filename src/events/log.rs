@@ -12,6 +12,10 @@ pub enum ActionKind {
     Edit,
     /// The undoing of the latest edit that had not been undone yet.
     Rewind,
+    /// An undone edit brought back. Rewind treats it like an edit, so it can be undone again;
+    /// it is kept apart from [`ActionKind::Edit`] so the redo stack can be rebuilt from the log,
+    /// since a new edit empties that stack and a redo does not.
+    Redo,
     /// A change the world made by itself: hunger draining, a mob's hit. Rewind steps over
     /// it, so it can never be the thing `Z` undoes, though it stays in the log.
     Passive,
@@ -176,8 +180,8 @@ impl EventLog {
                 ActionKind::Rewind => undone += 1,
                 ActionKind::Passive => {}
                 ActionKind::Respawn => return None,
-                ActionKind::Edit if undone > 0 => undone -= 1,
-                ActionKind::Edit => {
+                ActionKind::Edit | ActionKind::Redo if undone > 0 => undone -= 1,
+                ActionKind::Edit | ActionKind::Redo => {
                     let start = index
                         .checked_sub(1)
                         .map_or(0, |before| self.marks[before].end);
@@ -310,6 +314,22 @@ mod tests {
         assert_eq!(log.len(), 2);
         let chunk = ChunkPos { x: 0, y: 0, z: 0 };
         assert!(log.chunk_events(chunk).eq([&block]));
+    }
+
+    #[test]
+    fn a_redo_is_rewindable_like_an_edit() {
+        let mut log = EventLog::new();
+        log.push(set(1, 0, 1));
+        log.end_action(ActionKind::Edit);
+        log.push(set(1, 1, 0));
+        log.end_action(ActionKind::Rewind);
+        log.push(set(1, 0, 1));
+        log.end_action(ActionKind::Redo);
+        assert_eq!(log.latest_live_edit(), Some(&[set(1, 0, 1)][..]));
+
+        log.push(set(1, 1, 0));
+        log.end_action(ActionKind::Rewind);
+        assert_eq!(log.latest_live_edit(), None);
     }
 
     #[test]

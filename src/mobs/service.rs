@@ -155,6 +155,11 @@ pub fn strike_events(id: MobId, zombie: &Zombie, damage: Damage) -> Vec<Event> {
     events
 }
 
+/// Whether the zombie's box overlaps a solid block, as when it would be put inside a wall.
+pub fn blocked(zombie: &Zombie, world: &World) -> bool {
+    body::collides(&zombie.body, &|cell| solid(world, cell))
+}
+
 /// The event for a new zombie `id` at `at`, with full health.
 pub fn spawn_event(id: MobId, at: Vec3) -> Event {
     Event::MobSpawned {
@@ -263,6 +268,16 @@ mod tests {
             }
         }
         world
+    }
+
+    #[test]
+    fn a_zombie_is_blocked_inside_a_wall_and_not_on_open_ground() {
+        let world = floor();
+        let standing = Zombie::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
+        let buried = Zombie::try_new(Vec3::new(0.5, 0.0, 0.5)).unwrap();
+
+        assert!(!blocked(&standing, &world));
+        assert!(blocked(&buried, &world));
     }
 
     fn zombie_at(x: f32, z: f32) -> Zombie {

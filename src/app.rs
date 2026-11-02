@@ -26,7 +26,7 @@ use crate::events::log::{ActionKind, EventLog};
 use crate::events::persist::{self, LoadError};
 use crate::events::redo::RedoStack;
 use crate::events::replay::replay_chunk;
-use crate::events::rewind::{log_action, rewind_events};
+use crate::events::rewind::{log_action, rewind_events, touched_chunks};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
@@ -171,7 +171,8 @@ struct Running {
     simulation: Simulation,
     world: World,
     log: EventLog,
-    /// Edits that `Z` undid and nothing has replaced since, for `Y` to bring back.
+    /// Edits that `Z` undid and nothing has replaced since, for `Y` to bring back. Rebuilt from
+    /// the log at startup, so it survives a restart.
     redo: RedoStack,
     inventory: Inventory,
     /// Whether the inventory differs from what is on disk, so exit knows to save it.
@@ -221,6 +222,7 @@ impl App {
             pollster::block_on(Renderer::new(window.clone(), (size.width, size.height)))?;
 
         let log = open_log(Path::new(SAVE_PATH))?;
+        let redo = RedoStack::from_log(&log);
         let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
         // Makes room for the new session. A replayed session is already in memory by now.
         if let Err(error) = prune_sessions(Path::new(INTENTS_DIR), MAX_SESSIONS - 1) {
@@ -247,7 +249,7 @@ impl App {
             simulation: Simulation::new(SEED, clock),
             world: World::default(),
             log,
-            redo: RedoStack::default(),
+            redo,
             inventory,
             inventory_dirty: false,
             stats: Stats::default(),
@@ -717,6 +719,7 @@ impl Running {
         let Some(events) = rewind_events(&self.log) else {
             return false;
         };
+        self.load_touched(&events);
         if let Err(error) = self.commit_as(&events, ActionKind::Rewind) {
             tracing::warn!(%error, "rewind rejected");
             return false;
@@ -726,21 +729,48 @@ impl Running {
         true
     }
 
-    /// Brings back the edit `Z` undid last. It is logged as a new edit, so a later `Z` can
-    /// undo it again. If the game has moved on in a way no event records, the edit no longer
+    /// Brings back the edit `Z` undid last. It is logged as a redo, which a later `Z` can
+    /// undo again. If the game has moved on in a way no event records, the edit no longer
     /// fits: it is refused and logged, and the older ones are dropped with it. Reports whether
     /// it brought an edit back.
     fn redo(&mut self) -> bool {
         let Some(events) = self.redo.take() else {
             return false;
         };
-        if let Err(error) = self.commit_as(&events, ActionKind::Edit) {
+        self.load_touched(&events);
+        if let Err(error) = self.commit_as(&events, ActionKind::Redo) {
             tracing::warn!(%error, "redo rejected");
             self.redo.clear();
             return false;
         }
         self.finish_history_step(&events);
         true
+    }
+
+    /// Brings in every unloaded chunk that `events` change, generated and with its logged
+    /// edits, before a rewind or redo applies them: an edit may be in a chunk the player has
+    /// walked away from. The streamer unloads it again once it is out of range, and the log
+    /// keeps its edits.
+    fn load_touched(&mut self, events: &[Event]) {
+        for pos in touched_chunks(events) {
+            if self.streamer.is_loaded(pos) {
+                continue;
+            }
+            load_chunk(&mut self.world, &self.log, &self.terrain, pos);
+            self.streamer.mark_loaded(pos);
+            // The new chunk also changes the border faces of the loaded chunks next to it.
+            remesh(&mut self.renderer, &self.world, pos);
+            for [dx, dy, dz] in NEIGHBOURS {
+                let next = ChunkPos {
+                    x: pos.x.saturating_add(dx),
+                    y: pos.y.saturating_add(dy),
+                    z: pos.z.saturating_add(dz),
+                };
+                if self.streamer.is_loaded(next) {
+                    remesh(&mut self.renderer, &self.world, next);
+                }
+            }
+        }
     }
 
     /// Redraws and flags for saving after a rewind or redo applied `events`.
