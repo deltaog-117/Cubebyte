@@ -55,6 +55,7 @@ Items are organized by priority, not by timeline.
 - ✅ Time as a resource: `Z` costs fuel, a base of 1 plus whatever fuel the undo would hand back, paid inside the rewind's own all-or-nothing batch; undoing a scripted command no longer refunds its fuel, a pack that cannot pay refuses the rewind and the title says what it needs, and `Y` is the exact inverse so it gives the price back with the edit
 - ✅ Archive of folded-away history: the log hands over the events it folds, with their action ends, and the game appends them on exit to `world.mcea` (after the world file is saved, so nothing is written twice); a frame cut short by a crash is dropped on the next append
 - ✅ Local rewind zones: key `X` puts the blocks in a cube of radius 8 around the player back as they were 1, 3, 10, 30 or 100 block-changing actions ago (`V` picks), as one edit that `Z` takes back whole; it costs 1 fuel plus 1 per started group of 4 blocks restored; blocks only, so the pack and mobs are untouched; saved in intent tracks (version 5) so a replay restores the same region
+- ✅ Command line and command dictionary: `/` opens a typed line and `H` opens it with a table of every command (Tab shows or hides the table); clicking a row runs a command that needs no words or starts one that does; commands are `help`, `give`, `go`, `set`, `spawn`, `rewind`, `redo` and `zone`, defined once in a table that the parser, the dictionary and the error messages all read; positions are blocks from the feet; script commands wait for the next tick and keep the script rules (permission, range, fuel, wait), so a replay reproduces them
 
 ---
 
@@ -102,7 +103,7 @@ Items are organized by priority, not by timeline.
 - **Quick-hacks** – Watch Dogs-style actions. Aim at a thing or a place and pick a hack from a menu (unlock, distract, go to this coordinate). Each hack is a ready-made script a player can open, read and edit, so players learn by using code first and writing it later. Two ways to trigger one:
   - a specific command aimed at a target, which the command line reads as, for example, "go" to that coordinate;
   - the command-line menu, fetching what the player asks for.
-- **Command line and command dictionary** – An in-game command line that runs commands and quick-hacks, with a dictionary listing every command. Commands use a vim-like grammar, a verb plus a noun, that can grow beyond verbs and nouns (modifiers, counts, targets) where needed, so commands are easy to remember and combine.
+- **Command line and command dictionary** – First slice done (see Completed). Still to do: more commands as features arrive (craft, eat, hits), command history with the arrow keys, aiming (`go` to the block under the crosshair), and the vim-like grammar growth (counts, modifiers, targets).
 - **Programmable mobs** – Craft a "brain" item and script its behavior: follow, guard, farm, haul. The best first use of scripting.
 - **Logic and automation** – Wires, sensors and triggers that scripts can read and write.
 
@@ -139,7 +140,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Command line and command dictionary** – Needed before quick-hacks and the language.
+1. **Scripting language, blocks first** – Builds on the world interface, cost model and command line.
 
 ---
 
@@ -149,25 +150,24 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Command line and command dictionary | Needed before quick-hacks and the language | H |
-| 2 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
-| 3 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
-| 4 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
-| 5 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 6 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
-| 7 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 8 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
-| 9 | Shaped crafting grid | Builds on the recipe table | M |
-| 10 | Script-driven crafting | Needs the scripting language | M |
-| 11 | Shareable blueprints | Needs scripts and the event log | M |
-| 12 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 13 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
-| 14 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
-| 15 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 16 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 17 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 18 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 19 | Graphics: better mobs | Parts-based models and animation | M |
+| 1 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
+| 2 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
+| 3 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
+| 4 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
+| 5 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
+| 6 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 7 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 8 | Shaped crafting grid | Builds on the recipe table | M |
+| 9 | Script-driven crafting | Needs the scripting language | M |
+| 10 | Shareable blueprints | Needs scripts and the event log | M |
+| 11 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 12 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
+| 13 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
+| 14 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 15 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 16 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 17 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 18 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

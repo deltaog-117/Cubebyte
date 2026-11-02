@@ -4,6 +4,7 @@ pub mod app;
 pub mod blocks;
 pub mod building;
 pub mod combat;
+pub mod command;
 pub mod crafting;
 pub mod events;
 pub mod inventory;

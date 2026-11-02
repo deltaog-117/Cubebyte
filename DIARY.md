@@ -41,6 +41,7 @@
 | 2026-11-02 | Script costs, panel, saved meters and more reads | Fuel item plus per-kind waits; a script panel and a runner; a separate `stats.mcst`; two small fixed reads | ✅ Confirmed |
 | 2026-11-02 | Readout, recorded scripts, priced rewind and the archive | A key for the reads; script commands recorded as they ran; rewind costs 1 fuel plus what it returns, inside the undo; folded history appended to `world.mcea` on exit | ✅ Confirmed |
 | 2026-11-02 | Local rewind zones | Restore a cube around the player to how it stood N block-changing actions ago, as one priced edit; no new log kind | ✅ Confirmed |
+| 2026-11-02 | Command line and command dictionary | One table of commands read by the parser, the dictionary and the errors; typed line and clickable table in one panel; commands become existing actions | ✅ Confirmed |
 
 ---
 
@@ -1297,6 +1298,43 @@ Three options were compared: A, undo the in-region part of the newest edit that 
 - `events::zone`: `Zone::around`, `zone_events`, `zone_price`; `EventLog::recent_block_events` gives the events of the newest N block-changing actions.
 - Tests: a property test that the zone matches the world N actions ago, the rest is unchanged, and `Z` restores the world exactly; price and edge tests; intent file round trips for version 5 and a version 4 file still read.
 - The window was not run by the assistant. Try it by breaking and placing a few blocks, then pressing `X` with fuel in the pack; `V` changes how far back.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Command Line and Command Dictionary
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Quick-hacks and the scripting language both need a way to name and run commands. Players also need a way to see what commands exist. Three options were compared: A, hand-written verbs; B, one table of commands that the parser, the dictionary and the errors all read; C, typed lines as one-line scripts. B was chosen, and you asked for both typing and a table to click, so the panel offers both.
+
+#### Decision & Rationale
+- A command is one row in a table (name, summary, the words it takes, how the checked words become a request). The parser, the dictionary rows and the "use give item count" messages are all made from that row, so they cannot drift apart. Adding a command is adding a row.
+- A typed line never becomes a new kind of history. It turns into an action the game already records, or a script command it already checks. Replays therefore need no new format.
+- **Typed script commands wait for the next tick.** A script command that ran the moment Enter was pressed would run before the tick's steps, but a replay performs script commands after the zombie's step. Running them at that same point of the tick keeps a replay exact. The cost is up to 50 ms of delay and a short queue (8).
+- **Positions are blocks from the player's feet**, like the ready-made scripts, because the window shows no coordinates. `go 0 5 0` hops up. Offsets are limited to 1000 either way.
+- One panel with two ways in: `/` opens the typed line alone, `H` opens it with the table, Tab toggles the table. Letters go to the line while it is open, so H cannot open the table from inside it. A row with no words runs at once; a row that needs words fills in its name and shows how to complete it.
+- `help` opens the table, so there is no separate help text to keep in step.
+- The built-in font gains `/` and `_` only; commands, summaries and error messages use characters it already has, and tests check that.
+
+**Trade-offs accepted:**
+- Only one kind of mob and a few commands to begin with; `craft`, `eat` and hits stay on their keys.
+- No command history or editing beyond Backspace.
+- `give` costs fuel like any script command, even though it makes items; the game's own rules apply to typed commands too.
+- The title does not show the answer to a command; the panel does, and the panel closes with Escape.
+
+#### Implementation Notes
+- `command::{model, table, parse, plan, line}`; `ui::layout::command_panel` reuses the same layout as the other panels, with the typed line and the answer as two extra rows after the table.
+- `Running::script_command` now returns why a command was refused, and `perform` reports whether the action worked, so the status line can say what happened.
+- Tests: the parser answers any text without panicking and every message uses only drawable characters; a typed line cannot hold anything the font lacks; each command in the table builds from sample words; planning offsets cannot overflow; the overlay is well formed with and without the table.
+- The window was not run by the assistant. Try it by pressing `/` and typing `give fuel 3`, `go 0 3 0` and `zone 3`; press `H` and click a row; try a wrong word to see the message.
 
 #### Review / Update Log
 

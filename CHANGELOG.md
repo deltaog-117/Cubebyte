@@ -159,6 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EventLog::recent_block_events`: the events of the newest N actions that changed blocks
 - Keys `X` (zone rewind around the player, radius 8) and `V` (cycle how far back: 1, 3, 10, 30, 100 actions); the title shows the choice
 - `Action::ZoneRewind`, saved in intent tracks as kind 9, so a replay restores the same region
+- `command`: a command line. `command::table` is the one table of commands (`help`, `give`, `go`, `set`, `spawn`, `rewind`, `redo`, `zone`); `command::parse` reads a typed line into a `Request` with messages that say what to type instead; `command::plan` turns a request into an existing action or script command; `command::line` is the text being typed
+- Keys `/` (command line) and `H` (command line with the table of commands); Tab shows or hides the table, Enter runs, Escape closes; clicking a row runs a command with no words or starts one that needs words
+- `ui::layout::command_panel` and `ui::draw::command_overlay`, and the glyphs `/` and `_` in the built-in font
 
 ### Changed
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
@@ -202,6 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Escape closes whichever panel is open; mouse look pauses while either is open
 - `simulation::persist` writes version 4 (kind 8 holds a script command) and reads versions 1 to 4
 - `simulation::persist` writes version 5 (kind 9 holds a zone rewind) and reads versions 1 to 5
+- `Running::script_command` returns why a command was refused (`Result<(), Denied>`) instead of a bare yes or no, and `Running::perform` reports whether the action worked; typed script commands run at the script point of the tick
 - `Running::rewind` pays the rewind price in the same all-or-nothing batch as the undo and refuses, with a note in the title, when the pack cannot pay; a redo gives the price back, since it is the exact inverse
 - `EventLog` equality ignores records folded away and not yet taken, which are output waiting to be written
 - `app` writes `world.mcea` on exit, after the world file is saved

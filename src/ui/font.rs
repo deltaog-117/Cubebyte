@@ -18,6 +18,8 @@ pub fn glyph(c: char) -> Option<Glyph> {
         ' ' => [0; 7],
         '-' => [0, 0, 0, 0b11111, 0, 0, 0],
         ',' => [0, 0, 0, 0, 0b00110, 0b00100, 0b01000],
+        '/' => [0, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0],
+        '_' => [0, 0, 0, 0, 0, 0, 0b11111],
         '0' => [
             0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
         ],
@@ -134,7 +136,7 @@ pub fn glyph(c: char) -> Option<Glyph> {
 mod tests {
     use super::*;
 
-    const SUPPORTED: &str = " -,0123456789abcdefghijklmnopqrstuvwxyz";
+    const SUPPORTED: &str = " -,/_0123456789abcdefghijklmnopqrstuvwxyz";
 
     #[test]
     fn every_supported_character_has_a_glyph_inside_the_five_columns() {

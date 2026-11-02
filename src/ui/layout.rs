@@ -4,6 +4,8 @@
 
 use std::fmt::Write;
 
+use crate::command::model::CommandId;
+use crate::command::table as commands;
 use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
@@ -15,6 +17,12 @@ const TITLE: &str = "crafting";
 const HINT: &str = "click to craft - tab closes";
 const SCRIPT_TITLE: &str = "scripts";
 const SCRIPT_HINT: &str = "click to run - t closes";
+const COMMAND_TITLE: &str = "commands";
+const COMMAND_HINT: &str = "enter runs - tab table - esc closes";
+
+/// Most characters of the typed line and of the status shown at once, so a long one cannot
+/// widen the panel.
+const PROMPT_SHOWN: usize = 40;
 
 /// Window height in pixels per step of text scale: 720 high gives 3 pixels per font pixel.
 const PIXELS_PER_SCALE: u32 = 200;
@@ -276,6 +284,117 @@ pub fn script_panel(size: (u32, u32), inventory: &Inventory, running: bool) -> S
     }
 }
 
+/// One clickable command of the table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandRow {
+    pub command: CommandId,
+    pub rect: Rect,
+    /// Where the row's text goes, inside `rect`.
+    pub label: Label,
+}
+
+/// The command panel: the typed line and the last answer, and, when asked for, the table of
+/// every command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandPanel {
+    /// Screen pixels per font pixel.
+    pub scale: u32,
+    pub rect: Rect,
+    pub title: Label,
+    pub hint: Label,
+    /// Empty when the table is hidden.
+    pub rows: Vec<CommandRow>,
+    /// Where the typed line sits, and the box behind it.
+    pub prompt_rect: Rect,
+    pub prompt: Label,
+    pub status: Label,
+}
+
+impl CommandPanel {
+    /// The command whose row is under the point, if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<CommandId> {
+        self.rows
+            .iter()
+            .find(|row| row.rect.contains(x, y))
+            .map(|row| row.command)
+    }
+}
+
+/// The last `limit` characters of `text`, so the end of what is being typed stays in view.
+fn tail(text: &str, limit: usize) -> String {
+    let skip = text.chars().count().saturating_sub(limit);
+    text.chars().skip(skip).collect()
+}
+
+/// The first `limit` characters of `text`.
+fn head(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
+}
+
+/// Lays the command panel out centred in a window of `size` pixels. `typed` is the line being
+/// written and `status` the answer to the last one. With `table` the panel lists every command
+/// above the line, one clickable row each; without it only the line and the answer show.
+pub fn command_panel(size: (u32, u32), typed: &str, status: &str, table: bool) -> CommandPanel {
+    let described: Vec<_> = if table {
+        commands::ids()
+            .filter_map(|id| {
+                let spec = commands::get(id)?;
+                Some((id, format!("{} - {}", commands::usage(spec), spec.summary)))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
+    let rows_wide = texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    // The line and the answer never make the panel wider than the table or the hint.
+    let width_limit = rows_wide
+        .max(COMMAND_HINT.chars().count())
+        .min(PROMPT_SHOWN + 2);
+    let prompt = format!("/{}_", tail(typed, width_limit.saturating_sub(2)));
+    texts.push(prompt);
+    texts.push(head(status, width_limit));
+    let arranged = arrange(size, COMMAND_TITLE, COMMAND_HINT, &texts);
+    // `arrange` made one row per text: the table's rows, then the line, then the answer.
+    let blank = || {
+        (
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            Label {
+                x: 0.0,
+                y: 0.0,
+                text: String::new(),
+            },
+        )
+    };
+    let mut parts = arranged.rows;
+    let (_, status) = parts.pop().unwrap_or_else(blank);
+    let (prompt_rect, prompt) = parts.pop().unwrap_or_else(blank);
+    let rows: Vec<_> = described
+        .iter()
+        .zip(parts)
+        .map(|((command, _), (rect, label))| CommandRow {
+            command: *command,
+            rect,
+            label,
+        })
+        .collect();
+    CommandPanel {
+        scale: arranged.scale,
+        rect: arranged.rect,
+        title: arranged.title,
+        hint: arranged.hint,
+        rows,
+        prompt_rect,
+        prompt,
+        status,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +511,41 @@ mod tests {
             let below = panel.rect.y + panel.rect.height + 1.0;
             prop_assert_eq!(panel.row_at(panel.rect.x, below), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn the_table_has_one_clickable_row_per_command_and_each_is_found_by_its_centre() {
+        let panel = command_panel((1280, 720), "gi", "done", true);
+        assert_eq!(panel.rows.len(), commands::ids().count());
+        for row in &panel.rows {
+            let (x, y) = (
+                row.rect.x + row.rect.width / 2.0,
+                row.rect.y + row.rect.height / 2.0,
+            );
+            assert_eq!(panel.row_at(x, y), Some(row.command));
+        }
+        assert_eq!(panel.prompt.text, "/gi_");
+    }
+
+    #[test]
+    fn without_the_table_only_the_line_and_the_answer_show() {
+        let panel = command_panel((1280, 720), "", "done", false);
+        assert!(panel.rows.is_empty());
+        assert_eq!(panel.prompt.text, "/_");
+        assert_eq!(panel.status.text, "done");
+    }
+
+    #[test]
+    fn a_long_line_shows_its_end_and_does_not_widen_the_panel() {
+        let short = command_panel((1280, 720), "a", "", false);
+        let long = command_panel((1280, 720), &"b".repeat(48), &"c".repeat(200), false);
+        assert!(long.prompt.text.ends_with("b_"));
+        assert!(long.rect.width <= short.rect.width.max(1280.0));
+        assert!(long.status.text.chars().count() <= PROMPT_SHOWN + 2);
     }
 }

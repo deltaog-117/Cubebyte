@@ -1,6 +1,6 @@
 //! Wiring only: window, game loop and handing each feature what it needs.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::Path;
@@ -19,6 +19,11 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::{REACH, break_target, place_target};
 use crate::combat::service::{hit_events, respawn, respawn_events, strike};
+use crate::command::line::Line;
+use crate::command::model::CommandId;
+use crate::command::parse::parse;
+use crate::command::plan::{Plan, plan};
+use crate::command::table as command_table;
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
 use crate::events::apply::{ChargeError, Stage, StageError, apply_all, charge_events};
@@ -43,7 +48,7 @@ use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::scripting::library::{self, ScriptId};
-use crate::scripting::model::{Command, Cooldowns, Facing, Limits, Pace, Permissions};
+use crate::scripting::model::{Command, Cooldowns, Denied, Facing, Limits, Pace, Permissions};
 use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
 use crate::scripting::service::run as run_commands;
@@ -59,13 +64,16 @@ use crate::simulation::stream::{IntentStream, next_session_path, prune_sessions,
 use crate::survival::model::Stats;
 use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
-use crate::ui::draw::{overlay, script_overlay};
-use crate::ui::layout::{panel, script_panel};
+use crate::ui::draw::{command_overlay, overlay, script_overlay};
+use crate::ui::layout::{command_panel, panel, script_panel};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
 
 const SEED: u64 = 117;
+
+/// Most typed script commands that may wait for a tick.
+const MAX_TYPED: usize = 8;
 
 /// Where the event log is kept, relative to the working directory.
 const SAVE_PATH: &str = "world.mcel";
@@ -213,6 +221,16 @@ struct Running {
     recipe: RecipeId,
     /// Which of [`ZONE_BACK_STEPS`] the zone rewind key goes back by.
     zone_step: usize,
+    /// Whether the command line is open: keys type into it and the pointer is free.
+    commands_open: bool,
+    /// Whether the command line also shows the table of commands.
+    command_table: bool,
+    /// The line being typed.
+    command_line: Line,
+    /// The answer to the last command, shown under the line.
+    command_status: String,
+    /// Script commands typed and waiting for the next tick.
+    typed: VecDeque<Command>,
     /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
     panel_open: bool,
     /// Whether the script panel is open. It shares the free pointer with the crafting panel,
@@ -297,6 +315,11 @@ impl App {
             replay,
             recipe: RecipeId::FIRST,
             zone_step: 0,
+            commands_open: false,
+            command_table: false,
+            command_line: Line::default(),
+            command_status: String::new(),
+            typed: VecDeque::new(),
             panel_open: false,
             scripts_open: false,
             cooldowns: Cooldowns::default(),
@@ -326,7 +349,17 @@ impl App {
             return;
         };
         let down = event.state == ElementState::Pressed;
+        if self.running.as_ref().is_some_and(Running::commands_open) {
+            // The command line takes every key; a movement key let go meanwhile was already
+            // cleared when it opened.
+            if down && let Some(running) = self.running.as_mut() {
+                running.command_key(code, event.text.as_deref());
+            }
+            return;
+        }
         match code {
+            KeyCode::Slash if down => self.open_commands(false),
+            KeyCode::KeyH if down => self.open_commands(true),
             KeyCode::KeyW => self.keys.forward = down,
             KeyCode::KeyS => self.keys.back = down,
             KeyCode::KeyA => self.keys.left = down,
@@ -360,6 +393,13 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    /// Opens the command line, with the table when asked, and lets go of the movement keys,
+    /// since their release would otherwise go to the line.
+    fn open_commands(&mut self, table: bool) {
+        self.keys = MoveKeys::default();
+        self.with_running(|running| running.open_commands(table));
     }
 
     fn with_running(&mut self, act: impl FnOnce(&mut Running)) {
@@ -689,13 +729,14 @@ impl Running {
 
     /// Whether a panel is open, so the pointer is free and clicks go to the panel.
     fn pointer_free(&self) -> bool {
-        self.panel_open || self.scripts_open
+        self.panel_open || self.scripts_open || self.commands_open
     }
 
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
     fn toggle_panel(&mut self) {
         self.panel_open = !self.panel_open;
         self.scripts_open = false;
+        self.commands_open = false;
         self.sync_pointer();
     }
 
@@ -703,12 +744,14 @@ impl Running {
     fn toggle_scripts(&mut self) {
         self.scripts_open = !self.scripts_open;
         self.panel_open = false;
+        self.commands_open = false;
         self.sync_pointer();
     }
 
     fn close_panels(&mut self) {
         self.panel_open = false;
         self.scripts_open = false;
+        self.commands_open = false;
         self.sync_pointer();
     }
 
@@ -726,6 +769,13 @@ impl Running {
 
     /// Acts on the row under `cursor` in whichever panel is open, if there is one.
     fn click_panel(&mut self, cursor: (f32, f32)) {
+        if self.commands_open {
+            let layout = self.command_layout();
+            if let Some(id) = layout.row_at(cursor.0, cursor.1) {
+                self.click_command(id);
+            }
+            return;
+        }
         if self.scripts_open {
             let layout = script_panel(self.renderer.size(), &self.inventory, self.script.is_some());
             if let Some(id) = layout.row_at(cursor.0, cursor.1) {
@@ -742,7 +792,11 @@ impl Running {
     /// Draws the open panel, or removes it.
     fn show_panel(&mut self, cursor: (f32, f32)) {
         let size = self.renderer.size();
-        let (vertices, indices) = if self.scripts_open {
+        let (vertices, indices) = if self.commands_open {
+            let layout = self.command_layout();
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            command_overlay(&layout, size, hovered)
+        } else if self.scripts_open {
             let layout = script_panel(size, &self.inventory, self.script.is_some());
             let hovered = layout.row_at(cursor.0, cursor.1);
             script_overlay(&layout, size, hovered)
@@ -754,6 +808,122 @@ impl Running {
             Default::default()
         };
         self.renderer.set_overlay(&vertices, &indices);
+    }
+
+    fn commands_open(&self) -> bool {
+        self.commands_open
+    }
+
+    /// Opens the command line over any other panel, with the table when asked.
+    fn open_commands(&mut self, table: bool) {
+        self.panel_open = false;
+        self.scripts_open = false;
+        self.commands_open = true;
+        self.command_table = table;
+        self.command_status.clear();
+        self.sync_pointer();
+    }
+
+    fn command_layout(&self) -> crate::ui::layout::CommandPanel {
+        command_panel(
+            self.renderer.size(),
+            self.command_line.as_str(),
+            &self.command_status,
+            self.command_table,
+        )
+    }
+
+    /// Handles one key press while the command line is open: Escape closes it, Enter runs the
+    /// line, Tab shows or hides the table, Backspace deletes, and text is typed.
+    fn command_key(&mut self, code: KeyCode, text: Option<&str>) {
+        match code {
+            KeyCode::Escape => self.close_panels(),
+            KeyCode::Enter | KeyCode::NumpadEnter => self.submit_command(),
+            KeyCode::Tab => self.command_table = !self.command_table,
+            KeyCode::Backspace => self.command_line.backspace(),
+            _ => text
+                .unwrap_or_default()
+                .chars()
+                .for_each(|c| self.command_line.push(c)),
+        }
+    }
+
+    /// Reads the typed line and runs it; the answer, good or bad, goes under the line.
+    fn submit_command(&mut self) {
+        let line = self.command_line.take();
+        match parse(&line) {
+            Ok(request) => self.run_request(plan(request, self.feet_cell())),
+            Err(error) => self.command_status = error.to_string(),
+        }
+    }
+
+    /// A click on a table row: a command with no words runs at once; one that needs words
+    /// puts its name in the line, ready to be completed.
+    fn click_command(&mut self, id: CommandId) {
+        let Some(spec) = command_table::get(id) else {
+            return;
+        };
+        if spec.args.is_empty() {
+            self.command_line.set(spec.name);
+            self.submit_command();
+        } else {
+            self.command_line.set(&format!("{} ", spec.name));
+            self.command_status = format!("use {}", command_table::usage(spec));
+        }
+    }
+
+    fn feet_cell(&self) -> WorldPos {
+        let feet = self.player.position().floor().as_ivec3();
+        WorldPos {
+            x: feet.x,
+            y: feet.y,
+            z: feet.z,
+        }
+    }
+
+    /// Does what a typed line meant. Nothing runs while a replay supplies every action.
+    fn run_request(&mut self, plan: Plan) {
+        if self.replay.is_some() {
+            self.command_status = "not while a saved run replays".to_owned();
+            return;
+        }
+        match plan {
+            Plan::Table => {
+                self.command_table = true;
+                self.command_status = "click a row, or type".to_owned();
+            }
+            Plan::Do(action) => {
+                let done = self.perform(self.simulation.tick(), action);
+                self.command_status = if done {
+                    "done".to_owned()
+                } else {
+                    "nothing happened - the title may say why".to_owned()
+                };
+            }
+            Plan::Queue(_) if self.typed.len() >= MAX_TYPED => {
+                self.command_status = "too many commands waiting".to_owned();
+            }
+            Plan::Queue(command) => {
+                self.typed.push_back(command);
+                self.command_status = "waiting for the next tick".to_owned();
+            }
+        }
+    }
+
+    /// Runs the oldest typed script command on `tick`, with the checks a script command gets,
+    /// and keeps it in the intent track if it ran. It runs at the script point of the tick, so
+    /// a replay, which performs script commands there, reproduces it.
+    fn step_typed(&mut self, tick: Tick) {
+        let Some(command) = self.typed.pop_front() else {
+            return;
+        };
+        match self.script_command(tick, command) {
+            Ok(()) => {
+                self.settle(tick, Action::Script(command));
+                self.command_status = "done".to_owned();
+            }
+            Err(denied) => self.command_status = denied.to_string(),
+        }
     }
 
     /// Shows or hides the live readout in the window title.
@@ -822,6 +992,7 @@ impl Running {
             self.replay_script_commands(tick);
             return;
         }
+        self.step_typed(tick);
         let Some(script) = self.script.take() else {
             return;
         };
@@ -1120,7 +1291,7 @@ impl Running {
 
     /// Does `action` on `tick`, and keeps it in the intent log if it worked. A refusal (no
     /// block there, nothing to place, a missing ingredient) changes and records nothing.
-    fn perform(&mut self, tick: Tick, action: Action) {
+    fn perform(&mut self, tick: Tick, action: Action) -> bool {
         let done = match action {
             Action::Break(pos) => self.break_at(pos),
             Action::Place { pos, block } => self.place_at(pos, block),
@@ -1130,11 +1301,16 @@ impl Running {
             Action::Rewind => self.rewind(),
             Action::Redo => self.redo(),
             Action::ZoneRewind { centre, back } => self.zone_rewind(centre, back),
-            Action::Script(command) => self.script_command(tick, command),
+            Action::Script(command) => self.script_command(tick, command).is_ok(),
         };
-        if !done {
-            return;
+        if done {
+            self.settle(tick, action);
         }
+        done
+    }
+
+    /// Keeps an action that worked in the intent track and refreshes what shows it.
+    fn settle(&mut self, tick: Tick, action: Action) {
         if let Err(error) = self.intents.record_action(tick, action) {
             tracing::warn!(%error, "cannot record an action");
         }
@@ -1143,8 +1319,12 @@ impl Running {
     }
 
     /// Runs one recorded script command with the checks a live script gets: permission, range,
-    /// fuel and wait. Reports whether it ran.
-    fn script_command(&mut self, tick: Tick, command: Command) -> bool {
+    /// fuel and wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns why it did nothing.
+    fn script_command(&mut self, tick: Tick, command: Command) -> Result<(), Denied> {
         let mut stage = Stage {
             world: &mut self.world,
             player: &mut self.player,
@@ -1165,8 +1345,11 @@ impl Running {
             &mut self.log,
             &mut self.next_mob,
         );
-        let ran = matches!(results.as_slice(), [Ok(())]);
-        if ran {
+        let ran = results
+            .into_iter()
+            .next()
+            .unwrap_or(Err(Denied::NothingToDo));
+        if ran.is_ok() {
             if let Command::SetBlock { pos, .. } = command {
                 self.remesh_around(pos);
             }
@@ -1238,7 +1421,7 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, Q read)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, Q read, / or H commands)",
                 recipe.name
             ));
         }

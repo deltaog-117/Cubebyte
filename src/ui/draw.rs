@@ -1,10 +1,11 @@
 //! Turns a laid-out panel into coloured quads the renderer can draw over the scene.
 
+use crate::command::model::CommandId;
 use crate::crafting::registry::RecipeId;
 use crate::rendering::vertex::GpuVertex;
 use crate::scripting::library::ScriptId;
 use crate::ui::font::{GLYPH_WIDTH, glyph};
-use crate::ui::layout::{Label, Panel, Rect, ScriptPanel};
+use crate::ui::layout::{CommandPanel, Label, Panel, Rect, ScriptPanel};
 
 const BACKDROP: [f32; 3] = [0.10, 0.10, 0.13];
 const ROW_READY: [f32; 3] = [0.18, 0.42, 0.24];
@@ -13,6 +14,7 @@ const ROW_BLOCKED: [f32; 3] = [0.22, 0.22, 0.26];
 const ROW_BLOCKED_HOVER: [f32; 3] = [0.30, 0.30, 0.35];
 const TEXT: [f32; 3] = [0.95, 0.95, 0.95];
 const TEXT_BLOCKED: [f32; 3] = [0.55, 0.55, 0.60];
+const PROMPT_BOX: [f32; 3] = [0.04, 0.04, 0.06];
 
 /// Quads collected in screen-space vertices, ready to upload.
 struct Quads {
@@ -131,11 +133,36 @@ pub fn script_overlay(
     (quads.vertices, quads.indices)
 }
 
+/// [`overlay`] for the command panel; `hovered` is the table row under the pointer.
+pub fn command_overlay(
+    panel: &CommandPanel,
+    size: (u32, u32),
+    hovered: Option<CommandId>,
+) -> (Vec<GpuVertex>, Vec<u32>) {
+    let mut quads = Quads::new(size);
+    quads.rect(panel.rect, BACKDROP);
+    quads.text(&panel.title, panel.scale, TEXT);
+    for row in &panel.rows {
+        quads.row(
+            row.rect,
+            &row.label,
+            panel.scale,
+            true,
+            hovered == Some(row.command),
+        );
+    }
+    quads.rect(panel.prompt_rect, PROMPT_BOX);
+    quads.text(&panel.prompt, panel.scale, TEXT);
+    quads.text(&panel.status, panel.scale, TEXT_BLOCKED);
+    quads.text(&panel.hint, panel.scale, TEXT_BLOCKED);
+    (quads.vertices, quads.indices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::inventory::model::Inventory;
-    use crate::ui::layout::{panel, script_panel};
+    use crate::ui::layout::{command_panel, panel, script_panel};
     use proptest::prelude::*;
 
     #[test]
@@ -185,6 +212,25 @@ mod tests {
     }
 
     proptest! {
+        // The command overlay is as well formed as the others, with or without the table and
+        // whatever is typed.
+        #[test]
+        fn the_command_overlay_is_well_formed(
+            width in 320u32..4096,
+            height in 240u32..2160,
+            typed in "[a-z0-9 -]{0,60}",
+            table in any::<bool>(),
+        ) {
+            let panel = command_panel((width, height), &typed, "done", table);
+            let (vertices, indices) = command_overlay(&panel, (width, height), None);
+            prop_assert!(!indices.is_empty() && indices.len() % 3 == 0);
+            prop_assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));
+            for vertex in &vertices {
+                prop_assert!(vertex.position[..2].iter().all(|c| (-1.0..=1.0).contains(c)));
+            }
+            prop_assert_eq!(panel.rows.is_empty(), !table);
+        }
+
         // The script overlay is as well formed as the crafting one.
         #[test]
         fn the_script_overlay_is_well_formed(
