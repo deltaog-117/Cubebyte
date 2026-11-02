@@ -6,8 +6,11 @@ use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::Player;
-use minecraft_clone::scripting::model::{Answer, Command, Limits, Permission, Permissions, Query};
+use minecraft_clone::scripting::model::{
+    Answer, Command, Cooldowns, Facing, Limits, Pace, Permission, Permissions, Query,
+};
 use minecraft_clone::scripting::service::{ask, run};
+use minecraft_clone::shared::clock::Tick;
 use minecraft_clone::shared::event::{Event, MobId};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
 use minecraft_clone::survival::model::Stats;
@@ -32,6 +35,19 @@ fn floor() -> World {
     }
     world
 }
+
+/// A pack with fuel in it, since every script command burns some.
+fn fuelled(fuel: u32) -> Inventory {
+    let mut inventory = Inventory::default();
+    assert!(
+        inventory.add(ItemId::FUEL, fuel).is_ok(),
+        "fuel is a defined item"
+    );
+    inventory
+}
+
+/// More fuel than any session below can burn.
+const FUEL: u32 = 900;
 
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
@@ -64,12 +80,13 @@ proptest! {
             .with(Permission::Spawn);
         let mut world = floor();
         let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
-        let mut inventory = Inventory::default();
+        let mut inventory = fuelled(FUEL);
         let mut stats = Stats::default();
         let mut mobs = Mobs::default();
         let mut next_mob = MobId::FIRST;
         let mut log = EventLog::new();
-        for commands in &ticks {
+        let mut cooldowns = Cooldowns::default();
+        for (index, commands) in ticks.iter().enumerate() {
             let mut stage = Stage {
                 world: &mut world,
                 player: &mut player,
@@ -77,10 +94,15 @@ proptest! {
                 stats: &mut stats,
                 mobs: &mut mobs,
             };
+            let mut pace = Pace {
+                tick: Tick(index as u64 * 60),
+                cooldowns: &mut cooldowns,
+            };
             run(
                 commands,
                 granted,
                 Limits::standard(),
+                &mut pace,
                 &mut stage,
                 &mut log,
                 &mut next_mob,
@@ -92,7 +114,7 @@ proptest! {
         prop_assert_eq!(&saved.log, &log);
         let mut replayed_world = floor();
         let mut replayed_player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
-        let mut replayed_inventory = Inventory::default();
+        let mut replayed_inventory = fuelled(FUEL);
         let mut replayed_stats = Stats::default();
         let mut replayed_mobs = Mobs::default();
         for event in saved.log.iter() {
@@ -117,8 +139,7 @@ proptest! {
 fn a_script_can_find_a_block_and_then_build_next_to_it() {
     let mut world = floor();
     let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).unwrap();
-    let (mut inventory, mut stats, mut mobs) =
-        (Inventory::default(), Stats::default(), Mobs::default());
+    let (mut inventory, mut stats, mut mobs) = (fuelled(10), Stats::default(), Mobs::default());
     let mut log = EventLog::new();
     let mut next_mob = MobId::FIRST;
     let granted = Permissions::NONE
@@ -144,6 +165,7 @@ fn a_script_can_find_a_block_and_then_build_next_to_it() {
         }],
         granted,
         Limits::standard(),
+        Facing::East,
         &stage,
     );
     let Ok(Answer::Found(Some(found))) = answers[0] else {
@@ -153,6 +175,11 @@ fn a_script_can_find_a_block_and_then_build_next_to_it() {
     assert!(log.is_empty());
 
     let next_to = cell(found.x + 1, found.y, found.z);
+    let mut cooldowns = Cooldowns::default();
+    let mut pace = Pace {
+        tick: Tick(0),
+        cooldowns: &mut cooldowns,
+    };
     let results = run(
         &[Command::SetBlock {
             pos: next_to,
@@ -160,10 +187,12 @@ fn a_script_can_find_a_block_and_then_build_next_to_it() {
         }],
         granted,
         Limits::standard(),
+        &mut pace,
         &mut stage,
         &mut log,
         &mut next_mob,
     );
     assert_eq!(results, [Ok(())]);
-    assert_eq!(log.len(), 1);
+    // The fuel the command burned, then the block it set.
+    assert_eq!(log.len(), 2);
 }

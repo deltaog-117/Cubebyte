@@ -30,7 +30,7 @@ use crate::events::rewind::{log_action, rewind_events, touched_chunks};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
-use crate::items::registry;
+use crate::items::registry::{self, ItemId};
 use crate::mobs::model::Mobs;
 use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
@@ -40,6 +40,9 @@ use crate::rendering::camera::Camera;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
+use crate::scripting::library::{self, ScriptId};
+use crate::scripting::model::{Command, Cooldowns, Limits, Pace, Permissions};
+use crate::scripting::runner::{ScriptRun, Step, step as script_step};
 use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
@@ -50,9 +53,10 @@ use crate::simulation::model::Simulation;
 use crate::simulation::replay::{ArgsError, Replay, ReplayError, replay_session};
 use crate::simulation::stream::{IntentStream, next_session_path, prune_sessions, session_path};
 use crate::survival::model::Stats;
+use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
-use crate::ui::draw::overlay;
-use crate::ui::layout::panel;
+use crate::ui::draw::{overlay, script_overlay};
+use crate::ui::layout::{panel, script_panel};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -64,6 +68,9 @@ const SAVE_PATH: &str = "world.mcel";
 
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
+
+/// Where the health and hunger meters are kept, relative to the working directory.
+const STATS_PATH: &str = "stats.mcst";
 
 /// Where intent tracks are kept, relative to the working directory: one numbered file per
 /// session, because ticks restart at zero each session and earlier sessions are kept.
@@ -121,6 +128,10 @@ pub enum AppError {
     LoadInventory(#[from] inventory_persist::LoadError),
     #[error("cannot save the inventory")]
     SaveInventory(#[source] io::Error),
+    #[error("cannot load the saved meters")]
+    LoadStats(#[from] stats_persist::LoadError),
+    #[error("cannot save the meters")]
+    SaveStats(#[source] io::Error),
     #[error("cannot save the intent track")]
     SaveIntents(#[source] io::Error),
     #[error("bad command line")]
@@ -193,6 +204,15 @@ struct Running {
     recipe: RecipeId,
     /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
     panel_open: bool,
+    /// Whether the script panel is open. It shares the free pointer with the crafting panel,
+    /// and only one of the two is open at a time.
+    scripts_open: bool,
+    /// When each kind of script command may next run.
+    cooldowns: Cooldowns,
+    /// The ready-made script being played out, one command per ready tick.
+    script: Option<ScriptRun>,
+    /// How the last script ended, shown in the window title until the next one starts.
+    script_note: Option<String>,
     terrain: TerrainGenerator,
     streamer: Streamer,
 }
@@ -224,6 +244,7 @@ impl App {
         let log = open_log(Path::new(SAVE_PATH))?;
         let redo = RedoStack::from_log(&log);
         let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
+        let stats = stats_persist::load(Path::new(STATS_PATH))?.unwrap_or_default();
         // Makes room for the new session. A replayed session is already in memory by now.
         if let Err(error) = prune_sessions(Path::new(INTENTS_DIR), MAX_SESSIONS - 1) {
             tracing::warn!(%error, "cannot delete old intent sessions");
@@ -252,7 +273,7 @@ impl App {
             redo,
             inventory,
             inventory_dirty: false,
-            stats: Stats::default(),
+            stats,
             mobs: Mobs::default(),
             zombie_timer: ZOMBIE_DELAY_STEPS,
             next_mob: MobId::FIRST,
@@ -260,6 +281,10 @@ impl App {
             replay,
             recipe: RecipeId::FIRST,
             panel_open: false,
+            scripts_open: false,
+            cooldowns: Cooldowns::default(),
+            script: None,
+            script_note: None,
             terrain,
             streamer: Streamer::new(
                 LOAD_RADIUS,
@@ -302,9 +327,10 @@ impl App {
             KeyCode::KeyZ if down => self.with_running(|running| running.act(Action::Rewind)),
             KeyCode::KeyY if down => self.with_running(|running| running.act(Action::Redo)),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
+            KeyCode::KeyT if down => self.with_running(Running::toggle_scripts),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
-                Some(running) if running.panel_open => running.toggle_panel(),
+                Some(running) if running.pointer_free() => running.close_panels(),
                 _ => event_loop.exit(),
             },
             _ => {}
@@ -324,7 +350,7 @@ impl App {
         let Some(running) = self.running.as_mut() else {
             return;
         };
-        if running.panel_open {
+        if running.pointer_free() {
             if button == MouseButton::Left {
                 running.click_panel(cursor);
             }
@@ -372,6 +398,7 @@ impl App {
                 running.replay_actions(tick);
                 running.step_stats();
                 running.step_zombie(tick);
+                running.step_script(tick);
             }
             if running.stats.is_dead() {
                 running.die();
@@ -489,6 +516,9 @@ impl Running {
         self.inventory_dirty = true;
         self.deaths += 1;
         self.zombie_timer = ZOMBIE_DELAY_STEPS;
+        // The pack is empty again, so the script's fuel is gone with it.
+        self.script = None;
+        self.script_note = None;
         self.player = self.spawn;
         self.flying = false;
         self.camera.position = self.player.eye(1.0);
@@ -631,10 +661,34 @@ impl Running {
         self.renderer.set_entities(&vertices, &indices);
     }
 
+    /// Whether a panel is open, so the pointer is free and clicks go to the panel.
+    fn pointer_free(&self) -> bool {
+        self.panel_open || self.scripts_open
+    }
+
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
     fn toggle_panel(&mut self) {
         self.panel_open = !self.panel_open;
-        if self.panel_open {
+        self.scripts_open = false;
+        self.sync_pointer();
+    }
+
+    /// Opens or closes the script panel, freeing the pointer while it is open.
+    fn toggle_scripts(&mut self) {
+        self.scripts_open = !self.scripts_open;
+        self.panel_open = false;
+        self.sync_pointer();
+    }
+
+    fn close_panels(&mut self) {
+        self.panel_open = false;
+        self.scripts_open = false;
+        self.sync_pointer();
+    }
+
+    /// Frees the pointer while a panel is open and takes it back for looking around otherwise.
+    fn sync_pointer(&self) {
+        if self.pointer_free() {
             self.window.set_cursor_visible(true);
             if let Err(error) = self.window.set_cursor_grab(CursorGrabMode::None) {
                 tracing::warn!(%error, "cannot release the cursor");
@@ -644,18 +698,29 @@ impl Running {
         }
     }
 
-    /// Crafts the recipe whose row is under `cursor`, if there is one.
+    /// Acts on the row under `cursor` in whichever panel is open, if there is one.
     fn click_panel(&mut self, cursor: (f32, f32)) {
+        if self.scripts_open {
+            let layout = script_panel(self.renderer.size(), &self.inventory, self.script.is_some());
+            if let Some(id) = layout.row_at(cursor.0, cursor.1) {
+                self.start_script(id);
+            }
+            return;
+        }
         let layout = panel(self.renderer.size(), &self.inventory);
         if let Some(id) = layout.row_at(cursor.0, cursor.1) {
             self.craft_recipe(id);
         }
     }
 
-    /// Draws the crafting panel while it is open, or removes it.
+    /// Draws the open panel, or removes it.
     fn show_panel(&mut self, cursor: (f32, f32)) {
-        let (vertices, indices) = if self.panel_open {
-            let size = self.renderer.size();
+        let size = self.renderer.size();
+        let (vertices, indices) = if self.scripts_open {
+            let layout = script_panel(size, &self.inventory, self.script.is_some());
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            script_overlay(&layout, size, hovered)
+        } else if self.panel_open {
             let layout = panel(size, &self.inventory);
             let hovered = layout.row_at(cursor.0, cursor.1);
             overlay(&layout, size, hovered)
@@ -663,6 +728,80 @@ impl Running {
             Default::default()
         };
         self.renderer.set_overlay(&vertices, &indices);
+    }
+
+    /// Starts the ready-made script `id` from where the player stands. Nothing starts while
+    /// a replay runs (it supplies every action itself), while another script is playing, or
+    /// when the pack cannot pay for the whole script; the panel greys such rows.
+    fn start_script(&mut self, id: ScriptId) {
+        if self.replay.is_some() || self.script.is_some() {
+            return;
+        }
+        let Some(def) = library::get(id) else {
+            return;
+        };
+        if self.inventory.count_of(ItemId::FUEL) < def.fuel_cost() {
+            return;
+        }
+        let feet = self.player.position().floor().as_ivec3();
+        let origin = WorldPos {
+            x: feet.x,
+            y: feet.y,
+            z: feet.z,
+        };
+        self.script = ScriptRun::new(def.name, def.commands(origin));
+        self.script_note = None;
+        self.refresh_title();
+    }
+
+    /// Offers the running script's next command to the game on `tick`. The steps it takes
+    /// are not in the intent track yet, so a replay does not run scripts.
+    fn step_script(&mut self, tick: Tick) {
+        if self.replay.is_some() {
+            return;
+        }
+        let Some(script) = self.script.take() else {
+            return;
+        };
+        let name = script.name();
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let mut pace = Pace {
+            tick,
+            cooldowns: &mut self.cooldowns,
+        };
+        let step = script_step(
+            script,
+            Permissions::ALL,
+            Limits::standard(),
+            &mut pace,
+            &mut stage,
+            &mut self.log,
+            &mut self.next_mob,
+        );
+        match step {
+            Step::Waiting { run, .. } => self.script = Some(run),
+            Step::Ran { command, rest } => {
+                if let Command::SetBlock { pos, .. } = command {
+                    self.remesh_around(pos);
+                }
+                // A scripted edit is a new edit, so what was rewound can no longer come back.
+                self.redo.clear();
+                self.inventory_dirty = true;
+                self.script_note = rest.is_none().then(|| format!("script {name} done"));
+                self.script = rest;
+                self.refresh_title();
+            }
+            Step::Stopped { reason, .. } => {
+                self.script_note = Some(format!("script {name} stopped: {reason}"));
+                self.refresh_title();
+            }
+        }
     }
 
     /// Applies `events` to the world, player and inventory together, all or nothing, and logs
@@ -912,9 +1051,18 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind, Y redo)",
+                " | recipe {} (R next, C craft, E eat, Z rewind, Y redo, T scripts)",
                 recipe.name
             ));
+        }
+        if let Some(script) = &self.script {
+            title.push_str(&format!(
+                " | script {} ({} left)",
+                script.name(),
+                script.left()
+            ));
+        } else if let Some(note) = &self.script_note {
+            title.push_str(&format!(" | {note}"));
         }
         if self.replay.is_some() {
             title.push_str(" | replaying a saved run (keys are live when it ends)");
@@ -970,7 +1118,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, Some(running)) =
             (event, self.running.as_mut())
-            && !running.panel_open
+            && !running.pointer_free()
         {
             running.camera.look(dx as f32, dy as f32);
         }
@@ -991,6 +1139,10 @@ impl ApplicationHandler for App {
                 inventory_persist::save(Path::new(INVENTORY_PATH), &running.inventory)
         {
             self.failure.get_or_insert(AppError::SaveInventory(error));
+        }
+        // The meters change all the time, so they are always written; the file is eight bytes.
+        if let Err(error) = stats_persist::save(Path::new(STATS_PATH), running.stats) {
+            self.failure.get_or_insert(AppError::SaveStats(error));
         }
         if let Err(error) = running.intents.finish() {
             self.failure.get_or_insert(AppError::SaveIntents(error));

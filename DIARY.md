@@ -38,6 +38,7 @@
 | 2026-11-01 | Meters under events | Delta events with the points really moved; passive changes logged but skipped by rewind; respawn is a barrier | ✅ Confirmed |
 | 2026-11-02 | Mobs under events | A `Mobs` store with ids; spawn, remove and health-change events through the one door; position is not checked | ✅ Confirmed |
 | 2026-11-02 | Redo across restarts and script reads | Redo is its own action kind and the stack is rebuilt from the log; reads are a separate `ask` call that cannot change the game | ✅ Confirmed |
+| 2026-11-02 | Script costs, panel, saved meters and more reads | Fuel item plus per-kind waits; a script panel and a runner; a separate `stats.mcst`; two small fixed reads | ✅ Confirmed |
 
 ---
 
@@ -1163,6 +1164,54 @@ Four roadmap items were done in one cycle. `Y` forgot everything on a restart. S
 - `Zombie` boxes are checked with `mobs::service::blocked`, which uses the same collision test as the player.
 - Tests: spawn, refused spawn, cap, every read, ties in `Find`, the radius limit, read permission and limit, and a property test that queries never change the game or the log. The scripted-session property test now spawns mobs and checks they replay and undo too.
 - The window was not run by the assistant. Try it by breaking blocks, pressing `Z` twice, quitting and reopening, then `Y`; and by breaking a block, walking away until its chunk unloads, coming back far enough to see it gone from view and pressing `Z`.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Script Costs, Script Panel, Saved Meters and More Reads
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Four roadmap items were done in one cycle. Script commands were free apart from a cap of eight per tick, nothing in the window ran a script, health and hunger started full on every launch (so a redo of a meal after a restart was refused), and scripts could not read which way the player faced or where a mob stood.
+
+#### Decision & Rationale
+**Cost and cooldown.** Three options were compared: A, cooldowns only; B, a new energy meter; C, a fuel item spent from the pack. C was chosen.
+- Spending fuel is a set of slot events, which rewind and replay already understand, so it needed no new meter and no new log format. It is also the cost that "rewind costs fuel" can share later.
+- The fuel goes first and the command is worked out on what is left, so a grant that lands in the slot the fuel came out of still has slot events that match the state. All of it applies or none.
+- Costs are teleport 2, give 4, set block 1, spawn 5 fuel, with waits of 2 s, 5 s, 0.2 s and 10 s. Commands of one kind share a wait, so varying the target does not dodge it. A refused command burns nothing and starts no wait. The check order is permission, wait, fuel, then the command's own checks.
+- Each accepted command is logged as its own edit, fuel included. Before this change `run` pushed events with no action end, so the next craft would have absorbed them.
+
+**Scripts in the window.** Three options were compared: A, demo scripts on keys; B, a text file; C, a clickable panel. C was chosen.
+- It follows the roadmap's blocks-first, click-first direction, reuses the crafting panel's layout and drawing, and is the base quick-hacks will grow from.
+- Because commands of one kind must wait for each other, a script of three builds cannot land on one tick. A `ScriptRun` holds the commands still to do and offers the next one each tick: a command that is only cooling down is waited for, and any other refusal ends the script, since later steps usually rest on the failed one. A run is never empty by construction.
+- Ready-made scripts are steps relative to where the player stands when the script starts.
+
+**Saved meters.** Three options were compared: A, a separate meters file; B, one combined player file; C, the meters inside the event log. A was chosen. It is the smallest change and each feature keeps its own data. B is the better fit once the inventory-replay follow-up is done, because one snapshot of the player would then be atomic.
+
+**More reads.** Three options were compared: A, `Facing` and `NearestMob`; B, those plus a list of mobs; C, an aim read. A was chosen. With one mob kind and at most eight alive, the nearest mob covers most uses. The aim read belongs with quick-hacks.
+
+**Trade-offs accepted:**
+- Rewinding a scripted command gives its fuel back, so `Z` is a free refund until rewind has a price of its own.
+- Scripts are not recorded in intent tracks, so nothing runs during a replay and a replay of a run that used scripts drifts from it.
+- Cooldowns are in memory, so a restart clears them.
+- The meters file keeps health and hunger but not the clock that times the next drain, so that starts a full period over. A redo of a meal can still be refused if hunger differs.
+- Nothing calls `ask` from the window yet, so the new reads are tested but not played.
+- Undoing a scripted teleport is refused once the player has walked, since walking is not an event.
+
+#### Implementation Notes
+- `Cooldowns` is keyed by permission, which maps one-to-one onto the four command kinds. `run` takes a `Pace` holding the tick and the cooldowns, to stay under clippy's argument limit.
+- `ui::layout::arrange` is the shared layout for both panels. `panel` and its types are unchanged; the script panel has its own `ScriptRow` and `ScriptPanel`.
+- The stats file is `MCST`, version 1: health and hunger, one byte each, written through a sibling file and a rename like the inventory. `Stats::with_meters` brings them back.
+- `Facing::from_view` picks the axis the view points most along, ties to x then y then z, and returns `None` for a zero or non-finite view. `ask` takes the facing as an argument because the camera is not in the game state.
+- Tests: property tests that fuel burned equals the cost of what ran, that a script is its steps shifted by the origin, that waits count down and stay per kind, that meters round-trip, and that the facing is the best-aligned axis; unit tests for no fuel, refused commands, a grant into the fuel's slot, and the panel's rows. The log replay and exact-undo property test now includes fuel.
+- The window was not run by the assistant. Try it by crafting fuel (`Tab`, click fuel), pressing `T`, starting "tower" and watching three blocks appear beside you; by letting the pack run low and seeing the rows grey out; and by eating, quitting and reopening to see the meters kept.
 
 #### Review / Update Log
 

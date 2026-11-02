@@ -4,6 +4,10 @@
 //! logged, in that order, so the log never holds an event the game refused. A denied command
 //! changes nothing and logs nothing.
 //!
+//! An accepted command also burns fuel from the pack, as slot events in the same all-or-nothing
+//! batch as the command's own events, and starts a wait before its kind may run again. A denied
+//! command costs no fuel and starts no wait.
+//!
 //! A [`Query`] only reads. [`ask`] takes the stage by shared reference, so it cannot change the
 //! game, and it logs nothing.
 
@@ -11,15 +15,17 @@ use glam::Vec3;
 
 use crate::blocks::registry as blocks;
 use crate::events::apply::{Stage, StageError, apply_all, slot_events};
-use crate::events::log::EventLog;
-use crate::inventory::model::UnknownItem;
+use crate::events::log::{ActionKind, EventLog};
+use crate::events::rewind::log_action;
+use crate::inventory::model::{Inventory, NotEnough, UnknownItem};
 use crate::items::registry::{self as items, ItemId};
 use crate::mobs::model::{MobError, Zombie};
 use crate::mobs::service as mobs;
 use crate::player::model::Player;
 use crate::player::service::collides;
 use crate::scripting::model::{
-    Answer, Command, Denied, FIND_RADIUS, Limits, MAX_MOBS, Permission, Permissions, Query,
+    Answer, Command, Denied, FIND_RADIUS, Facing, Limits, MAX_MOBS, Pace, Permission, Permissions,
+    Query,
 };
 use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::voxel::{BlockId, WorldPos};
@@ -29,12 +35,16 @@ use crate::shared::voxel::{BlockId, WorldPos};
 /// Only the first [`Limits::max_effects`] commands are tried; the rest are
 /// [`Denied::OverLimit`]. Denied commands count toward that limit.
 ///
+/// `pace` says which tick this is and holds the waits; a command whose kind is still cooling
+/// down is [`Denied::CoolingDown`], and one the pack cannot pay for is [`Denied::NoFuel`].
+///
 /// `next_mob` is the id the next spawned mob gets. It moves on only when a spawn is accepted,
 /// so ids are never reused.
 pub fn run(
     commands: &[Command],
     granted: Permissions,
     limits: Limits,
+    pace: &mut Pace<'_>,
     stage: &mut Stage<'_>,
     log: &mut EventLog,
     next_mob: &mut MobId,
@@ -47,7 +57,7 @@ pub fn run(
             let result = if index >= allowed {
                 Err(Denied::OverLimit)
             } else {
-                run_one(command, granted, limits, stage, log, next_mob)
+                run_one(command, granted, limits, pace, stage, log, next_mob)
             };
             match &result {
                 Ok(()) => tracing::debug!(?command, logged = log.len(), "script command applied"),
@@ -62,6 +72,7 @@ fn run_one(
     command: Command,
     granted: Permissions,
     limits: Limits,
+    pace: &mut Pace<'_>,
     stage: &mut Stage<'_>,
     log: &mut EventLog,
     next_mob: &mut MobId,
@@ -70,21 +81,35 @@ fn run_one(
     if !granted.allows(needed) {
         return Err(Denied::NoPermission(needed));
     }
-    let events = match command {
-        Command::Teleport { to } => vec![move_event(to, limits, stage)?],
-        Command::GiveItem { item, count } => give_events(item, count, stage)?,
-        Command::SetBlock { pos, block } => vec![set_event(pos, block, limits, stage)?],
-        Command::SpawnMob { at } => vec![spawn_event(at, *next_mob, limits, stage)?],
-    };
+    let ticks_left = pace.cooldowns.wait_left(command, pace.tick);
+    if ticks_left > 0 {
+        return Err(Denied::CoolingDown { ticks_left });
+    }
+    // The fuel goes first and the command is worked out on what is left, so a grant that
+    // lands in the slot the fuel came out of still gets slot events that match the state.
+    let cost = command.fuel_cost();
+    let mut paid = stage.inventory.clone();
+    paid.take(ItemId::FUEL, u32::from(cost))
+        .map_err(|NotEnough { held, .. }| Denied::NoFuel { needed: cost, held })?;
+    let mut events = slot_events(stage.inventory, &paid);
+    match command {
+        Command::Teleport { to } => events.push(move_event(to, limits, stage)?),
+        Command::GiveItem { item, count } => events.extend(give_events(item, count, &paid)?),
+        Command::SetBlock { pos, block } => events.push(set_event(pos, block, limits, stage)?),
+        Command::SpawnMob { at } => events.push(spawn_event(at, *next_mob, limits, stage)?),
+    }
     apply_all(stage, &events)?;
-    events.into_iter().for_each(|event| log.push(event));
+    // One accepted command is one edit, with the fuel it burned, so `Z` takes it back whole.
+    log_action(log, &events, ActionKind::Edit);
+    pace.cooldowns.start(command, pace.tick);
     if matches!(command, Command::SpawnMob { .. }) {
         *next_mob = next_mob.next();
     }
     Ok(())
 }
 
-/// Answers each of `queries` in order, or says why it could not.
+/// Answers each of `queries` in order, or says why it could not. `facing` is the direction the
+/// player looks along, which the game works out from the camera.
 ///
 /// Reading needs [`Permission::Look`]. Only the first [`Limits::max_effects`] queries are
 /// tried; the rest are [`Denied::OverLimit`], and denied queries count toward that limit, so
@@ -94,6 +119,7 @@ pub fn ask(
     queries: &[Query],
     granted: Permissions,
     limits: Limits,
+    facing: Facing,
     stage: &Stage<'_>,
 ) -> Vec<Result<Answer, Denied>> {
     let allowed = usize::from(limits.max_effects());
@@ -104,7 +130,7 @@ pub fn ask(
             let result = if index >= allowed {
                 Err(Denied::OverLimit)
             } else {
-                ask_one(query, granted, limits, stage)
+                ask_one(query, granted, limits, facing, stage)
             };
             match &result {
                 Ok(answer) => tracing::debug!(?query, ?answer, "script query answered"),
@@ -119,6 +145,7 @@ fn ask_one(
     query: Query,
     granted: Permissions,
     limits: Limits,
+    facing: Facing,
     stage: &Stage<'_>,
 ) -> Result<Answer, Denied> {
     if !granted.allows(Permission::Look) {
@@ -154,7 +181,34 @@ fn ask_one(
                 .count();
             Ok(Answer::Number(u32::try_from(near).unwrap_or(u32::MAX)))
         }
+        Query::Facing => Ok(Answer::Direction(facing)),
+        Query::NearestMob => Ok(Answer::Found(nearest_mob(limits, stage))),
     }
+}
+
+/// The block cell of the mob closest to the player among those within range. Ties go to the
+/// lowest mob id, so the same world always gives the same answer.
+fn nearest_mob(limits: Limits, stage: &Stage<'_>) -> Option<WorldPos> {
+    let here = stage.player.position();
+    stage
+        .mobs
+        .iter()
+        .filter(|(_, mob)| within_range(here, mob.position(), limits))
+        .min_by(|(a_id, a), (b_id, b)| {
+            let (a_dist, b_dist) = (
+                here.distance_squared(a.position()),
+                here.distance_squared(b.position()),
+            );
+            a_dist.total_cmp(&b_dist).then(a_id.cmp(b_id))
+        })
+        .map(|(_, mob)| {
+            let cell = mob.position().floor().as_ivec3();
+            WorldPos {
+                x: cell.x,
+                y: cell.y,
+                z: cell.z,
+            }
+        })
 }
 
 /// The block of kind `block` closest to the player, searching a cube of [`FIND_RADIUS`] (or
@@ -247,9 +301,8 @@ fn spawn_event(
 }
 
 /// One slot event for each slot the grant changes, so undo puts every stack back where it was.
-fn give_events(item: ItemId, count: u16, stage: &Stage<'_>) -> Result<Vec<Event>, Denied> {
-    let room = stage
-        .inventory
+fn give_events(item: ItemId, count: u16, inventory: &Inventory) -> Result<Vec<Event>, Denied> {
+    let room = inventory
         .room_for(item)
         .ok_or(Denied::UnknownItem(item.0))?;
     if count == 0 {
@@ -258,11 +311,11 @@ fn give_events(item: ItemId, count: u16, stage: &Stage<'_>) -> Result<Vec<Event>
     if room < u32::from(count) {
         return Err(Denied::NoRoom { room });
     }
-    let mut after = stage.inventory.clone();
+    let mut after = inventory.clone();
     after
         .add(item, u32::from(count))
         .map_err(|UnknownItem(raw)| Denied::UnknownItem(raw))?;
-    Ok(slot_events(stage.inventory, &after))
+    Ok(slot_events(inventory, &after))
 }
 
 fn set_event(
@@ -296,7 +349,8 @@ mod tests {
     use crate::events::apply::apply;
     use crate::inventory::model::Inventory;
     use crate::mobs::model::Mobs;
-    use crate::scripting::model::MAX_EFFECTS;
+    use crate::scripting::model::{Cooldowns, MAX_EFFECTS};
+    use crate::shared::clock::Tick;
     use crate::survival::model::Stats;
     use crate::world::model::World;
 
@@ -315,11 +369,21 @@ mod tests {
         mobs: Mobs,
         next_mob: MobId,
         log: EventLog,
+        tick: Tick,
+        cooldowns: Cooldowns,
     }
 
     impl State {
-        /// A stone floor whose top face is at y = 1, with the player standing on it.
+        /// A stone floor whose top face is at y = 1, with the player standing on it and enough
+        /// fuel in the pack for any run these tests make.
         fn new() -> Self {
+            let mut state = Self::broke();
+            state.inventory.add(ItemId::FUEL, FUEL_HELD).unwrap();
+            state
+        }
+
+        /// The same floor, with an empty pack.
+        fn broke() -> Self {
             let mut world = World::default();
             for x in -40..40 {
                 for z in -40..40 {
@@ -340,6 +404,8 @@ mod tests {
                 mobs: Mobs::default(),
                 next_mob: MobId::FIRST,
                 log: EventLog::new(),
+                tick: Tick(0),
+                cooldowns: Cooldowns::default(),
             }
         }
 
@@ -355,13 +421,30 @@ mod tests {
                 stats: &mut stats,
                 mobs: &mut mobs,
             };
-            ask(queries, granted, Limits::standard(), &stage)
+            ask(queries, granted, Limits::standard(), Facing::East, &stage)
         }
 
+        /// Runs each command alone, long after the one before, so no wait is ever in the way.
         fn run(&mut self, commands: &[Command], granted: Permissions) -> Vec<Result<(), Denied>> {
-            self.run_with(commands, granted, Limits::standard())
+            self.run_spaced_with(commands, granted, Limits::standard())
         }
 
+        fn run_spaced_with(
+            &mut self,
+            commands: &[Command],
+            granted: Permissions,
+            limits: Limits,
+        ) -> Vec<Result<(), Denied>> {
+            commands
+                .iter()
+                .flat_map(|command| {
+                    self.tick = Tick(self.tick.0 + QUIET);
+                    self.run_with(std::slice::from_ref(command), granted, limits)
+                })
+                .collect()
+        }
+
+        /// Runs all of `commands` on the current tick.
         fn run_with(
             &mut self,
             commands: &[Command],
@@ -375,15 +458,30 @@ mod tests {
                 stats: &mut self.stats,
                 mobs: &mut self.mobs,
             };
+            let mut pace = Pace {
+                tick: self.tick,
+                cooldowns: &mut self.cooldowns,
+            };
             run(
                 commands,
                 granted,
                 limits,
+                &mut pace,
                 &mut stage,
                 &mut self.log,
                 &mut self.next_mob,
             )
         }
+    }
+
+    /// Fuel the test pack starts with: more than any run here burns.
+    const FUEL_HELD: u32 = 640;
+
+    /// Ticks between spaced runs, longer than any cooldown.
+    const QUIET: u64 = 1_000;
+
+    fn fuel_of(state: &State) -> u32 {
+        state.inventory.count_of(ItemId::FUEL)
     }
 
     fn cell(x: i32, y: i32, z: i32) -> WorldPos {
@@ -404,11 +502,9 @@ mod tests {
         assert_eq!(results, [Ok(())]);
         assert_eq!(state.player.position(), Vec3::new(5.5, 1.0, -2.5));
         let to = Spot::from_vec3(state.player.position());
-        assert!(
-            state
-                .log
-                .iter()
-                .eq([&Event::PlayerMoved { old: from, new: to }])
+        assert_eq!(
+            state.log.iter().last(),
+            Some(&Event::PlayerMoved { old: from, new: to })
         );
     }
 
@@ -474,6 +570,7 @@ mod tests {
     fn without_a_permission_a_command_is_refused_and_changes_nothing() {
         let mut state = State::new();
         let (world, player) = (state.world.clone(), state.player);
+        let inventory = state.inventory.clone();
 
         let results = state.run(
             &[
@@ -496,7 +593,7 @@ mod tests {
             ]
         );
         assert_eq!((state.world, state.player), (world, player));
-        assert!(state.inventory.is_empty());
+        assert_eq!(state.inventory, inventory);
         assert!(state.log.is_empty());
     }
 
@@ -544,7 +641,8 @@ mod tests {
             ]
         );
         assert_eq!(state.inventory.count_of(ItemId::STONE), 1);
-        assert_eq!(state.log.len(), 1);
+        // The grant's own slot event, and one for the fuel it burned.
+        assert_eq!(state.log.len(), 2);
     }
 
     #[test]
@@ -552,11 +650,12 @@ mod tests {
         let mut state = State::new();
         let room = state.inventory.room_for(ItemId::DIRT).unwrap();
         let too_many = u16::try_from(room + 1).unwrap();
+        let inventory = state.inventory.clone();
 
         let results = state.run(&[give(ItemId::DIRT, too_many)], EVERYTHING);
 
         assert!(matches!(results[..], [Err(Denied::NoRoom { .. })]));
-        assert!(state.inventory.is_empty());
+        assert_eq!(state.inventory, inventory);
         assert!(state.log.is_empty());
     }
 
@@ -608,7 +707,12 @@ mod tests {
         assert_eq!(first.position(), Vec3::new(5.5, 1.0, 5.5));
         assert!(state.mobs.get(MobId::FIRST.next()).is_some());
         assert_eq!(state.next_mob, MobId::FIRST.next().next());
-        assert_eq!(state.log.len(), 2);
+        let spawned = state
+            .log
+            .iter()
+            .filter(|event| matches!(event, Event::MobSpawned { .. }))
+            .count();
+        assert_eq!(spawned, 2);
     }
 
     #[test]
@@ -631,7 +735,7 @@ mod tests {
         let limits = Limits::try_new(32.0, u8::MAX).unwrap();
         let commands: Vec<_> = (0..=MAX_MOBS as i32).map(|x| spawn(x, 1, 5)).collect();
 
-        let results = state.run_with(&commands, EVERYTHING, limits);
+        let results = state.run_spaced_with(&commands, EVERYTHING, limits);
 
         assert!(results[..MAX_MOBS].iter().all(Result::is_ok));
         assert_eq!(results[MAX_MOBS], Err(Denied::TooManyMobs));
@@ -757,6 +861,54 @@ mod tests {
     }
 
     #[test]
+    fn a_facing_read_gives_the_direction_the_game_passed_in() {
+        let state = State::new();
+
+        let answers = state.ask(&[Query::Facing], EVERYTHING);
+
+        assert_eq!(answers, [Ok(Answer::Direction(Facing::East))]);
+    }
+
+    #[test]
+    fn the_nearest_mob_is_the_closest_one_in_range_with_ties_to_the_lowest_id() {
+        let mut state = State::new();
+        let put = |state: &mut State, id: u32, at: Vec3| {
+            state.mobs.spawn(MobId(id), at, 10).unwrap();
+        };
+        // The player is at (0.5, 1, 0.5). Ids 1 and 2 are equally far, so 1 wins; 3 is
+        // farther; 5 is beyond the range and must not count. Id 4, added later, is the closest.
+        put(&mut state, 1, Vec3::new(6.5, 1.0, 0.5));
+        put(&mut state, 2, Vec3::new(-5.5, 1.0, 0.5));
+        put(&mut state, 3, Vec3::new(20.5, 1.0, 0.5));
+        put(&mut state, 5, Vec3::new(60.5, 1.0, 0.5));
+
+        let answers = state.ask(&[Query::NearestMob], EVERYTHING);
+        assert_eq!(answers, [Ok(Answer::Found(Some(cell(6, 1, 0))))]);
+
+        put(&mut state, 4, Vec3::new(2.5, 1.0, 3.5));
+        let answers = state.ask(&[Query::NearestMob], EVERYTHING);
+        assert_eq!(answers, [Ok(Answer::Found(Some(cell(2, 1, 3))))]);
+    }
+
+    #[test]
+    fn with_no_mob_in_range_there_is_no_nearest_mob() {
+        let mut state = State::new();
+        assert_eq!(
+            state.ask(&[Query::NearestMob], EVERYTHING),
+            [Ok(Answer::Found(None))]
+        );
+
+        state
+            .mobs
+            .spawn(MobId(1), Vec3::new(60.5, 1.0, 0.5), 10)
+            .unwrap();
+        assert_eq!(
+            state.ask(&[Query::NearestMob], EVERYTHING),
+            [Ok(Answer::Found(None))]
+        );
+    }
+
+    #[test]
     fn reading_needs_the_look_permission_and_counts_against_the_limit() {
         let state = State::new();
         let queries = [Query::Health; 3];
@@ -779,9 +931,131 @@ mod tests {
             stats: &mut stats,
             mobs: &mut mobs,
         };
-        let answers = ask(&queries, EVERYTHING, limits, &stage);
+        let answers = ask(&queries, EVERYTHING, limits, Facing::East, &stage);
         assert_eq!(answers[2], Err(Denied::OverLimit));
         assert!(answers[..2].iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn an_accepted_command_burns_its_fuel_and_undo_gives_it_back() {
+        let mut state = State::new();
+        let build = Command::SetBlock {
+            pos: cell(2, 1, 2),
+            block: BlockId::DIRT,
+        };
+        let start = state.inventory.clone();
+
+        let results = state.run(&[build], EVERYTHING);
+
+        assert_eq!(results, [Ok(())]);
+        assert_eq!(fuel_of(&state), FUEL_HELD - u32::from(build.fuel_cost()));
+        let events: Vec<_> = state.log.iter().copied().collect();
+        assert_eq!(events.len(), 2);
+        for event in events.iter().rev() {
+            let mut stage = Stage {
+                world: &mut state.world,
+                player: &mut state.player,
+                inventory: &mut state.inventory,
+                stats: &mut state.stats,
+                mobs: &mut state.mobs,
+            };
+            assert_eq!(apply(&mut stage, &event.inverse()), Ok(()));
+        }
+        assert_eq!(state.inventory, start);
+        assert_eq!(state.world.block_at(cell(2, 1, 2)), BlockId::AIR);
+    }
+
+    #[test]
+    fn a_pack_that_cannot_pay_gets_nothing_done_and_burns_nothing() {
+        let mut state = State::broke();
+        state.inventory.add(ItemId::FUEL, 3).unwrap();
+        let (world, mob_id) = (state.world.clone(), state.next_mob);
+
+        let results = state.run(&[spawn(5, 1, 5)], EVERYTHING);
+
+        assert_eq!(results, [Err(Denied::NoFuel { needed: 5, held: 3 })]);
+        assert_eq!(fuel_of(&state), 3);
+        assert_eq!((&state.world, state.next_mob), (&world, mob_id));
+        assert!(state.mobs.is_empty());
+        assert!(state.log.is_empty());
+    }
+
+    #[test]
+    fn a_refused_command_burns_no_fuel_and_starts_no_wait() {
+        let mut state = State::new();
+        let far = Command::SetBlock {
+            pos: cell(33, 1, 0),
+            block: BlockId::DIRT,
+        };
+        let near = Command::SetBlock {
+            pos: cell(1, 1, 0),
+            block: BlockId::DIRT,
+        };
+
+        let results = state.run_with(&[far, near], EVERYTHING, Limits::standard());
+
+        assert_eq!(results, [Err(Denied::OutOfRange), Ok(())]);
+        assert_eq!(fuel_of(&state), FUEL_HELD - u32::from(near.fuel_cost()));
+    }
+
+    #[test]
+    fn a_kind_of_command_waits_but_other_kinds_do_not() {
+        let mut state = State::new();
+        let build = |x| Command::SetBlock {
+            pos: cell(x, 1, 3),
+            block: BlockId::DIRT,
+        };
+        let wait = build(0).cooldown();
+
+        let together = state.run_with(
+            &[build(1), build(2), Command::Teleport { to: cell(5, 1, 5) }],
+            EVERYTHING,
+            Limits::standard(),
+        );
+        assert_eq!(
+            together,
+            [
+                Ok(()),
+                Err(Denied::CoolingDown { ticks_left: wait }),
+                Ok(())
+            ]
+        );
+        assert_eq!(state.world.block_at(cell(2, 1, 3)), BlockId::AIR);
+
+        state.tick = Tick(state.tick.0 + wait - 1);
+        let almost = state.run_with(&[build(2)], EVERYTHING, Limits::standard());
+        assert_eq!(almost, [Err(Denied::CoolingDown { ticks_left: 1 })]);
+
+        state.tick = Tick(state.tick.0 + 1);
+        let ready = state.run_with(&[build(2)], EVERYTHING, Limits::standard());
+        assert_eq!(ready, [Ok(())]);
+    }
+
+    #[test]
+    fn a_command_cooling_down_burns_no_fuel() {
+        let mut state = State::new();
+        let build = Command::SetBlock {
+            pos: cell(1, 1, 1),
+            block: BlockId::DIRT,
+        };
+
+        state.run_with(&[build, build], EVERYTHING, Limits::standard());
+
+        assert_eq!(fuel_of(&state), FUEL_HELD - u32::from(build.fuel_cost()));
+    }
+
+    #[test]
+    fn a_grant_can_land_in_the_slot_the_fuel_came_out_of() {
+        let mut state = State::broke();
+        // Exactly the fuel a grant costs, so paying empties the only slot the grant could use.
+        let cost = give(ItemId::STONE, 1).fuel_cost();
+        state.inventory.add(ItemId::FUEL, u32::from(cost)).unwrap();
+
+        let results = state.run(&[give(ItemId::STONE, 1)], EVERYTHING);
+
+        assert_eq!(results, [Ok(())]);
+        assert_eq!(state.inventory.count_of(ItemId::STONE), 1);
+        assert_eq!(fuel_of(&state), 0);
     }
 
     proptest! {
@@ -856,7 +1130,7 @@ mod tests {
         prop_oneof![
             (-45i32..45, -1i32..4, -45i32..45)
                 .prop_map(|(x, y, z)| Command::Teleport { to: cell(x, y, z) }),
-            (0u16..8, 0u16..120).prop_map(|(item, count)| give(ItemId(item), count)),
+            (0u16..7, 0u16..120).prop_map(|(item, count)| give(ItemId(item), count)),
             ((-45i32..45, -1i32..4, -45i32..45), 0u16..6).prop_map(|((x, y, z), id)| {
                 Command::SetBlock {
                     pos: cell(x, y, z),
@@ -877,6 +1151,8 @@ mod tests {
             Just(Query::Health),
             Just(Query::Hunger),
             Just(Query::MobsNear),
+            Just(Query::Facing),
+            Just(Query::NearestMob),
         ]
     }
 
@@ -886,16 +1162,26 @@ mod tests {
             ticks in prop::collection::vec(prop::collection::vec(command(), 0..14), 0..6),
         ) {
             let mut live = State::new();
-            let (world, player) = (live.world.clone(), live.player);
+            let (world, player, inventory) = (live.world.clone(), live.player, live.inventory.clone());
             let mut accepted = 0;
+            let mut burned = 0;
             for commands in &ticks {
-                let results = live.run(commands, EVERYTHING);
+                let results = live.run_with(commands, EVERYTHING, Limits::standard());
                 prop_assert_eq!(results.len(), commands.len());
                 prop_assert!(
                     results.iter().filter(|r| r.is_ok()).count() <= usize::from(MAX_EFFECTS)
                 );
                 accepted += results.iter().filter(|r| r.is_ok()).count();
+                burned += commands
+                    .iter()
+                    .zip(&results)
+                    .filter(|(_, result)| result.is_ok())
+                    .map(|(command, _)| u32::from(command.fuel_cost()))
+                    .sum::<u32>();
+                // Some waits are still running at the next batch, and some are over.
+                live.tick = Tick(live.tick.0 + 50);
             }
+            prop_assert_eq!(fuel_of(&live), FUEL_HELD - burned);
             // A grant that spans several slots logs one event per slot.
             prop_assert!(live.log.len() >= accepted);
             prop_assert_eq!(live.log.is_empty(), accepted == 0);
@@ -929,7 +1215,7 @@ mod tests {
             }
             prop_assert_eq!(&live.world, &world);
             prop_assert_eq!(live.player, player);
-            prop_assert!(live.inventory.is_empty());
+            prop_assert_eq!(&live.inventory, &inventory);
             prop_assert!(live.mobs.is_empty());
         }
     }

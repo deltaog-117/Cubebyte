@@ -7,11 +7,14 @@ use std::fmt::Write;
 use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
-use crate::items::registry as items;
+use crate::items::registry::{self as items, ItemId};
+use crate::scripting::library::{self, ScriptId};
 use crate::ui::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
 
 const TITLE: &str = "crafting";
 const HINT: &str = "click to craft - tab closes";
+const SCRIPT_TITLE: &str = "scripts";
+const SCRIPT_HINT: &str = "click to run - t closes";
 
 /// Window height in pixels per step of text scale: 720 high gives 3 pixels per font pixel.
 const PIXELS_PER_SCALE: u32 = 200;
@@ -94,15 +97,23 @@ fn describe(id: RecipeId) -> Option<String> {
     Some(text)
 }
 
-/// Lays the panel out centred in a window of `size` pixels, one row per recipe.
-pub fn panel((width, height): (u32, u32), inventory: &Inventory) -> Panel {
-    let described: Vec<_> = registry::ids()
-        .filter_map(|id| Some((id, describe(id)?)))
-        .collect();
-    let widest = described
+/// A panel's frame and where each of its lines of text sits, before the rows know what they
+/// stand for.
+struct Arranged {
+    scale: u32,
+    rect: Rect,
+    title: Label,
+    hint: Label,
+    rows: Vec<(Rect, Label)>,
+}
+
+/// Lays a titled panel with one row per entry of `texts` out centred in a window of `size`
+/// pixels.
+fn arrange((width, height): (u32, u32), title: &str, hint: &str, texts: &[String]) -> Arranged {
+    let widest = texts
         .iter()
-        .map(|(_, text)| text.chars().count())
-        .chain([TITLE, HINT].map(|text| text.chars().count()))
+        .map(|text| text.chars().count())
+        .chain([title, hint].map(|text| text.chars().count()))
         .max()
         .unwrap_or(0);
     // Big windows get big text, but never so big that the widest line leaves the window.
@@ -123,24 +134,22 @@ pub fn panel((width, height): (u32, u32), inventory: &Inventory) -> Panel {
     let mut y = margin;
     let title_y = y;
     y += text_height + margin;
-    let mut rows = Vec::with_capacity(described.len());
-    for (recipe, text) in described {
+    let mut rows = Vec::with_capacity(texts.len());
+    for text in texts {
         let rect = Rect {
             x: margin,
             y,
             width: row_width,
             height: row_height,
         };
-        rows.push(Row {
-            recipe,
+        rows.push((
             rect,
-            label: Label {
+            Label {
                 x: rect.x + row_pad,
                 y: rect.y + row_pad,
-                text,
+                text: text.clone(),
             },
-            affordable: can_craft(inventory, recipe),
-        });
+        ));
         y += row_height + gap;
     }
     let hint_y = y;
@@ -158,11 +167,7 @@ pub fn panel((width, height): (u32, u32), inventory: &Inventory) -> Panel {
         y: y + origin_y,
         text: text.to_string(),
     };
-    for row in &mut rows {
-        row.rect = moved(row.rect);
-        row.label = label(row.label.x, row.label.y, &row.label.text);
-    }
-    Panel {
+    Arranged {
         scale,
         rect: Rect {
             x: origin_x,
@@ -170,8 +175,103 @@ pub fn panel((width, height): (u32, u32), inventory: &Inventory) -> Panel {
             width: panel_width,
             height: panel_height,
         },
-        title: label(margin, title_y, TITLE),
-        hint: label(margin, hint_y, HINT),
+        title: label(margin, title_y, title),
+        hint: label(margin, hint_y, hint),
+        rows: rows
+            .into_iter()
+            .map(|(rect, text)| (moved(rect), label(text.x, text.y, &text.text)))
+            .collect(),
+    }
+}
+
+/// Lays the panel out centred in a window of `size` pixels, one row per recipe.
+pub fn panel(size: (u32, u32), inventory: &Inventory) -> Panel {
+    let described: Vec<_> = registry::ids()
+        .filter_map(|id| Some((id, describe(id)?)))
+        .collect();
+    let texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
+    let arranged = arrange(size, TITLE, HINT, &texts);
+    let rows = described
+        .into_iter()
+        .zip(arranged.rows)
+        .map(|((recipe, _), (rect, label))| Row {
+            recipe,
+            rect,
+            label,
+            affordable: can_craft(inventory, recipe),
+        })
+        .collect();
+    Panel {
+        scale: arranged.scale,
+        rect: arranged.rect,
+        title: arranged.title,
+        hint: arranged.hint,
+        rows,
+    }
+}
+
+/// One clickable ready-made script.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptRow {
+    pub script: ScriptId,
+    pub rect: Rect,
+    /// Where the row's text goes, inside `rect`.
+    pub label: Label,
+    /// Whether a click would start it right now.
+    pub startable: bool,
+}
+
+/// The script panel for one window size and one inventory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptPanel {
+    /// Screen pixels per font pixel.
+    pub scale: u32,
+    pub rect: Rect,
+    pub title: Label,
+    pub hint: Label,
+    pub rows: Vec<ScriptRow>,
+}
+
+impl ScriptPanel {
+    /// The script whose row is under the point, if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<ScriptId> {
+        self.rows
+            .iter()
+            .find(|row| row.rect.contains(x, y))
+            .map(|row| row.script)
+    }
+}
+
+/// "tower - 3 fuel".
+fn describe_script(id: ScriptId) -> Option<String> {
+    let script = library::get(id)?;
+    Some(format!("{} - {} fuel", script.name, script.fuel_cost()))
+}
+
+/// Lays the script panel out centred in a window of `size` pixels, one row per script. A row
+/// can be started when the pack holds the fuel for the whole script and none is running.
+pub fn script_panel(size: (u32, u32), inventory: &Inventory, running: bool) -> ScriptPanel {
+    let described: Vec<_> = library::ids()
+        .filter_map(|id| Some((id, describe_script(id)?)))
+        .collect();
+    let texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
+    let arranged = arrange(size, SCRIPT_TITLE, SCRIPT_HINT, &texts);
+    let fuel = inventory.count_of(ItemId::FUEL);
+    let rows = described
+        .into_iter()
+        .zip(arranged.rows)
+        .map(|((script, _), (rect, label))| ScriptRow {
+            script,
+            rect,
+            label,
+            startable: !running && library::get(script).is_some_and(|s| fuel >= s.fuel_cost()),
+        })
+        .collect();
+    ScriptPanel {
+        scale: arranged.scale,
+        rect: arranged.rect,
+        title: arranged.title,
+        hint: arranged.hint,
         rows,
     }
 }
@@ -215,7 +315,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_script_row_reads_as_its_name_and_fuel_cost() {
+        assert_eq!(
+            describe_script(ScriptId(0)).as_deref(),
+            Some("tower - 3 fuel")
+        );
+        assert_eq!(describe_script(ScriptId(200)), None);
+    }
+
+    #[test]
+    fn a_script_can_start_only_with_its_fuel_and_nothing_running() {
+        let mut inventory = Inventory::default();
+        inventory.add(ItemId::FUEL, 3).unwrap();
+        let startable = |running| {
+            script_panel((1280, 720), &inventory, running)
+                .rows
+                .iter()
+                .map(|row| (library::get(row.script).map(|s| s.name), row.startable))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(startable(false).contains(&(Some("tower"), true)));
+        assert!(startable(false).contains(&(Some("summon"), false)));
+        assert!(startable(true).iter().all(|&(_, ok)| !ok));
+    }
+
     proptest! {
+        // Script rows fit, never overlap, and a click in a row finds its script.
+        #[test]
+        fn script_rows_fit_and_clicks_find_them(
+            size in size(), fx in 0.0f32..1.0, fy in 0.0f32..1.0,
+        ) {
+            let panel = script_panel(size, &Inventory::default(), false);
+            prop_assert_eq!(panel.rows.len(), library::ids().count());
+            let (width, height) = (size.0 as f32, size.1 as f32);
+            prop_assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);
+            prop_assert!(panel.rect.y >= 0.0 && panel.rect.y + panel.rect.height <= height);
+            for pair in panel.rows.windows(2) {
+                prop_assert!(pair[0].rect.y + pair[0].rect.height <= pair[1].rect.y);
+            }
+            for row in &panel.rows {
+                let (x, y) = (row.rect.x + fx * row.rect.width, row.rect.y + fy * row.rect.height);
+                prop_assert_eq!(panel.row_at(x, y), Some(row.script));
+            }
+            prop_assert_eq!(panel.row_at(-1.0, -1.0), None);
+        }
+
         // Every recipe has a row, rows sit inside the panel and the window, and never overlap.
         #[test]
         fn rows_fit_without_overlapping(size in size()) {

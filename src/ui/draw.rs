@@ -2,8 +2,9 @@
 
 use crate::crafting::registry::RecipeId;
 use crate::rendering::vertex::GpuVertex;
+use crate::scripting::library::ScriptId;
 use crate::ui::font::{GLYPH_WIDTH, glyph};
-use crate::ui::layout::{Label, Panel, Rect};
+use crate::ui::layout::{Label, Panel, Rect, ScriptPanel};
 
 const BACKDROP: [f32; 3] = [0.10, 0.10, 0.13];
 const ROW_READY: [f32; 3] = [0.18, 0.42, 0.24];
@@ -21,6 +22,27 @@ struct Quads {
 }
 
 impl Quads {
+    fn new(size: (u32, u32)) -> Self {
+        Self {
+            size: (size.0.max(1) as f32, size.1.max(1) as f32),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    /// Adds one clickable row: its background, brighter under the pointer and dull when it
+    /// cannot be used right now, and its text.
+    fn row(&mut self, rect: Rect, label: &Label, scale: u32, usable: bool, hovered: bool) {
+        let background = match (usable, hovered) {
+            (true, false) => ROW_READY,
+            (true, true) => ROW_READY_HOVER,
+            (false, false) => ROW_BLOCKED,
+            (false, true) => ROW_BLOCKED_HOVER,
+        };
+        self.rect(rect, background);
+        self.text(label, scale, if usable { TEXT } else { TEXT_BLOCKED });
+    }
+
     /// Adds a filled rectangle given in window pixels.
     fn rect(&mut self, rect: Rect, color: [f32; 3]) {
         let (width, height) = self.size;
@@ -71,23 +93,39 @@ pub fn overlay(
     size: (u32, u32),
     hovered: Option<RecipeId>,
 ) -> (Vec<GpuVertex>, Vec<u32>) {
-    let mut quads = Quads {
-        size: (size.0.max(1) as f32, size.1.max(1) as f32),
-        vertices: Vec::new(),
-        indices: Vec::new(),
-    };
+    let mut quads = Quads::new(size);
     quads.rect(panel.rect, BACKDROP);
     quads.text(&panel.title, panel.scale, TEXT);
     for row in &panel.rows {
-        let background = match (row.affordable, hovered == Some(row.recipe)) {
-            (true, false) => ROW_READY,
-            (true, true) => ROW_READY_HOVER,
-            (false, false) => ROW_BLOCKED,
-            (false, true) => ROW_BLOCKED_HOVER,
-        };
-        quads.rect(row.rect, background);
-        let color = if row.affordable { TEXT } else { TEXT_BLOCKED };
-        quads.text(&row.label, panel.scale, color);
+        quads.row(
+            row.rect,
+            &row.label,
+            panel.scale,
+            row.affordable,
+            hovered == Some(row.recipe),
+        );
+    }
+    quads.text(&panel.hint, panel.scale, TEXT_BLOCKED);
+    (quads.vertices, quads.indices)
+}
+
+/// [`overlay`] for the script panel; `hovered` is the script under the pointer.
+pub fn script_overlay(
+    panel: &ScriptPanel,
+    size: (u32, u32),
+    hovered: Option<ScriptId>,
+) -> (Vec<GpuVertex>, Vec<u32>) {
+    let mut quads = Quads::new(size);
+    quads.rect(panel.rect, BACKDROP);
+    quads.text(&panel.title, panel.scale, TEXT);
+    for row in &panel.rows {
+        quads.row(
+            row.rect,
+            &row.label,
+            panel.scale,
+            row.startable,
+            hovered == Some(row.script),
+        );
     }
     quads.text(&panel.hint, panel.scale, TEXT_BLOCKED);
     (quads.vertices, quads.indices)
@@ -97,7 +135,7 @@ pub fn overlay(
 mod tests {
     use super::*;
     use crate::inventory::model::Inventory;
-    use crate::ui::layout::panel;
+    use crate::ui::layout::{panel, script_panel};
     use proptest::prelude::*;
 
     #[test]
@@ -147,6 +185,23 @@ mod tests {
     }
 
     proptest! {
+        // The script overlay is as well formed as the crafting one.
+        #[test]
+        fn the_script_overlay_is_well_formed(
+            width in 320u32..4096,
+            height in 240u32..2160,
+            hover in prop::option::of(0u8..4),
+            running in any::<bool>(),
+        ) {
+            let panel = script_panel((width, height), &Inventory::default(), running);
+            let (vertices, indices) = script_overlay(&panel, (width, height), hover.map(ScriptId));
+            prop_assert!(!indices.is_empty() && indices.len() % 3 == 0);
+            prop_assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));
+            for vertex in &vertices {
+                prop_assert!(vertex.position[..2].iter().all(|c| (-1.0..=1.0).contains(c)));
+            }
+        }
+
         // Indices stay inside the vertex list, every vertex lands on screen, and colours are
         // displayable, wherever the pointer is.
         #[test]

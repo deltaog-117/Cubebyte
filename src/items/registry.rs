@@ -17,6 +17,7 @@ impl ItemId {
     pub const BREAD: Self = Self(4);
     pub const STEW: Self = Self(5);
     pub const SWORD: Self = Self(6);
+    pub const FUEL: Self = Self(7);
 }
 
 /// What the game knows about one item type.
@@ -34,7 +35,7 @@ pub struct ItemDef {
 }
 
 /// Indexed by `ItemId - 1`. The `ItemId` constants must match these positions.
-const ITEMS: [ItemDef; 6] = [
+const ITEMS: [ItemDef; 7] = [
     ItemDef {
         name: "stone",
         stack_limit: 64,
@@ -77,6 +78,13 @@ const ITEMS: [ItemDef; 6] = [
         restores_hunger: None,
         damage: Some(4),
     },
+    ItemDef {
+        name: "fuel",
+        stack_limit: 64,
+        places: None,
+        restores_hunger: None,
+        damage: None,
+    },
 ];
 
 /// The definition of `id`, or `None` for an ID no item uses.
@@ -110,6 +118,7 @@ mod tests {
         assert_eq!(get(ItemId::BREAD).map(|def| def.name), Some("bread"));
         assert_eq!(get(ItemId::STEW).map(|def| def.name), Some("stew"));
         assert_eq!(get(ItemId::SWORD).map(|def| def.name), Some("sword"));
+        assert_eq!(get(ItemId::FUEL).map(|def| def.name), Some("fuel"));
     }
 
     #[test]

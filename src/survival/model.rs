@@ -95,6 +95,17 @@ impl Default for Stats {
 }
 
 impl Stats {
+    /// Stats with the given meters and the drain clock at the start of a period. Used to
+    /// bring saved meters back; the clock is not saved, so the next drain is a full period
+    /// away.
+    pub const fn with_meters(health: Meter, hunger: Meter) -> Self {
+        Self {
+            health,
+            hunger,
+            steps: 0,
+        }
+    }
+
     pub const fn health(self) -> Meter {
         self.health
     }

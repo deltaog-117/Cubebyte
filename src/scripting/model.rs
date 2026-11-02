@@ -1,9 +1,11 @@
 //! What a script may ask for, what it is allowed to do, and how much of it per tick.
 
+use glam::Vec3;
 use thiserror::Error;
 
 use crate::events::apply::StageError;
 use crate::items::registry::ItemId;
+use crate::shared::clock::Tick;
 use crate::shared::voxel::{BlockId, WorldPos};
 
 /// How far from the player a script may act, in blocks. It stays inside the streamed area, so
@@ -23,6 +25,9 @@ pub const MAX_MOBS: usize = 8;
 /// thousands.
 pub const FIND_RADIUS: i32 = 16;
 
+/// Ticks per second the simulation runs at, which the cooldowns below are written against.
+const TICKS_PER_SECOND: u64 = 20;
+
 /// One thing a script asks the world to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -34,6 +39,66 @@ pub enum Command {
     SetBlock { pos: WorldPos, block: BlockId },
     /// Put a new zombie at the bottom middle of the block cell `at`.
     SpawnMob { at: WorldPos },
+}
+
+/// Which of the six block directions the player is looking along.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facing {
+    /// Toward -z.
+    North,
+    /// Toward +x.
+    East,
+    /// Toward +z.
+    South,
+    /// Toward -x.
+    West,
+    Up,
+    Down,
+}
+
+impl Facing {
+    /// The direction `view` points most along, or `None` for a vector that is zero or not
+    /// finite, which points nowhere. On a tie the x axis wins over y, and y over z, so the
+    /// same view always gives the same answer.
+    pub fn from_view(view: Vec3) -> Option<Self> {
+        if !view.is_finite() || view == Vec3::ZERO {
+            return None;
+        }
+        let (x, y, z) = (view.x.abs(), view.y.abs(), view.z.abs());
+        Some(if x >= y && x >= z {
+            if view.x > 0.0 { Self::East } else { Self::West }
+        } else if y >= z {
+            if view.y > 0.0 { Self::Up } else { Self::Down }
+        } else if view.z > 0.0 {
+            Self::South
+        } else {
+            Self::North
+        })
+    }
+
+    /// The step of one block along this direction.
+    pub const fn offset(self) -> [i32; 3] {
+        match self {
+            Self::North => [0, 0, -1],
+            Self::East => [1, 0, 0],
+            Self::South => [0, 0, 1],
+            Self::West => [-1, 0, 0],
+            Self::Up => [0, 1, 0],
+            Self::Down => [0, -1, 0],
+        }
+    }
+
+    /// The whole number a script reads: 0 north, 1 east, 2 south, 3 west, 4 up, 5 down.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::North => 0,
+            Self::East => 1,
+            Self::South => 2,
+            Self::West => 3,
+            Self::Up => 4,
+            Self::Down => 5,
+        }
+    }
 }
 
 /// One thing a script asks to know. A query changes nothing and logs nothing.
@@ -51,6 +116,10 @@ pub enum Query {
     Hunger,
     /// How many mobs are within range of the player.
     MobsNear,
+    /// The direction the player is looking along.
+    Facing,
+    /// The block cell the nearest mob within range stands in.
+    NearestMob,
 }
 
 /// What a [`Query`] found.
@@ -62,6 +131,8 @@ pub enum Answer {
     Found(Option<WorldPos>),
     /// A count or meter value.
     Number(u32),
+    /// The direction a [`Query::Facing`] saw.
+    Direction(Facing),
 }
 
 /// A kind of power a script can be granted.
@@ -76,6 +147,17 @@ pub enum Permission {
 }
 
 impl Permission {
+    /// Where this power's cooldown is kept in [`Cooldowns`].
+    const fn index(self) -> usize {
+        match self {
+            Self::Move => 0,
+            Self::Give => 1,
+            Self::Build => 2,
+            Self::Spawn => 3,
+            Self::Look => 4,
+        }
+    }
+
     const fn bit(self) -> u8 {
         match self {
             Self::Move => 1,
@@ -88,6 +170,26 @@ impl Permission {
 }
 
 impl Command {
+    /// Fuel items one accepted command burns. A refused command burns none.
+    pub const fn fuel_cost(self) -> u8 {
+        match self {
+            Self::Teleport { .. } => 2,
+            Self::GiveItem { .. } => 4,
+            Self::SetBlock { .. } => 1,
+            Self::SpawnMob { .. } => 5,
+        }
+    }
+
+    /// Ticks the same kind of command must wait after one was accepted.
+    pub const fn cooldown(self) -> u64 {
+        match self {
+            Self::Teleport { .. } => 2 * TICKS_PER_SECOND,
+            Self::GiveItem { .. } => 5 * TICKS_PER_SECOND,
+            Self::SetBlock { .. } => TICKS_PER_SECOND / 5,
+            Self::SpawnMob { .. } => 10 * TICKS_PER_SECOND,
+        }
+    }
+
     /// The permission this command needs.
     pub const fn permission(self) -> Permission {
         match self {
@@ -106,6 +208,14 @@ pub struct Permissions(u8);
 impl Permissions {
     pub const NONE: Self = Self(0);
 
+    /// Every power a script can be granted.
+    pub const ALL: Self = Self::NONE
+        .with(Permission::Move)
+        .with(Permission::Give)
+        .with(Permission::Build)
+        .with(Permission::Spawn)
+        .with(Permission::Look);
+
     pub const fn with(self, permission: Permission) -> Self {
         Self(self.0 | permission.bit())
     }
@@ -113,6 +223,34 @@ impl Permissions {
     pub const fn allows(self, permission: Permission) -> bool {
         self.0 & permission.bit() != 0
     }
+}
+
+/// When each kind of command may next run. Commands of one kind share a wait, so a script
+/// cannot dodge it by varying the target. It is kept in memory only: a restart clears it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cooldowns {
+    ready_at: [Tick; 5],
+}
+
+impl Cooldowns {
+    /// Ticks left before `command`'s kind may run on `now`; zero when it may run.
+    pub fn wait_left(&self, command: Command, now: Tick) -> u64 {
+        let ready = self.ready_at[command.permission().index()];
+        ready.0.saturating_sub(now.0)
+    }
+
+    /// Starts the wait for `command`'s kind, from the tick it was accepted on.
+    pub fn start(&mut self, command: Command, now: Tick) {
+        self.ready_at[command.permission().index()] =
+            Tick(now.0.saturating_add(command.cooldown()));
+    }
+}
+
+/// The moment a batch of commands runs in, and the waits it is held to.
+#[derive(Debug)]
+pub struct Pace<'a> {
+    pub tick: Tick,
+    pub cooldowns: &'a mut Cooldowns,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -165,6 +303,10 @@ pub enum Denied {
     OutOfRange,
     #[error("the script already used its commands for this tick")]
     OverLimit,
+    #[error("the command needs {needed} fuel and the pack holds {held}")]
+    NoFuel { needed: u8, held: u32 },
+    #[error("the command is cooling down for {ticks_left} more ticks")]
+    CoolingDown { ticks_left: u64 },
     #[error("the destination overlaps solid blocks")]
     Blocked,
     #[error("item {0} is not defined")]
@@ -223,6 +365,110 @@ mod tests {
             } else {
                 prop_assert_eq!(made, Err(LimitsError::BadRange));
             }
+        }
+    }
+
+    #[test]
+    fn a_view_along_an_axis_faces_that_way_and_nowhere_faces_nothing() {
+        let faced = |x, y, z| Facing::from_view(Vec3::new(x, y, z));
+        assert_eq!(faced(0.0, 0.0, -1.0), Some(Facing::North));
+        assert_eq!(faced(1.0, 0.0, 0.0), Some(Facing::East));
+        assert_eq!(faced(0.0, 0.0, 1.0), Some(Facing::South));
+        assert_eq!(faced(-1.0, 0.0, 0.0), Some(Facing::West));
+        assert_eq!(faced(0.0, 1.0, 0.0), Some(Facing::Up));
+        assert_eq!(faced(0.0, -1.0, 0.0), Some(Facing::Down));
+        assert_eq!(faced(0.0, 0.0, 0.0), None);
+        assert_eq!(faced(f32::NAN, 0.0, 1.0), None);
+        assert_eq!(faced(f32::INFINITY, 0.0, 1.0), None);
+        // Ties go to x, then y, then z.
+        assert_eq!(faced(-1.0, 1.0, 1.0), Some(Facing::West));
+        assert_eq!(faced(0.0, 1.0, 1.0), Some(Facing::Up));
+    }
+
+    proptest! {
+        // The facing is the axis direction that lines up best with the view, and its code is
+        // one of six distinct whole numbers.
+        #[test]
+        fn a_facing_is_the_axis_the_view_points_most_along(
+            x in -100.0f32..100.0, y in -100.0f32..100.0, z in -100.0f32..100.0,
+        ) {
+            let view = Vec3::new(x, y, z);
+            prop_assume!(view != Vec3::ZERO);
+            let facing = Facing::from_view(view).expect("a finite non-zero view faces somewhere");
+            let [dx, dy, dz] = facing.offset();
+            let along = dx as f32 * x + dy as f32 * y + dz as f32 * z;
+            prop_assert_eq!(along, x.abs().max(y.abs()).max(z.abs()));
+            prop_assert!(facing.code() < 6);
+        }
+    }
+
+    #[test]
+    fn facing_codes_are_distinct() {
+        let all = [
+            Facing::North,
+            Facing::East,
+            Facing::South,
+            Facing::West,
+            Facing::Up,
+            Facing::Down,
+        ];
+        let mut codes: Vec<_> = all.iter().map(|f| f.code()).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn every_command_costs_fuel_and_waits() {
+        let pos = WorldPos { x: 0, y: 0, z: 0 };
+        let commands = [
+            Command::Teleport { to: pos },
+            Command::GiveItem {
+                item: ItemId::STONE,
+                count: 1,
+            },
+            Command::SetBlock {
+                pos,
+                block: BlockId::STONE,
+            },
+            Command::SpawnMob { at: pos },
+        ];
+        for command in commands {
+            assert!(command.fuel_cost() > 0, "{command:?} is free");
+            assert!(command.cooldown() > 0, "{command:?} never waits");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_started_wait_counts_down_to_zero_and_stays_per_kind(
+            start in 0u64..1_000_000,
+            later in 0u64..1_000,
+        ) {
+            let pos = WorldPos { x: 0, y: 0, z: 0 };
+            let teleport = Command::Teleport { to: pos };
+            let build = Command::SetBlock { pos, block: BlockId::STONE };
+            let mut cooldowns = Cooldowns::default();
+            cooldowns.start(teleport, Tick(start));
+
+            let left = cooldowns.wait_left(teleport, Tick(start + later));
+            prop_assert_eq!(left, teleport.cooldown().saturating_sub(later));
+            prop_assert_eq!(cooldowns.wait_left(build, Tick(start)), 0);
+        }
+
+        #[test]
+        fn a_wait_started_at_the_end_of_time_does_not_overflow(now in u64::MAX - 5..=u64::MAX) {
+            let pos = WorldPos { x: 0, y: 0, z: 0 };
+            let mut cooldowns = Cooldowns::default();
+            let command = Command::SpawnMob { at: pos };
+            cooldowns.start(command, Tick(now));
+            prop_assert!(cooldowns.wait_left(command, Tick(now)) <= command.cooldown());
+        }
+    }
+
+    #[test]
+    fn all_permissions_allow_every_power() {
+        for permission in ALL {
+            assert!(Permissions::ALL.allows(permission));
         }
     }
 

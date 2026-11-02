@@ -141,6 +141,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Command::SpawnMob`, `Permission::Spawn`, `Denied::TooManyMobs` and `MAX_MOBS` (8): a script can add a zombie in the open, in range, while fewer than 8 mobs are alive; it is an `Event::MobSpawned`, logged and undone like any other command
 - `mobs::service::blocked`: whether a zombie's box overlaps a solid block
 - `scripting::model::Query`, `Answer`, `Permission::Look` and `FIND_RADIUS` (16), with `scripting::service::ask`: scripts can read a block in range (`Look`), find the nearest block of a kind (`Find`), and ask for an item count, health, hunger or the mobs in range. `ask` takes the stage by shared reference, so it cannot change the game, and it logs nothing; queries count toward the per-tick limit like commands do
+- Script costs: a `fuel` item (stack of 64) and a recipe for it (2 stone and 1 grass make 2 fuel). Each accepted script command burns fuel from the pack (teleport 2, give 4, set block 1, spawn 5) and starts a wait before its kind may run again (2 s, 5 s, 0.2 s, 10 s); a refused command costs nothing and starts no wait
+- `scripting::model::Cooldowns`, `Pace`, `Denied::NoFuel` and `Denied::CoolingDown`, with `Command::fuel_cost` and `Command::cooldown`
+- `scripting::library`: four ready-made scripts (tower, hop, stock, summon) written as steps relative to where the player stands
+- `scripting::runner`: plays a script out one command per ready tick, waits when a command is only cooling down, and ends the script on any other refusal
+- Script panel in the window: `T` opens a list of the ready-made scripts with their fuel cost, a click starts one, rows are greyed when the pack cannot pay for the whole script or one is already running; the title shows the running script and how the last one ended
+- `survival::persist`: the health and hunger meters are saved to `stats.mcst` (file format `MCST`, version 1) on exit and loaded at startup, so a restart keeps them
+- Script reads `Facing` (the direction the player looks along, as `Facing::{North, East, South, West, Up, Down}` with a whole-number code) and `NearestMob` (the block cell of the closest mob in range), and the `Answer::Direction` variant
+- `Permissions::ALL`
 
 ### Changed
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
@@ -178,6 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripting::service::run` takes the `next_mob` id counter as a last argument, so a spawn command can hand out ids that are never reused; it moves on only when a spawn is accepted
 - `events::persist` writes version 7; the unknown-tag test now uses tag 15, since tag 14 is the redo end
 - `app` rebuilds the redo stack from the log at startup and logs `Y` as a redo
+- `scripting::service::run` takes a `Pace` (the tick and the cooldowns) and logs each accepted command as its own edit together with the fuel it burned, so `Z` takes a scripted command back whole and gives the fuel back
+- `scripting::service::ask` takes the player's `Facing` as an argument, since the camera is not part of the game state it reads
+- `ui::layout` lays both panels out with one shared function; `ui::draw` draws the script panel with `script_overlay`
+- Escape closes whichever panel is open; mouse look pauses while either is open
 
 ### Fixed
 - Rewinding or redoing an edit in a chunk that had been unloaded was refused, and undoing a break there would have left a one-block chunk that stopped the real chunk from loading. `app` now loads every chunk a rewind or redo touches (generated terrain plus its logged edits) before applying it

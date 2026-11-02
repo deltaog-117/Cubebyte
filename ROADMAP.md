@@ -46,6 +46,10 @@ Items are organized by priority, not by timeline.
 - ✅ Mobs under events: a `Mobs` store with ids, and spawning, hits, removal (a kill, a drop for distance, or a clear at respawn) as events through the one `events::apply` door; they are logged as passive actions, so `Z` steps over them, and undoing them in reverse restores the mobs exactly; the saved log is version 6
 - ✅ Redo and unloaded chunks: `Y` is logged as its own kind of action (log version 7), so the redo stack is rebuilt from the log at startup and survives a restart; a rewind or redo in a chunk that was unloaded now loads that chunk first (generated terrain plus its logged edits) instead of being refused
 - ✅ World interface for scripts, second slice: a spawn-mob command (new `Spawn` permission, in range, in the open, at most 8 mobs alive, ids never reused) and reads through `scripting::service::ask` (new `Look` permission): look at a block, find the nearest block of a kind within 16, count an item, health, hunger and mobs in range; reads change and log nothing and count toward the per-tick limit
+- ✅ Script costs: accepted script commands burn fuel (a craftable item) and start a per-kind wait; refused ones cost nothing; each accepted command is one edit that `Z` takes back whole
+- ✅ Scripts in the window: `T` opens a panel of four ready-made scripts with their fuel cost; a click starts one, and a runner plays it out one command per ready tick, waiting out cooldowns and stopping on any other refusal; nothing runs during a replay
+- ✅ Saved meters: health and hunger are written to `stats.mcst` on exit and loaded at startup; the drain clock is not saved
+- ✅ More script reads: `Facing` (six directions, a whole-number code) and `NearestMob` (the block cell of the closest mob in range)
 
 ---
 
@@ -61,16 +65,17 @@ Items are organized by priority, not by timeline.
 
 - **Time rewind** – Done so far (see Completed): `Z` undoes one action at a time, `Y` brings it back (and still can after a restart), the log keeps the last 256 actions rewindable, and edits in unloaded chunks can be rewound. Still to do:
   - keeping the folded-away history (an archive file) for a timelapse or timeline forks; today it is discarded;
-  - a redo of a meal after a restart is refused, since the meters are not saved and start full again;
+  - a redo of a meal after a restart can still be refused: the meters are saved now, but not the clock that times the next hunger drain;
+  - a scripted command is undone with its fuel refunded, which makes rewind a free refund until "Time as a resource" gives it a price;
   - undoing what is not an event yet: walking;
   - a rewind of a meal is refused (and logged) when the undo would push a meter out of 0 to 20, for example right after eating at near-zero hunger.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
 - **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
-- **World interface for scripts** – Two slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, and capped per tick; and reads (look, find, count, health, hunger, mobs in range) that change and log nothing. Still to do:
+- **World interface for scripts** – Four slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, capped per tick, and paid for with fuel and a wait; reads (look, find, count, health, hunger, mobs in range, facing, nearest mob) that change and log nothing; and a script panel that plays ready-made scripts. Still to do:
   - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain, respawn and mob spawns, hits and removals are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
-  - more reads: the player's facing, mob positions and kinds, finding the nearest mob, and a read cost tied to time as a resource;
-  - running scripts in the window: nothing calls `run` or `ask` from the game yet;
-  - a cost per action (fuel or energy) and a cooldown, tied to time as a resource;
+  - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
+  - reads in the window: `run` is called by the script panel, but nothing calls `ask` yet, and the camera's facing is not passed in;
+  - scripts are not recorded in intent tracks, so a replay does not run them and drifts from a run that used them;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
 - **Code as gameplay (scripting)** – A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
@@ -106,8 +111,34 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **World interface for scripts, next slice** – A cost per action (fuel or energy) and a cooldown, tied to time as a resource. The language comes after.
-2. **Time rewind, next slice** – Keep the folded-away history in an archive file, or save the meters so a redo of a meal survives a restart.
+1. **Time rewind, next slice** – Keep the folded-away history in an archive file.
+2. **Time as a resource** – Rewinding costs fuel, using the cost model scripts already have.
+
+---
+
+## 📋 Ranked Backlog
+
+Recommended order, row 1 first.
+
+| # | Item | Why now | Difficulty |
+|---|---|---|---|
+| 1 | Archive file for folded-away history | Unlocks the timelapse and timeline forks | M |
+| 2 | Time as a resource (rewind costs fuel) | Uses the fuel and wait model scripts now have; stops rewind refunding scripted fuel | M |
+| 3 | Reads in the window (call `ask` with the camera's facing) | Reads exist and nothing calls them | S |
+| 4 | Record script runs in intent tracks | A replay of a run that used scripts drifts | M |
+| 5 | Local rewind zones | Reuses chunk-level undo, region-scoped | H |
+| 6 | Command line and command dictionary | Needed before quick-hacks and the language | H |
+| 7 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
+| 8 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
+| 9 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
+| 10 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
+| 11 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
+| 12 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 13 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 14 | Shaped crafting grid | Builds on the recipe table | M |
+| 15 | Script-driven crafting | Needs the scripting language | M |
+| 16 | Shareable blueprints | Needs scripts and the event log | M |
+| 17 | Spectate and replay mode | Needs the archive file from item 1 | M |
 
 ---
 
