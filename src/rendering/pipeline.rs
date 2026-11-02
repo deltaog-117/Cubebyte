@@ -10,6 +10,7 @@ use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::camera::Camera;
+use crate::rendering::fog::Fog;
 use crate::rendering::vertex::GpuVertex;
 use crate::shared::voxel::ChunkPos;
 
@@ -21,8 +22,26 @@ const SKY: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
+/// What the shaders read each frame. Padded to vec4s, which is how a uniform block lays out.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_projection: [[f32; 4]; 4],
+    /// The camera's position in `xyz`.
+    eye: [f32; 4],
+    /// Fog start in `x` and end in `y`.
+    fog: [f32; 4],
+    /// The sky colour fog fades into.
+    sky: [f32; 4],
+}
+
 const SHADER: &str = "
-struct Camera { view_projection: mat4x4<f32> };
+struct Camera {
+    view_projection: mat4x4<f32>,
+    eye: vec4<f32>,
+    fog: vec4<f32>,
+    sky: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Vertex {
@@ -33,21 +52,35 @@ struct Vertex {
 struct Fragment {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) world: vec3<f32>,
 };
 
 @vertex
 fn vs_main(vertex: Vertex) -> Fragment {
-    return Fragment(camera.view_projection * vec4<f32>(vertex.position, 1.0), vertex.color);
+    return Fragment(
+        camera.view_projection * vec4<f32>(vertex.position, 1.0),
+        vertex.color,
+        vertex.position,
+    );
 }
 
 // The interface is already in clip space, so it skips the camera.
 @vertex
 fn vs_overlay(vertex: Vertex) -> Fragment {
-    return Fragment(vec4<f32>(vertex.position, 1.0), vertex.color);
+    return Fragment(vec4<f32>(vertex.position, 1.0), vertex.color, vertex.position);
 }
 
+// Same blend as `Fog::factor`: clear up to the start, all sky from the end.
 @fragment
 fn fs_main(fragment: Fragment) -> @location(0) vec4<f32> {
+    let distance = length(fragment.world - camera.eye.xyz);
+    let amount = clamp((distance - camera.fog.x) / (camera.fog.y - camera.fog.x), 0.0, 1.0);
+    return vec4<f32>(mix(fragment.color, camera.sky.rgb, amount), 1.0);
+}
+
+// The interface is never fogged.
+@fragment
+fn fs_overlay(fragment: Fragment) -> @location(0) vec4<f32> {
     return vec4<f32>(fragment.color, 1.0);
 }
 ";
@@ -84,6 +117,7 @@ pub struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
+    fog: Fog,
     meshes: HashMap<ChunkPos, GpuMesh>,
     /// Everything that moves, rebuilt every frame by [`Renderer::set_entities`].
     entities: Option<GpuMesh>,
@@ -117,7 +151,7 @@ impl Renderer {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+            size: std::mem::size_of::<CameraUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -125,7 +159,7 @@ impl Renderer {
             label: Some("camera"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -202,7 +236,7 @@ impl Renderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_overlay"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(config.format.into())],
             }),
@@ -230,6 +264,7 @@ impl Renderer {
             camera_buffer,
             camera_group,
             depth_view,
+            fog: Fog::OFF,
             meshes: HashMap::new(),
             entities: None,
             overlay: None,
@@ -259,6 +294,11 @@ impl Renderer {
     /// replacing the previous one. An empty mesh shows none.
     pub fn set_overlay(&mut self, vertices: &[GpuVertex], indices: &[u32]) {
         self.overlay = self.upload(vertices, indices);
+    }
+
+    /// Sets where fog starts and ends, so far terrain fades into the sky.
+    pub fn set_fog(&mut self, fog: Fog) {
+        self.fog = fog;
     }
 
     /// The window's drawable size in pixels.
@@ -325,11 +365,15 @@ impl Renderer {
         };
         let aspect = self.config.width as f32 / self.config.height as f32;
         let view_projection: Mat4 = camera.view_projection(aspect);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::bytes_of(&view_projection.to_cols_array_2d()),
-        );
+        let eye = camera.position;
+        let uniform = CameraUniform {
+            view_projection: view_projection.to_cols_array_2d(),
+            eye: [eye.x, eye.y, eye.z, 0.0],
+            fog: [self.fog.start(), self.fog.end(), 0.0, 0.0],
+            sky: [SKY.r as f32, SKY.g as f32, SKY.b as f32, 1.0],
+        };
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
         let view = frame
             .texture

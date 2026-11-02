@@ -58,6 +58,8 @@ Items are organized by priority, not by timeline.
 - ✅ Command line and command dictionary: `/` opens a typed line and `H` opens it with a table of every command (Tab shows or hides the table); clicking a row runs a command that needs no words or starts one that does; commands are `help`, `give`, `go`, `set`, `spawn`, `rewind`, `redo` and `zone`, defined once in a table that the parser, the dictionary and the error messages all read; positions are blocks from the feet; script commands wait for the next tick and keep the script rules (permission, range, fuel, wait), so a replay reproduces them
 - ✅ Scripting language, first slice (blocks as data): a script is now a `Program`, a checked tree of blocks (do a command, shift the working cell, repeat 1 to 16 times, if a read is below, equal to or above a number); nesting is at most 4 deep and 64 blocks, every loop has a fixed count, and a stepper looks at no more than 32 blocks per tick and 4096 per run, so a program cannot freeze the game and a run that goes on too long is stopped with a message; the four ready-made scripts were rewritten as programs and still give the same commands; commands still go through the same permission, range, fuel and wait checks, so a replay is unchanged
 - ✅ Quick-hacks: a hack is a program anchored on something: the player's feet, the block under the crosshair or the nearest mob; key `G` opens a menu of the hacks that fit what you aim at (`pillar`, `perch`, `dig` for a block, `cage` for a mob), and the new `hack <name>` command runs any script from the command line; the `T` panel lists only the scripts that need no aim, and a `ward` script shows an `if`
+- ✅ Rewind of a meal at near-zero hunger: a rewind's hunger and health changes are cut down to what the meters can still move by (`clamp_meters`), so undoing a meal after a drain lands hunger on 0 instead of being refused; what is logged is what really moved, so `Y` still restores a valid state
+- ✅ Distance fog: far terrain fades into the sky colour, computed per pixel in the shader from a checked `Fog` range (half the load radius to the full radius), so chunks arrive hidden in the haze; the interface is never fogged. Per-face shading and the sky colour were already in place
 
 ---
 
@@ -77,15 +79,14 @@ Items are organized by priority, not by timeline.
   - a redo of a meal after a restart can still be refused: the meters are saved now, but not the clock that times the next hunger drain;
   - `Z` then `Y` costs nothing, because the redo gives the price back; keeping the price on a redo needs a redo that rebases the slot events it replays;
   - the price is flat plus returned fuel; a price that grows with how old the undone action is would need ticks in the log;
-  - undoing what is not an event yet: walking;
-  - a rewind of a meal is refused (and logged) when the undo would push a meter out of 0 to 20, for example right after eating at near-zero hunger.
+  - undoing what is not an event yet: walking.
 - **Local rewind zones** – First slice done (see Completed). Still to do: marking a region by two corners (needs the command line), and zones that also restore the pack and mobs.
 - **World interface for scripts** – Five slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, capped per tick, and paid for with fuel and a wait; reads (look, find, count, health, hunger, mobs in range, facing, nearest mob) that change and log nothing; a script panel that plays ready-made scripts; a readout of the reads in the window (`Q`); and script commands recorded in intent tracks. Still to do:
   - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain, respawn and mob spawns, hits and removals are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
   - scripts cannot use reads: the window shows them to the player, but a script plays a fixed list of commands and cannot branch on an answer until the language exists;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
-- **Code as gameplay (scripting)** – First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it. Still to do: the clickable block editor (open a hack as blocks and change it), a saved format for programs players make (not needed until the editor exists), a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
+- **Code as gameplay (scripting)** – Under review: the design of the clickable block editor is being thought through again before any code (Kogama-style blocks with a matching text view of the same program, so a player can use either; the text view would round-trip with the blocks). First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it. Still to do: the clickable block editor (open a hack as blocks and change it), a saved format for programs players make (not needed until the editor exists), a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
   - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
@@ -115,11 +116,11 @@ Items are organized by priority, not by timeline.
 
 - **Shareable blueprints** – Export a build or script as a text blob that others can import and watch build step by step.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
+- **Block shapes (moulding)** – Let players shape blocks beyond cubes. The meaning is still open: preset shapes (slab, stair, slope), stretching a block into a box, or sculpting cells inside a block. It touches storage, meshing and collision, and custom shapes must be saved so old event logs still replay, so it needs its own COAs first.
 - **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
 - **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
 - **Graphics upgrade** – Today blocks are flat colours with no lighting. Done after the current items, in this order. Light and shading are computed from world state and never logged, so replay and rewind are untouched; the mesher keeps producing plain vertex data with no `wgpu` types, so these stay testable without a GPU.
-  - per-face shading (top brighter, sides darker) and a sun direction;
-  - sky colour and distance fog (the Kogama-style bright, simple look);
+  - ✅ per-face shading (top brighter, sides darker) and ✅ sky colour and distance fog (the Kogama-style bright, simple look); a sun direction is still open;
   - vertex ambient occlusion: darken corners and edges (the biggest gain for the cost);
   - texture atlas with nearest-neighbour sampling (the Minecraft pixel look; needs an art style first);
   - sky gradient or skybox with a sun and clouds;
@@ -142,7 +143,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Block editor for programs** – Open a hack as blocks and change it; builds on the program tree and the panel click pattern.
+1. **Block editor for programs** – Open a hack as blocks and change it; builds on the program tree and the panel click pattern. On hold while the Kogama-style design is reviewed (see Code as gameplay).
 
 ---
 
@@ -152,23 +153,22 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Block editor for programs | Makes hacks editable; the tree and the panel click pattern are in place | H |
+| 1 | Block editor for programs | On hold: the Kogama-style design (blocks plus a matching text view) is being reviewed first | H |
 | 2 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
 | 3 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
 | 4 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
 | 5 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 6 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 6 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
 | 7 | Shaped crafting grid | Builds on the recipe table | M |
 | 8 | Script-driven crafting | Needs the scripting language | M |
 | 9 | Shareable blueprints | Needs scripts and the event log | M |
 | 10 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 11 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
-| 12 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
-| 13 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 14 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 15 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 16 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 17 | Graphics: better mobs | Parts-based models and animation | M |
+| 11 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
+| 12 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 13 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 14 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 15 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 16 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

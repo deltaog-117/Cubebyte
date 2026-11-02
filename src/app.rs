@@ -32,7 +32,9 @@ use crate::events::log::{ActionKind, EventLog};
 use crate::events::persist::{self, LoadError};
 use crate::events::redo::RedoStack;
 use crate::events::replay::replay_chunk;
-use crate::events::rewind::{log_action, rewind_events, rewind_price, touched_chunks};
+use crate::events::rewind::{
+    clamp_meters, log_action, rewind_events, rewind_price, touched_chunks,
+};
 use crate::events::zone::{ZONE_BACK_STEPS, ZONE_RADIUS, Zone, zone_events, zone_price};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
@@ -44,6 +46,7 @@ use crate::player::input::MoveKeys;
 use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
 use crate::player::service::{Intent, step};
 use crate::rendering::camera::Camera;
+use crate::rendering::fog::Fog;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
@@ -280,8 +283,14 @@ impl App {
         capture_cursor(&window);
 
         let size = window.inner_size();
-        let renderer =
+        let mut renderer =
             pollster::block_on(Renderer::new(window.clone(), (size.width, size.height)))?;
+        // Fully fogged at the edge of the loaded area, so chunks arrive hidden in the haze.
+        let fog_end = f32::from(LOAD_RADIUS) * f32::from(CHUNK_SIZE);
+        match Fog::try_new(fog_end / 2.0, fog_end) {
+            Ok(fog) => renderer.set_fog(fog),
+            Err(error) => tracing::warn!(%error, "fog left off"),
+        }
 
         let log = open_log(Path::new(SAVE_PATH))?;
         let redo = RedoStack::from_log(&log);
@@ -1219,9 +1228,11 @@ impl Running {
     /// refusal (the state moved on in a way no event records, such as walking, or a meter that
     /// the undo would push out of range) is logged.
     fn rewind(&mut self) -> bool {
-        let Some(mut events) = rewind_events(&self.log) else {
+        let Some(events) = rewind_events(&self.log) else {
             return false;
         };
+        // Passive drains are not rewound, so the meters may sit lower than the undo expects.
+        let mut events = clamp_meters(&events, self.stats);
         let price = rewind_price(&events);
         match charge_events(&self.inventory, &events, ItemId::FUEL, price) {
             Ok(charge) => events.extend(charge),

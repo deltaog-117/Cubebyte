@@ -43,6 +43,7 @@
 | 2026-11-02 | Local rewind zones | Restore a cube around the player to how it stood N block-changing actions ago, as one priced edit; no new log kind | ✅ Confirmed |
 | 2026-11-02 | Command line and command dictionary | One table of commands read by the parser, the dictionary and the errors; typed line and clickable table in one panel; commands become existing actions | ✅ Confirmed |
 | 2026-11-02 | Scripting language, first slice, and quick-hacks | A script is a checked tree of blocks (do, shift, repeat, if) stepped under a budget; a quick-hack is a program anchored on the aimed block or the nearest mob, chosen from a menu or by `hack <name>` | ✅ Confirmed |
+| 2026-11-02 | Clamped meter rewind and distance fog | A rewind cuts its meter changes to what fits; fog is computed per pixel from a checked range tied to the load radius; the Kogama-style block editor is put on hold | ✅ Confirmed |
 
 ---
 
@@ -1377,6 +1378,42 @@ Scripts were fixed lists of steps, and the roadmap wanted a language that can re
 - Tests: any valid generated program ends (finishes, or is stopped by the budget); a preview is the same each time and shifts exactly with the anchor; no run costs more than the advertised fuel; every `if` runs exactly one part; the original four scripts give the same commands as before; a hack plays out through the real runner, pays its fuel, logs one edit per command and undoes exactly.
 - The check found a bug that was already there: the command table was 4 pixels too wide for a 320-pixel window, and the random size test happened to hit it. The `zone` summary is shorter and a plain test now covers the smallest window.
 - The window was not run by the assistant. Try it by looking at a block and pressing `G`, then click `pillar`; walk next to a zombie and press `G` to see `cage`; type `/hack ward` with and without a mob near.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Clamped Meter Rewind and Distance Fog
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Three roadmap items were picked for one cycle: the block editor, the refused meal rewind and the first graphics step. The graphics step turned out to be mostly done already (face shading and the sky colour existed), leaving only fog. While the block editor was being planned, the wish grew into Kogama-style blocks, a text view of the same program, and moulding blocks into any shape. That is too much to decide in one go, so the editor was put on hold and the cycle closed with the other two items.
+
+#### Decision & Rationale
+- **A rewind that cannot fit its meter change is clamped, not refused.** Passive drains are skipped by `Z`, so undoing a meal could ask hunger to fall below 0 (a meal of +4, a drain of -1, then -4 from 3). `clamp_meters` replaces each hunger or health change with what the meter can really move by, and drops one that moves nothing. Compared with keeping the refusal (the bug stays) and with ignoring meters on undo (eat, undo, eat again would be free food), clamping is the only one that always works and cannot be abused.
+- **The log records what really moved.** The clamped events are what get applied and logged, so the log still replays exactly and `Y`, which inverts them, lands on a valid state.
+- **Fog is computed per pixel.** The other option, per vertex, is wrong across 16-block quads because fog is not linear across a face. The camera uniform now carries the eye position, the fog range and the sky colour.
+- **The fog range follows the load radius.** It runs from half the radius to the full radius (32 to 64 blocks), so chunks load while they are fully fogged and do not visibly pop in.
+- **`Fog` is checked when built.** `Fog::try_new` accepts only a finite range with `0 <= start < end`; `Fog::OFF` pushes the range past any view distance for a renderer that has not been told one.
+- **The interface skips fog** through its own fragment entry, so panels keep their colours.
+
+**Trade-offs accepted:**
+- A clamped undo is no longer the exact inverse of the original meter change; it is the exact inverse of what was applied, which is what the log holds.
+- The fog formula exists twice, in Rust (tested) and in the shader (not testable without a GPU). The comment on the shader entry names the Rust twin.
+- Fog is linear in distance; a curve is a matter of taste and was left alone.
+- The sun direction from the graphics list is still open.
+
+#### Implementation Notes
+- `events::rewind::clamp_meters` is pure and `Running::rewind` calls it before pricing, so the fuel price is worked out from the events that will really be applied.
+- `rendering::fog` holds `Fog`; `rendering::pipeline` has a `CameraUniform` padded to vec4s, `Renderer::set_fog`, and a second fragment entry `fs_overlay` for the interface.
+- Tests: the clamped meter events always apply and equal the originals when those already fit; undoing a meal after a drain stops at 0; the fog factor is 0 at the start, 1 at the end, never decreases and stays in 0 to 1; a bad range is refused.
+- The window was started for 12 seconds with no shader or pipeline error, but the fog was not looked at by the assistant. Try it by walking towards the edge of the loaded area: far terrain should fade into the sky colour, and the panels (`Tab`, `T`, `G`, `/`) should keep their colours.
 
 #### Review / Update Log
 

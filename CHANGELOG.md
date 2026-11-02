@@ -168,6 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Key `G` opens the quick-hack menu with the hacks that fit what you aim at; the command `hack <name>` runs any script anchored on what it needs
 - `ui::layout::hack_panel`
 - `ScriptRun::from_program`, `ScriptRun::ran` and `Step::Finished`
+- `events::rewind::clamp_meters`: cuts a rewind's hunger and health changes to what the meters can still move by, dropping a change that cannot move one at all
+- `rendering::fog`: a checked `Fog` range with `factor` (0 before the start, 1 from the end, rising evenly between) and `Fog::OFF`; `Renderer::set_fog`
 
 ### Changed
 - The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before
@@ -219,7 +221,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Running::rewind` pays the rewind price in the same all-or-nothing batch as the undo and refuses, with a note in the title, when the pack cannot pay; a redo gives the price back, since it is the exact inverse
 - `EventLog` equality ignores records folded away and not yet taken, which are output waiting to be written
 - `app` writes `world.mcea` on exit, after the world file is saved
+- The shader reads the camera position, fog range and sky colour from the camera uniform and blends terrain and mobs towards the sky colour with distance; the interface has its own fragment entry and is not fogged; `app` sets the fog from the load radius
+- `Running::rewind` clamps the meter changes of an undo against the current meters before it prices and applies the rewind
 
 ### Fixed
+- Undoing a meal was refused when hunger had drained below what the meal gave (for example eating at 0, a drain to 3, then `Z` asking for -4); the undo now stops at 0
 - The command table was 4 pixels wider than a 320-pixel window, so its right edge was cut off in the smallest windows
 - Rewinding or redoing an edit in a chunk that had been unloaded was refused, and undoing a break there would have left a one-block chunk that stopped the real chunk from loading. `app` now loads every chunk a rewind or redo touches (generated terrain plus its logged edits) before applying it
