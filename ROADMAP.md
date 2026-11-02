@@ -50,6 +50,10 @@ Items are organized by priority, not by timeline.
 - ✅ Scripts in the window: `T` opens a panel of four ready-made scripts with their fuel cost; a click starts one, and a runner plays it out one command per ready tick, waiting out cooldowns and stopping on any other refusal; nothing runs during a replay
 - ✅ Saved meters: health and hunger are written to `stats.mcst` on exit and loaded at startup; the drain clock is not saved
 - ✅ More script reads: `Facing` (six directions, a whole-number code) and `NearestMob` (the block cell of the closest mob in range)
+- ✅ Reads in the window: `Q` shows a live line in the title (the way you face, the block under the crosshair, the nearest mob and how many are near), made of the same queries a script would send through `ask`; it changes and logs nothing, so it also works during a replay
+- ✅ Script runs in intent tracks: every command a script really ran is saved in the session file as its own action (version 4; versions 1 to 3 still load) and a replay performs it again at the same point of the tick, so a replay of a run that used scripts no longer drifts; the script itself is not saved, so edits to the ready-made scripts cannot change an old recording
+- ✅ Time as a resource: `Z` costs fuel, a base of 1 plus whatever fuel the undo would hand back, paid inside the rewind's own all-or-nothing batch; undoing a scripted command no longer refunds its fuel, a pack that cannot pay refuses the rewind and the title says what it needs, and `Y` is the exact inverse so it gives the price back with the edit
+- ✅ Archive of folded-away history: the log hands over the events it folds, with their action ends, and the game appends them on exit to `world.mcea` (after the world file is saved, so nothing is written twice); a frame cut short by a crash is dropped on the next append
 
 ---
 
@@ -57,25 +61,25 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
-- **Saving intent tracks** – Six slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, recording actions, and recording hits and rewinds. A replay is exact as long as the world starts as it did when recorded; it does not yet save or restore the starting world itself.
+- **Saving intent tracks** – Seven slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, recording actions, recording hits and rewinds, and recording script commands. A replay is exact as long as the world starts as it did when recorded; it does not yet save or restore the starting world itself.
 
 ---
 
 ## 🟡 Medium Priority (Important)
 
-- **Time rewind** – Done so far (see Completed): `Z` undoes one action at a time, `Y` brings it back (and still can after a restart), the log keeps the last 256 actions rewindable, and edits in unloaded chunks can be rewound. Still to do:
-  - keeping the folded-away history (an archive file) for a timelapse or timeline forks; today it is discarded;
+- **Time rewind** – Done so far (see Completed): `Z` undoes one action at a time for fuel, `Y` brings it back (and still can after a restart), the log keeps the last 256 actions rewindable, edits in unloaded chunks can be rewound, and the history the log folds away is kept in `world.mcea`. Still to do:
+  - reading the archive back for a timelapse or timeline forks: the file is written and can be decoded, but nothing plays it yet;
+  - the archive is appended on exit only, so a crash loses that session's folded history (the world file is lost with it); appending as it folds needs a counter in the world file to heal a mismatch;
   - a redo of a meal after a restart can still be refused: the meters are saved now, but not the clock that times the next hunger drain;
-  - a scripted command is undone with its fuel refunded, which makes rewind a free refund until "Time as a resource" gives it a price;
+  - `Z` then `Y` costs nothing, because the redo gives the price back; keeping the price on a redo needs a redo that rebases the slot events it replays;
+  - the price is flat plus returned fuel; a price that grows with how old the undone action is would need ticks in the log;
   - undoing what is not an event yet: walking;
   - a rewind of a meal is refused (and logged) when the undo would push a meter out of 0 to 20, for example right after eating at near-zero hunger.
 - **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
-- **Time as a resource** – Rewinding costs a crafted fuel, so it is a tool and not a free undo button.
-- **World interface for scripts** – Four slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, capped per tick, and paid for with fuel and a wait; reads (look, find, count, health, hunger, mobs in range, facing, nearest mob) that change and log nothing; and a script panel that plays ready-made scripts. Still to do:
+- **World interface for scripts** – Five slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, capped per tick, and paid for with fuel and a wait; reads (look, find, count, health, hunger, mobs in range, facing, nearest mob) that change and log nothing; a script panel that plays ready-made scripts; a readout of the reads in the window (`Q`); and script commands recorded in intent tracks. Still to do:
   - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain, respawn and mob spawns, hits and removals are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
-  - reads in the window: `run` is called by the script panel, but nothing calls `ask` yet, and the camera's facing is not passed in;
-  - scripts are not recorded in intent tracks, so a replay does not run them and drifts from a run that used them;
+  - scripts cannot use reads: the window shows them to the player, but a script plays a fixed list of commands and cannot branch on an answer until the language exists;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
 - **Code as gameplay (scripting)** – A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
@@ -111,8 +115,8 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Time rewind, next slice** – Keep the folded-away history in an archive file.
-2. **Time as a resource** – Rewinding costs fuel, using the cost model scripts already have.
+1. **Local rewind zones** – Rewind only a region, reusing the chunk-level undo.
+2. **Command line and command dictionary** – Needed before quick-hacks and the language.
 
 ---
 
@@ -122,23 +126,19 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Archive file for folded-away history | Unlocks the timelapse and timeline forks | M |
-| 2 | Time as a resource (rewind costs fuel) | Uses the fuel and wait model scripts now have; stops rewind refunding scripted fuel | M |
-| 3 | Reads in the window (call `ask` with the camera's facing) | Reads exist and nothing calls them | S |
-| 4 | Record script runs in intent tracks | A replay of a run that used scripts drifts | M |
-| 5 | Local rewind zones | Reuses chunk-level undo, region-scoped | H |
-| 6 | Command line and command dictionary | Needed before quick-hacks and the language | H |
-| 7 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
-| 8 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
-| 9 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
-| 10 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 11 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
-| 12 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 13 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
-| 14 | Shaped crafting grid | Builds on the recipe table | M |
-| 15 | Script-driven crafting | Needs the scripting language | M |
-| 16 | Shareable blueprints | Needs scripts and the event log | M |
-| 17 | Spectate and replay mode | Needs the archive file from item 1 | M |
+| 1 | Local rewind zones | Reuses chunk-level undo, region-scoped | H |
+| 2 | Command line and command dictionary | Needed before quick-hacks and the language | H |
+| 3 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
+| 4 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
+| 5 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
+| 6 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
+| 7 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
+| 8 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 9 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 10 | Shaped crafting grid | Builds on the recipe table | M |
+| 11 | Script-driven crafting | Needs the scripting language | M |
+| 12 | Shareable blueprints | Needs scripts and the event log | M |
+| 13 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
 
 ---
 

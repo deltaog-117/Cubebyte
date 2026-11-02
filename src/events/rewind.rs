@@ -7,6 +7,13 @@
 //! The log keeps only the last [`HISTORY_WINDOW`] actions as history; older ones are folded
 //! away, so a rewind cannot reach past them.
 //!
+//! Rewinding costs fuel: [`rewind_price`] is a base price plus whatever fuel the rewind would
+//! hand back, so undoing a scripted command does not refund the fuel it burned. The window
+//! pays it inside the rewind's own events (see [`apply::charge_events`]), which makes a redo,
+//! the exact inverse, give the price back along with the edit.
+//!
+//! [`apply::charge_events`]: crate::events::apply::charge_events
+//!
 //! An edit can sit in a chunk that has since been unloaded. [`touched_chunks`] names the chunks
 //! a rewind (or a redo) changes, so the caller can load the missing ones first: a block event
 //! applied to an unloaded chunk would be refused, or worse, would leave a stray chunk holding
@@ -15,12 +22,37 @@
 use std::collections::HashSet;
 
 use crate::events::log::{ActionKind, EventLog};
-use crate::shared::event::Event;
+use crate::items::registry::ItemId;
+use crate::shared::event::{Event, Held};
 use crate::shared::voxel::ChunkPos;
 
 /// How many actions of history the log keeps rewindable. Compaction runs once the log holds
 /// twice this many, so it happens once per window of play and not on every action.
 pub const HISTORY_WINDOW: usize = 256;
+
+/// Fuel every rewind costs, before the fuel it hands back is added.
+pub const REWIND_BASE_FUEL: u32 = 1;
+
+/// The fuel `events` put into the pack, net: what slots end up holding minus what they held.
+/// A rewind of a change that burned fuel returns it; one of a change that made fuel returns
+/// none, since that fuel is taken away instead.
+pub fn fuel_returned(events: &[Event]) -> u32 {
+    let fuel = |held: Held| i64::from(held.count) * i64::from(held.item == ItemId::FUEL.0);
+    let net: i64 = events
+        .iter()
+        .map(|event| match *event {
+            Event::SlotSet { old, new, .. } => fuel(new) - fuel(old),
+            _ => 0,
+        })
+        .sum();
+    u32::try_from(net.max(0)).unwrap_or(u32::MAX)
+}
+
+/// The fuel a rewind that applies `events` costs: [`REWIND_BASE_FUEL`] plus the fuel it hands
+/// back, so the fuel a command burned stays burned.
+pub fn rewind_price(events: &[Event]) -> u32 {
+    REWIND_BASE_FUEL.saturating_add(fuel_returned(events))
+}
 
 /// The events that undo `events`, newest change first. Inverting the result gives `events`
 /// back, which is how a rewound edit is replayed.
@@ -206,6 +238,57 @@ mod tests {
             }
             let distinct: HashSet<_> = touched.iter().collect();
             prop_assert_eq!(distinct.len(), touched.len());
+        }
+    }
+
+    fn slot(slot: u8, old: Held, new: Held) -> Event {
+        Event::SlotSet { slot, old, new }
+    }
+
+    fn fuel_held(count: u8) -> Held {
+        Held {
+            item: ItemId::FUEL.0,
+            count,
+        }
+    }
+
+    #[test]
+    fn a_rewind_costs_the_base_plus_the_fuel_it_hands_back() {
+        let burn = [slot(0, fuel_held(7), fuel_held(2))];
+        // The rewind of that burn puts the five back.
+        assert_eq!(rewind_price(&inverse_run(&burn)), REWIND_BASE_FUEL + 5);
+        // Redoing it takes them away again, which hands nothing back.
+        assert_eq!(rewind_price(&burn), REWIND_BASE_FUEL);
+        // Other items and other kinds of event never count.
+        let stone = Held {
+            item: ItemId::STONE.0,
+            count: 9,
+        };
+        let others = [slot(1, Held::EMPTY, stone), Event::HungerChanged { by: 3 }];
+        assert_eq!(rewind_price(&others), REWIND_BASE_FUEL);
+        assert_eq!(rewind_price(&[]), REWIND_BASE_FUEL);
+    }
+
+    proptest! {
+        #[test]
+        fn the_price_is_the_base_plus_the_net_fuel_given_back(
+            changes in prop::collection::vec((0u8..4, 0u8..64, 0u8..64), 0..12),
+        ) {
+            let events: Vec<Event> = changes
+                .iter()
+                .map(|&(at, old, new)| slot(at, fuel_held(old), fuel_held(new)))
+                .collect();
+            let net: i64 = changes.iter().map(|&(_, old, new)| i64::from(new) - i64::from(old)).sum();
+            prop_assert_eq!(
+                i64::from(rewind_price(&events)),
+                i64::from(REWIND_BASE_FUEL) + net.max(0)
+            );
+            // Pricing the undo of an undo: what one hands back the other takes away.
+            let back = inverse_run(&events);
+            prop_assert_eq!(
+                i64::from(fuel_returned(&events)) - i64::from(fuel_returned(&back)),
+                net
+            );
         }
     }
 

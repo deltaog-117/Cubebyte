@@ -8,7 +8,7 @@
 
 use thiserror::Error;
 
-use crate::inventory::model::{Inventory, Stack};
+use crate::inventory::model::{Inventory, NotEnough, Stack};
 use crate::items::registry::ItemId;
 use crate::mobs::model::{MobError, Mobs};
 use crate::player::model::{Player, PlayerError};
@@ -130,6 +130,47 @@ pub fn apply_all(stage: &mut Stage<'_>, events: &[Event]) -> Result<(), StageErr
         }
     }
     Ok(())
+}
+
+/// Why a charge could not be worked out.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ChargeError {
+    /// The slot events the charge follows do not fit the pack.
+    #[error(transparent)]
+    Stage(#[from] StageError),
+    /// Once those events are applied, the pack no longer holds enough to pay.
+    #[error(transparent)]
+    NotEnough(#[from] NotEnough),
+}
+
+/// The slot events that take `count` of `item` out of the pack as it will stand once `before`
+/// has been applied to it, so `before` followed by the result applies cleanly in one batch.
+/// Events in `before` that are not slot changes are ignored.
+///
+/// # Errors
+///
+/// - [`ChargeError::Stage`] if a slot event in `before` names a slot that does not exist or a
+///   stack the game cannot hold.
+/// - [`ChargeError::NotEnough`] if the pack, after `before`, holds less than `count` of `item`.
+pub fn charge_events(
+    inventory: &Inventory,
+    before: &[Event],
+    item: ItemId,
+    count: u32,
+) -> Result<Vec<Event>, ChargeError> {
+    let mut slots = *inventory.slots();
+    for event in before {
+        if let Event::SlotSet { slot, new, .. } = *event {
+            let cell = slots
+                .get_mut(usize::from(slot))
+                .ok_or(StageError::BadSlot(slot))?;
+            *cell = stack_of(new)?;
+        }
+    }
+    let after = Inventory::from_slots(slots);
+    let mut paid = after.clone();
+    paid.take(item, count)?;
+    Ok(slot_events(&after, &paid))
 }
 
 /// The slot events that turn `before` into `after`, lowest slot first.
@@ -394,6 +435,50 @@ mod tests {
             item: item.0,
             count,
         }
+    }
+
+    proptest! {
+        #[test]
+        fn a_charge_after_slot_events_applies_in_one_batch_and_takes_exactly_its_count(
+            fuel in 0u32..200,
+            gained in 0u32..20,
+            count in 0u32..60,
+        ) {
+            let mut state = State::new();
+            state.inventory.add(ItemId::FUEL, fuel).unwrap();
+            // Slot events that hand `gained` more fuel back, as a rewind of a burn would.
+            let mut grown = state.inventory.clone();
+            grown.add(ItemId::FUEL, gained).unwrap();
+            let before = slot_events(&state.inventory, &grown);
+
+            match charge_events(&state.inventory, &before, ItemId::FUEL, count) {
+                Ok(charge) => {
+                    let mut batch = before.clone();
+                    batch.extend(charge);
+                    prop_assert_eq!(apply_all(&mut state.stage(), &batch), Ok(()));
+                    prop_assert_eq!(state.inventory.count_of(ItemId::FUEL), fuel + gained - count);
+                }
+                Err(error) => {
+                    prop_assert!(fuel + gained < count);
+                    prop_assert!(matches!(error, ChargeError::NotEnough(_)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_charge_for_a_slot_that_does_not_exist_is_refused() {
+        let state = State::new();
+        let slot = u8::try_from(SLOTS).unwrap();
+        let before = [Event::SlotSet {
+            slot,
+            old: Held::EMPTY,
+            new: held(ItemId::FUEL, 1),
+        }];
+        assert_eq!(
+            charge_events(&state.inventory, &before, ItemId::FUEL, 1),
+            Err(ChargeError::Stage(StageError::BadSlot(slot)))
+        );
     }
 
     #[test]

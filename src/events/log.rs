@@ -39,8 +39,12 @@ pub enum Record {
 }
 
 /// Every event applied to the world, in order. Events are never reordered, and only
-/// [`EventLog::compact`] removes any: it folds the oldest into a base of final blocks.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// [`EventLog::compact`] removes any: it folds the oldest into a base of final blocks and hands
+/// them over through [`EventLog::take_folded`], so the caller can keep them.
+///
+/// Two logs are equal when they hold the same history and base; records folded away and not
+/// taken yet are output waiting to be written, not part of the game's state.
+#[derive(Clone, Debug, Default)]
 pub struct EventLog {
     events: Vec<Event>,
     // Where each finished action ends, oldest first. Events pushed after the last mark are
@@ -52,7 +56,17 @@ pub struct EventLog {
     // The block every position ended up as in the history folded away by `compact`, per
     // chunk. It sits under `events`: a chunk is rebuilt as terrain, then this, then its events.
     base: HashMap<ChunkPos, HashMap<WorldPos, BlockId>>,
+    // The records `compact` folded away since the last `take_folded`, oldest first.
+    folded: Vec<Record>,
 }
+
+impl PartialEq for EventLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.events == other.events && self.marks == other.marks && self.base == other.base
+    }
+}
+
+impl Eq for EventLog {}
 
 impl EventLog {
     pub fn new() -> Self {
@@ -102,13 +116,16 @@ impl EventLog {
 
     /// Folds every action but the newest `keep` into the base, so the log stops growing
     /// with play. Only the final block at each position is kept, which is all a chunk needs
-    /// to be rebuilt; the folded events, and rewinding past them, are gone. Does nothing when
-    /// there are `keep` actions or fewer.
+    /// to be rebuilt; rewinding past the folded events is gone, but the events themselves,
+    /// with their action ends, wait in [`EventLog::take_folded`]. Does nothing when there are
+    /// `keep` actions or fewer.
     pub fn compact(&mut self, keep: usize) {
         let Some(folded) = self.marks.len().checked_sub(keep).filter(|&n| n > 0) else {
             return;
         };
         let cut = self.marks[folded - 1].end;
+        self.folded
+            .extend(records_in(&self.events[..cut], &self.marks[..folded]));
         for event in self.events.drain(..cut) {
             if let Event::BlockSet { pos, new, .. } = event {
                 self.base.entry(pos.split().0).or_default().insert(pos, new);
@@ -158,16 +175,13 @@ impl EventLog {
 
     /// The events and action ends in the order they were logged.
     pub fn records(&self) -> impl Iterator<Item = Record> + '_ {
-        let mut marks = self.marks.iter().peekable();
-        self.events
-            .iter()
-            .enumerate()
-            .flat_map(move |(index, &event)| {
-                let end = marks
-                    .next_if(|mark| mark.end == index + 1)
-                    .map(|mark| Record::ActionEnd(mark.kind));
-                std::iter::once(Record::Event(event)).chain(end)
-            })
+        records_in(&self.events, &self.marks)
+    }
+
+    /// The records `compact` has folded away since the last call, oldest first, with the
+    /// action ends they had. Followed by [`EventLog::records`], they are the whole history.
+    pub fn take_folded(&mut self) -> Vec<Record> {
+        std::mem::take(&mut self.folded)
     }
 
     /// The events of the latest edit that no later rewind has undone, in the order they
@@ -191,6 +205,18 @@ impl EventLog {
         }
         None
     }
+}
+
+/// `events` with each action end of `marks` after the event it closes. `marks` must end
+/// inside `events`, and its ends rise.
+fn records_in<'a>(events: &'a [Event], marks: &'a [Mark]) -> impl Iterator<Item = Record> + 'a {
+    let mut marks = marks.iter().peekable();
+    events.iter().enumerate().flat_map(move |(index, &event)| {
+        let end = marks
+            .next_if(|mark| mark.end == index + 1)
+            .map(|mark| Record::ActionEnd(mark.kind));
+        std::iter::once(Record::Event(event)).chain(end)
+    })
 }
 
 #[cfg(test)]
@@ -274,6 +300,49 @@ mod tests {
             let chunk = ChunkPos { x: 0, y: 0, z: 0 };
             prop_assert_eq!(log.chunk_events(chunk).count(), log.len());
         }
+    }
+
+    proptest! {
+        #[test]
+        fn what_compaction_folds_away_followed_by_what_is_left_is_the_whole_history(
+            sizes in prop::collection::vec(1usize..4, 0..14),
+            keeps in prop::collection::vec(0usize..14, 1..4),
+        ) {
+            let mut log = EventLog::new();
+            for (index, &size) in sizes.iter().enumerate() {
+                for step in 0..size {
+                    log.push(set(index as i32, step as u16, step as u16 + 1));
+                }
+                log.end_action(if index % 3 == 2 { ActionKind::Passive } else { ActionKind::Edit });
+            }
+            let whole: Vec<Record> = log.records().collect();
+
+            let mut folded = Vec::new();
+            for keep in keeps {
+                log.compact(keep);
+                folded.extend(log.take_folded());
+            }
+
+            let rejoined: Vec<Record> = folded.into_iter().chain(log.records()).collect();
+            prop_assert_eq!(rejoined, whole);
+            prop_assert!(log.take_folded().is_empty());
+        }
+    }
+
+    #[test]
+    fn records_waiting_to_be_taken_are_not_part_of_what_two_logs_are_equal_on() {
+        let mut log = EventLog::new();
+        for old in 0..3 {
+            log.push(set(5, old, old + 1));
+            log.end_action(ActionKind::Edit);
+        }
+        let mut folded = log.clone();
+        folded.compact(1);
+        let mut taken = folded.clone();
+        assert_eq!(taken.take_folded().len(), 4);
+
+        assert_eq!(folded, taken);
+        assert_ne!(folded, log);
     }
 
     #[test]

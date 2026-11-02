@@ -403,3 +403,42 @@ fn mob_events_are_passive_survive_a_save_and_undo_exactly() {
     let drop = despawn_event(id, spawned.get(id).unwrap());
     assert!(matches!(drop, Event::MobRemoved { health: 20, .. }));
 }
+
+#[test]
+fn the_archive_and_the_log_together_hold_the_whole_history_after_compaction() {
+    use minecraft_clone::events::archive;
+    use minecraft_clone::events::rewind::HISTORY_WINDOW;
+
+    let path = std::env::temp_dir().join(format!("mcea-integration-{}.mcea", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    // `log` compacts as the game does; `whole` never does, so it is the history to match.
+    let (mut log, mut whole) = (EventLog::new(), EventLog::new());
+    let actions = 5 * HISTORY_WINDOW;
+    for index in 0..actions {
+        let event = Event::BlockSet {
+            pos: WorldPos {
+                x: i32::try_from(index).unwrap(),
+                y: 0,
+                z: 0,
+            },
+            old: BlockId::AIR,
+            new: BlockId::STONE,
+        };
+        log_action(&mut log, &[event], ActionKind::Edit);
+        whole.push(event);
+        whole.end_action(ActionKind::Edit);
+        // A first session ends part-way through; the second picks up from the same log.
+        if index == 3 * HISTORY_WINDOW {
+            archive::append(&path, 117, &log.take_folded()).unwrap();
+        }
+    }
+    archive::append(&path, 117, &log.take_folded()).unwrap();
+
+    let archived = archive::load(&path).unwrap().unwrap();
+    assert_eq!(archived.frames.len(), 2);
+    let rejoined: Vec<_> = archived.records().chain(log.records()).collect();
+    assert_eq!(rejoined, whole.records().collect::<Vec<_>>());
+    assert!(log.actions() < 2 * HISTORY_WINDOW);
+    let _ = std::fs::remove_file(&path);
+}

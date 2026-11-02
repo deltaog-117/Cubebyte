@@ -1,11 +1,13 @@
 use glam::Vec3;
-use minecraft_clone::events::apply::{Stage, apply};
-use minecraft_clone::events::log::EventLog;
+use minecraft_clone::events::apply::{Stage, StageError, apply, apply_all, charge_events};
+use minecraft_clone::events::log::{ActionKind, EventLog};
 use minecraft_clone::events::persist::{decode, encode};
+use minecraft_clone::events::redo::RedoStack;
+use minecraft_clone::events::rewind::{REWIND_BASE_FUEL, log_action, rewind_events, rewind_price};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::mobs::model::Mobs;
-use minecraft_clone::player::model::Player;
+use minecraft_clone::player::model::{Player, PlayerError};
 use minecraft_clone::scripting::model::{
     Answer, Command, Cooldowns, Facing, Limits, Pace, Permission, Permissions, Query,
 };
@@ -13,6 +15,9 @@ use minecraft_clone::scripting::service::{ask, run};
 use minecraft_clone::shared::clock::Tick;
 use minecraft_clone::shared::event::{Event, MobId};
 use minecraft_clone::shared::voxel::{BlockId, WorldPos};
+use minecraft_clone::simulation::action::Action;
+use minecraft_clone::simulation::intent_log::IntentLog;
+use minecraft_clone::simulation::persist as intent_persist;
 use minecraft_clone::survival::model::Stats;
 use minecraft_clone::world::model::World;
 use proptest::prelude::*;
@@ -133,6 +138,153 @@ proptest! {
         prop_assert_eq!(replayed_inventory, inventory);
         prop_assert_eq!(replayed_mobs, mobs);
     }
+}
+
+/// The whole game state a script command can change, so two runs can be compared.
+struct Game {
+    world: World,
+    player: Player,
+    inventory: Inventory,
+    stats: Stats,
+    mobs: Mobs,
+    next_mob: MobId,
+    log: EventLog,
+    cooldowns: Cooldowns,
+}
+
+impl Game {
+    fn new() -> Result<Self, PlayerError> {
+        Ok(Self {
+            world: floor(),
+            player: Player::try_new(Vec3::new(0.5, 1.0, 0.5))?,
+            inventory: fuelled(FUEL),
+            stats: Stats::default(),
+            mobs: Mobs::default(),
+            next_mob: MobId::FIRST,
+            log: EventLog::new(),
+            cooldowns: Cooldowns::default(),
+        })
+    }
+
+    fn apply_all(&mut self, events: &[Event]) -> Result<(), StageError> {
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        apply_all(&mut stage, events)
+    }
+
+    /// Offers `command` on `tick` and reports whether it ran.
+    fn offer(&mut self, tick: Tick, command: Command) -> bool {
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let mut pace = Pace {
+            tick,
+            cooldowns: &mut self.cooldowns,
+        };
+        let results = run(
+            &[command],
+            Permissions::ALL,
+            Limits::standard(),
+            &mut pace,
+            &mut stage,
+            &mut self.log,
+            &mut self.next_mob,
+        );
+        results == [Ok(())]
+    }
+}
+
+proptest! {
+    /// Many commands are refused (cooling down, no room, blocked), and only those that ran are
+    /// recorded; offering exactly those to a fresh game reproduces the run.
+    #[test]
+    fn recorded_script_commands_replay_to_the_same_game(
+        offers in prop::collection::vec((0u64..40, command()), 0..60),
+    ) {
+        let mut live = Game::new().unwrap();
+        let mut recording = IntentLog::default();
+        let mut tick = 0;
+        for (gap, command) in offers {
+            tick += gap;
+            if live.offer(Tick(tick), command) {
+                prop_assert_eq!(
+                    recording.record_action(Tick(tick), Action::Script(command)),
+                    Ok(())
+                );
+            }
+        }
+
+        let saved = intent_persist::decode(&intent_persist::encode(&recording)).unwrap();
+        prop_assert_eq!(&saved, &recording);
+        let mut replayed = Game::new().unwrap();
+        for entry in saved.actions() {
+            let Action::Script(command) = entry.action else {
+                panic!("only script commands were recorded");
+            };
+            prop_assert!(replayed.offer(entry.tick, command), "{:?} was refused", entry);
+        }
+
+        prop_assert_eq!(replayed.world, live.world);
+        prop_assert_eq!(replayed.player, live.player);
+        prop_assert_eq!(replayed.inventory, live.inventory);
+        prop_assert_eq!(replayed.mobs, live.mobs);
+        prop_assert_eq!(replayed.log, live.log);
+    }
+}
+
+#[test]
+fn a_priced_rewind_keeps_the_fuel_a_command_burned_and_a_redo_gives_the_price_back() {
+    let mut game = Game::new().unwrap();
+    let command = Command::SetBlock {
+        pos: cell(3, 1, 3),
+        block: BlockId::STONE,
+    };
+    assert!(game.offer(Tick(0), command));
+    let (world_after, pack_after) = (game.world.clone(), game.inventory.clone());
+
+    let mut undo = rewind_events(&game.log).unwrap();
+    let price = rewind_price(&undo);
+    assert_eq!(price, REWIND_BASE_FUEL + u32::from(command.fuel_cost()));
+    undo.extend(charge_events(&game.inventory, &undo, ItemId::FUEL, price).unwrap());
+    assert_eq!(game.apply_all(&undo), Ok(()));
+    log_action(&mut game.log, &undo, ActionKind::Rewind);
+
+    // The block is gone, and the pack is poorer than before the script by only the base price:
+    // the command's own fuel was not refunded.
+    assert_eq!(game.world.block_at(cell(3, 1, 3)), BlockId::AIR);
+    assert_eq!(
+        game.inventory.count_of(ItemId::FUEL),
+        FUEL - u32::from(command.fuel_cost()) - REWIND_BASE_FUEL
+    );
+
+    // A redo is the exact inverse, so it lands on the game as it was after the script.
+    let mut redo = RedoStack::default();
+    redo.record(&undo);
+    let again = redo.take().unwrap();
+    assert_eq!(game.apply_all(&again), Ok(()));
+    assert_eq!(game.world, world_after);
+    assert_eq!(game.inventory, pack_after);
+}
+
+#[test]
+fn a_pack_without_the_price_cannot_rewind() {
+    let mut game = Game::new().unwrap();
+    game.inventory = Inventory::default();
+    let undo = [Event::BlockSet {
+        pos: cell(0, 1, 0),
+        old: BlockId::AIR,
+        new: BlockId::STONE,
+    }];
+    assert!(charge_events(&game.inventory, &undo, ItemId::FUEL, rewind_price(&undo)).is_err());
 }
 
 #[test]

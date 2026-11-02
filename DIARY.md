@@ -39,6 +39,7 @@
 | 2026-11-02 | Mobs under events | A `Mobs` store with ids; spawn, remove and health-change events through the one door; position is not checked | ✅ Confirmed |
 | 2026-11-02 | Redo across restarts and script reads | Redo is its own action kind and the stack is rebuilt from the log; reads are a separate `ask` call that cannot change the game | ✅ Confirmed |
 | 2026-11-02 | Script costs, panel, saved meters and more reads | Fuel item plus per-kind waits; a script panel and a runner; a separate `stats.mcst`; two small fixed reads | ✅ Confirmed |
+| 2026-11-02 | Readout, recorded scripts, priced rewind and the archive | A key for the reads; script commands recorded as they ran; rewind costs 1 fuel plus what it returns, inside the undo; folded history appended to `world.mcea` on exit | ✅ Confirmed |
 
 ---
 
@@ -1212,6 +1213,54 @@ Four roadmap items were done in one cycle. Script commands were free apart from 
 - `Facing::from_view` picks the axis the view points most along, ties to x then y then z, and returns `None` for a zero or non-finite view. `ask` takes the facing as an argument because the camera is not in the game state.
 - Tests: property tests that fuel burned equals the cost of what ran, that a script is its steps shifted by the origin, that waits count down and stay per kind, that meters round-trip, and that the facing is the best-aligned axis; unit tests for no fuel, refused commands, a grant into the fuel's slot, and the panel's rows. The log replay and exact-undo property test now includes fuel.
 - The window was not run by the assistant. Try it by crafting fuel (`Tab`, click fuel), pressing `T`, starting "tower" and watching three blocks appear beside you; by letting the pack run low and seeing the rows grey out; and by eating, quitting and reopening to see the meters kept.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+### Readout, Recorded Scripts, Priced Rewind and the Archive
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+Four roadmap items were done in one cycle. Reads existed but nothing in the window called them, a replay of a run that used scripts drifted, rewinding was free (and refunded the fuel a scripted command burned), and the history the log folds away was thrown out.
+
+#### Decision & Rationale
+**Reads in the window.** One approach was credible, so no options were compared: key `Q` toggles a live line in the title, built from ordinary queries sent through `ask`. A title note is how the game already shows script state, and an on-screen overlay would be a matter of taste. Because it uses `ask`, the player sees exactly what a script would be told.
+
+**Recording script runs.** Two options were compared: A, record which ready-made script started and re-run it; B, record each command that really ran. B was chosen.
+- It follows the rule that an action names what happened, not the click that caused it, as `Break` and `Place` do.
+- A recording no longer depends on the script library, and a future scripting language needs no replay support, since whatever it emits becomes commands.
+- Commands are recorded and replayed at one fixed point of the tick, after the zombie's step, so a teleport reaches the zombie on the same tick it did live. Other actions replay before the tick's steps, as before.
+- Cost: a few bytes per command instead of a few bytes per script.
+
+**Pricing rewind.** Three options were compared: A, a flat price; B, a base plus the fuel the undo would hand back; C, a price by age. B was chosen: it is the only cheap option that closes the refund loophole, and it needs no format change.
+- The price is 1 fuel plus the net fuel the rewind's slot events put back, so a burned command stays burned.
+- **Deviation from the options text.** The options said the charge would be a separate passive action and a redo free. That fails: a redo replays the original slot events, which name the fuel slot's old contents, and a charge in between changes that slot, so the redo of any scripted edit would be refused as stale. The charge is therefore part of the rewind's own events. A redo is the exact inverse, so it gives the price back along with the edit, and `Z` then `Y` lands on the game as it was.
+- The charge is worked out against the pack as it stands after the undo, so it is one all-or-nothing batch. A pack that cannot pay refuses the rewind before anything changes.
+
+**The archive.** Two options were compared: A, flush on exit; B, append as it folds with a counter in the world file to heal a crash. A was chosen.
+- The world file is only written on exit, so a crash already loses the session's edits and archive together. Saving the world first and appending second means a crash between them loses a frame of history but can never write the same history twice.
+- The file is a header and length-prefixed frames, each a complete event log file, so the record layout is defined once and read with the log's own decoder. A frame cut short is dropped by the next append.
+- Cost: folded records wait in memory until exit, a few megabytes for a very long session.
+
+**Trade-offs accepted:**
+- A redo returns the price, so `Z` then `Y` is free. Keeping the price would need a redo that rebases the slot events it replays.
+- The price does not grow with the age of the undone action; that would need ticks in the log.
+- A crash loses that session's archive frame.
+- Nothing plays the archive back yet; it can be decoded and is tested, but the timelapse is a later item.
+- Recordings made before this change replay with free rewinds, so they drift where a rewind could not be paid for.
+
+#### Implementation Notes
+- `scripting::readout` holds the pure formatting; `Running::update_readout` calls it each frame and rewrites the title only when the text changes.
+- Intent file version 4 adds kind 8 with a command sub-kind (teleport, give item, set block, spawn mob); versions 1 to 3 still load.
+- `charge_events` applies the undo's slot events to a copy of the pack, takes the price from it, and returns the slot events of that second step.
+- `EventLog` keeps a `folded` buffer filled by `compact` and emptied by `take_folded`; equality ignores it.
+- Tests: property tests listed in the changelog, an integration test that runs real compaction through `log_action` and checks archive plus log equals the uncompacted history, and one that a priced rewind followed by a redo returns the game exactly.
+- The window was not run by the assistant. Try it by pressing `Q` and turning; by crafting fuel, running a script and pressing `Z` to see the fuel stay spent; by pressing `Z` with no fuel to see the note; and by playing past 512 actions, quitting and finding `world.mcea`.
 
 #### Review / Update Log
 

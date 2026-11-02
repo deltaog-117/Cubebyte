@@ -22,6 +22,14 @@
 //! | 5 | strike | actor (4) |
 //! | 6 | rewind | none |
 //! | 7 | redo | none |
+//! | 8 | script command | command kind (1), then by command kind |
+//!
+//! | Command kind | Command | Fields |
+//! |---|---|---|
+//! | 1 | teleport | x, y, z (4 each) |
+//! | 2 | give item | item (2), count (2) |
+//! | 3 | set block | x, y, z (4 each), block (2) |
+//! | 4 | spawn mob | x, y, z (4 each) |
 //!
 //! A run is one intent held on consecutive ticks, so standing still for an hour costs one
 //! run instead of one entry per tick. The writer joins every such stretch into a single run
@@ -32,13 +40,18 @@
 //! records before the cut instead, for a file left behind by a crash.
 //!
 //! Version 1 had no tags and no actions, only runs; it is still read, unchanged. Version 2 had
-//! kinds 1 to 4 only; it is still read, unchanged.
+//! kinds 1 to 4 only; it is still read, unchanged. Version 3 had kinds 1 to 7 only; it is still
+//! read, unchanged. Kind 8 came with version 4: a script command is saved as the command that
+//! really ran, not as the script that produced it, so a recording stays exact when the ready-made
+//! scripts change or a scripting language replaces them.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::items::registry::ItemId;
+use crate::scripting::model::Command;
 use crate::shared::clock::Tick;
 use crate::shared::intent::{AXIS_MAX, Intent, Walk};
 use crate::shared::voxel::{BlockId, WorldPos};
@@ -48,7 +61,7 @@ use crate::simulation::intent_log::{ActionEntry, ActorId, Entry, IntentLog, Reco
 const MAGIC: [u8; 4] = *b"MCIT";
 
 /// Bump when the layout changes.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -78,6 +91,13 @@ const KIND_EAT: u8 = 4;
 const KIND_STRIKE: u8 = 5;
 const KIND_REWIND: u8 = 6;
 const KIND_REDO: u8 = 7;
+const KIND_SCRIPT: u8 = 8;
+
+/// Script command kinds, inside a script action.
+const COMMAND_TELEPORT: u8 = 1;
+const COMMAND_GIVE_ITEM: u8 = 2;
+const COMMAND_SET_BLOCK: u8 = 3;
+const COMMAND_SPAWN_MOB: u8 = 4;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
@@ -93,6 +113,8 @@ pub enum DecodeError {
     BadTag(u8),
     #[error("action kind {0} is not known")]
     BadActionKind(u8),
+    #[error("script command kind {0} is not known")]
+    BadCommandKind(u8),
     #[error("a run has no length")]
     EmptyRun,
     #[error("a run goes past the last tick")]
@@ -183,6 +205,33 @@ pub(super) fn push_actions(bytes: &mut Vec<u8>, actions: &[ActionEntry]) {
             }
             Action::Rewind => bytes.push(KIND_REWIND),
             Action::Redo => bytes.push(KIND_REDO),
+            Action::Script(command) => {
+                bytes.push(KIND_SCRIPT);
+                push_command(bytes, command);
+            }
+        }
+    }
+}
+
+fn push_command(bytes: &mut Vec<u8>, command: Command) {
+    match command {
+        Command::Teleport { to } => {
+            bytes.push(COMMAND_TELEPORT);
+            push_pos(bytes, to);
+        }
+        Command::GiveItem { item, count } => {
+            bytes.push(COMMAND_GIVE_ITEM);
+            bytes.extend_from_slice(&item.0.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+        }
+        Command::SetBlock { pos, block } => {
+            bytes.push(COMMAND_SET_BLOCK);
+            push_pos(bytes, pos);
+            bytes.extend_from_slice(&block.0.to_le_bytes());
+        }
+        Command::SpawnMob { at } => {
+            bytes.push(COMMAND_SPAWN_MOB);
+            push_pos(bytes, at);
         }
     }
 }
@@ -297,10 +346,31 @@ fn read_action(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeErr
         KIND_STRIKE => Action::Strike(ActorId(u32::from_le_bytes(reader.take()?))),
         KIND_REWIND => Action::Rewind,
         KIND_REDO => Action::Redo,
+        KIND_SCRIPT => Action::Script(read_command(reader)?),
         other => return Err(DecodeError::BadActionKind(other)),
     };
     log.record_action(tick, action)?;
     Ok(())
+}
+
+fn read_command(reader: &mut Reader) -> Result<Command, DecodeError> {
+    Ok(match reader.take::<1>()?[0] {
+        COMMAND_TELEPORT => Command::Teleport {
+            to: read_pos(reader)?,
+        },
+        COMMAND_GIVE_ITEM => Command::GiveItem {
+            item: ItemId(u16::from_le_bytes(reader.take()?)),
+            count: u16::from_le_bytes(reader.take()?),
+        },
+        COMMAND_SET_BLOCK => Command::SetBlock {
+            pos: read_pos(reader)?,
+            block: BlockId(u16::from_le_bytes(reader.take()?)),
+        },
+        COMMAND_SPAWN_MOB => Command::SpawnMob {
+            at: read_pos(reader)?,
+        },
+        other => return Err(DecodeError::BadCommandKind(other)),
+    })
 }
 
 fn read_pos(reader: &mut Reader) -> Result<WorldPos, DecodeError> {
@@ -592,6 +662,26 @@ mod tests {
             any::<u32>().prop_map(|id| Action::Strike(ActorId(id))),
             Just(Action::Rewind),
             Just(Action::Redo),
+            command_strategy().prop_map(Action::Script),
+        ]
+    }
+
+    fn command_strategy() -> impl Strategy<Value = Command> {
+        prop_oneof![
+            (any::<i32>(), any::<i32>(), any::<i32>())
+                .prop_map(|(x, y, z)| Command::Teleport { to: pos(x, y, z) }),
+            (any::<u16>(), any::<u16>()).prop_map(|(item, count)| Command::GiveItem {
+                item: ItemId(item),
+                count
+            }),
+            (any::<i32>(), any::<i32>(), any::<i32>(), any::<u16>()).prop_map(
+                |(x, y, z, block)| Command::SetBlock {
+                    pos: pos(x, y, z),
+                    block: BlockId(block)
+                }
+            ),
+            (any::<i32>(), any::<i32>(), any::<i32>())
+                .prop_map(|(x, y, z)| Command::SpawnMob { at: pos(x, y, z) }),
         ]
     }
 
@@ -697,6 +787,43 @@ mod tests {
             &[
                 (0, Action::Strike(ActorId(4))),
                 (0, Action::Rewind),
+                (0, Action::Redo),
+            ],
+        );
+        assert_eq!(decode(&encode(&log)), Ok(log));
+    }
+
+    #[test]
+    fn a_version_three_file_is_still_read() {
+        let log = log_with_actions(
+            &[(2, 0, 1, false)],
+            &[(0, Action::Rewind), (1, Action::Redo)],
+        );
+        let mut bytes = encode(&log);
+        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn an_unknown_script_command_kind_is_rejected() {
+        let mut bytes = encode(&IntentLog::default());
+        bytes.push(TAG_ACTION);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&[KIND_SCRIPT, 9]);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadCommandKind(9)));
+    }
+
+    #[test]
+    fn a_script_command_keeps_its_place_among_the_other_actions_of_a_tick() {
+        let command = Command::SetBlock {
+            pos: pos(1, 2, 3),
+            block: BlockId::STONE,
+        };
+        let log = log_with_actions(
+            &[],
+            &[
+                (0, Action::Eat),
+                (0, Action::Script(command)),
                 (0, Action::Redo),
             ],
         );

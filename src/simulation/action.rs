@@ -5,6 +5,7 @@
 //! works the result out from the world it finds, so it is refused, like any click at empty
 //! air, if the world no longer fits.
 
+use crate::scripting::model::Command;
 use crate::shared::voxel::{BlockId, WorldPos};
 use crate::simulation::intent_log::ActorId;
 
@@ -24,4 +25,7 @@ pub enum Action {
     Rewind,
     /// Bring back the edit the last rewind undid (key `Y`).
     Redo,
+    /// One command a script ran, saved as it ran: what a replay performs again. The script that
+    /// produced it is not saved, so a recording does not depend on the script library.
+    Script(Command),
 }

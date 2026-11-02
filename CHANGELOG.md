@@ -149,6 +149,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `survival::persist`: the health and hunger meters are saved to `stats.mcst` (file format `MCST`, version 1) on exit and loaded at startup, so a restart keeps them
 - Script reads `Facing` (the direction the player looks along, as `Facing::{North, East, South, West, Up, Down}` with a whole-number code) and `NearestMob` (the block cell of the closest mob in range), and the `Answer::Direction` variant
 - `Permissions::ALL`
+- `scripting::readout::readout`: one line built from the `Facing`, `Look`, `NearestMob` and `MobsNear` queries; key `Q` shows it live in the window title, so what the player reads is what a script is told
+- `Action::Script(Command)` and intent-file kind 8: every script command that ran is recorded on its tick and performed again by a replay after the zombie's step, so replays of scripted runs match
+- `events::rewind::{rewind_price, fuel_returned, REWIND_BASE_FUEL}` and `events::apply::charge_events`: a rewind costs 1 fuel plus the fuel it would hand back, worked out against the pack as it stands after the undo
+- `EventLog::take_folded`: the records `compact` folds away, with their action ends, for the caller to keep
+- `events::archive`: the append-only `world.mcea` (`MCEA`, version 1) of folded-away history, one length-prefixed frame per session, each frame a complete event log file; `append`, `decode` and `load`
+- Property tests: folded records plus the records left are the whole history; the price is the base plus the net fuel given back; a charge after slot events applies in one batch and takes exactly its count; appended archive frames read back in order and a cut frame is dropped; recorded script commands replay to the same game
 
 ### Changed
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
@@ -190,6 +196,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripting::service::ask` takes the player's `Facing` as an argument, since the camera is not part of the game state it reads
 - `ui::layout` lays both panels out with one shared function; `ui::draw` draws the script panel with `script_overlay`
 - Escape closes whichever panel is open; mouse look pauses while either is open
+- `simulation::persist` writes version 4 (kind 8 holds a script command) and reads versions 1 to 4
+- `Running::rewind` pays the rewind price in the same all-or-nothing batch as the undo and refuses, with a note in the title, when the pack cannot pay; a redo gives the price back, since it is the exact inverse
+- `EventLog` equality ignores records folded away and not yet taken, which are output waiting to be written
+- `app` writes `world.mcea` on exit, after the world file is saved
 
 ### Fixed
 - Rewinding or redoing an edit in a chunk that had been unloaded was refused, and undoing a break there would have left a one-block chunk that stopped the real chunk from loading. `app` now loads every chunk a rewind or redo touches (generated terrain plus its logged edits) before applying it

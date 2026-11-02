@@ -21,12 +21,13 @@ use crate::building::service::{REACH, break_target, place_target};
 use crate::combat::service::{hit_events, respawn, respawn_events, strike};
 use crate::crafting::registry::{self as recipes, RecipeId};
 use crate::crafting::service::craft_events;
-use crate::events::apply::{Stage, StageError, apply_all};
+use crate::events::apply::{ChargeError, Stage, StageError, apply_all, charge_events};
+use crate::events::archive;
 use crate::events::log::{ActionKind, EventLog};
 use crate::events::persist::{self, LoadError};
 use crate::events::redo::RedoStack;
 use crate::events::replay::replay_chunk;
-use crate::events::rewind::{log_action, rewind_events, touched_chunks};
+use crate::events::rewind::{log_action, rewind_events, rewind_price, touched_chunks};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
@@ -41,8 +42,10 @@ use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
 use crate::scripting::library::{self, ScriptId};
-use crate::scripting::model::{Command, Cooldowns, Limits, Pace, Permissions};
+use crate::scripting::model::{Command, Cooldowns, Facing, Limits, Pace, Permissions};
+use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
+use crate::scripting::service::run as run_commands;
 use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
@@ -65,6 +68,9 @@ const SEED: u64 = 117;
 
 /// Where the event log is kept, relative to the working directory.
 const SAVE_PATH: &str = "world.mcel";
+
+/// Where the history the log folded away is kept, relative to the working directory.
+const ARCHIVE_PATH: &str = "world.mcea";
 
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
@@ -124,6 +130,8 @@ pub enum AppError {
     SeedMismatch { found: u64, expected: u64 },
     #[error("cannot save the world")]
     Save(#[source] io::Error),
+    #[error("cannot append to the history archive")]
+    SaveArchive(#[source] archive::ArchiveError),
     #[error("cannot load the saved inventory")]
     LoadInventory(#[from] inventory_persist::LoadError),
     #[error("cannot save the inventory")]
@@ -211,8 +219,13 @@ struct Running {
     cooldowns: Cooldowns,
     /// The ready-made script being played out, one command per ready tick.
     script: Option<ScriptRun>,
-    /// How the last script ended, shown in the window title until the next one starts.
+    /// How the last script ended, or why the last rewind was refused, shown in the window title
+    /// until the next script starts or rewind works.
     script_note: Option<String>,
+    /// Whether the window title shows the live readout of facing, aimed block and mobs (key `Q`).
+    readout_on: bool,
+    /// The readout text last put in the title, so the title is only rewritten when it changes.
+    readout: String,
     terrain: TerrainGenerator,
     streamer: Streamer,
 }
@@ -285,6 +298,8 @@ impl App {
             cooldowns: Cooldowns::default(),
             script: None,
             script_note: None,
+            readout_on: false,
+            readout: String::new(),
             terrain,
             streamer: Streamer::new(
                 LOAD_RADIUS,
@@ -328,6 +343,7 @@ impl App {
             KeyCode::KeyY if down => self.with_running(|running| running.act(Action::Redo)),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             KeyCode::KeyT if down => self.with_running(Running::toggle_scripts),
+            KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
                 Some(running) if running.pointer_free() => running.close_panels(),
@@ -431,6 +447,7 @@ impl App {
         }
         running.stream(MAX_LOADS_PER_FRAME);
         running.show_mobs();
+        running.update_readout();
         running.show_panel(self.cursor);
         running.renderer.render(&running.camera)
     }
@@ -730,6 +747,39 @@ impl Running {
         self.renderer.set_overlay(&vertices, &indices);
     }
 
+    /// Shows or hides the live readout in the window title.
+    fn toggle_readout(&mut self) {
+        self.readout_on = !self.readout_on;
+        self.readout.clear();
+        self.update_readout();
+        self.refresh_title();
+    }
+
+    /// Reads the world the way a script would be told (see [`readout`]) and, if the text
+    /// changed, puts it in the title. Reads change nothing, so this also runs during a replay.
+    fn update_readout(&mut self) {
+        if !self.readout_on {
+            return;
+        }
+        let (origin, direction) = (self.camera.position, self.camera.forward());
+        let Some(facing) = Facing::from_view(direction) else {
+            return;
+        };
+        let aimed = break_target(&self.world, origin, direction).ok();
+        let stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let text = readout(aimed, facing, &stage);
+        if text != self.readout {
+            self.readout = text;
+            self.refresh_title();
+        }
+    }
+
     /// Starts the ready-made script `id` from where the player stands. Nothing starts while
     /// a replay runs (it supplies every action itself), while another script is playing, or
     /// when the pack cannot pay for the whole script; the panel greys such rows.
@@ -754,10 +804,13 @@ impl Running {
         self.refresh_title();
     }
 
-    /// Offers the running script's next command to the game on `tick`. The steps it takes
-    /// are not in the intent track yet, so a replay does not run scripts.
+    /// Offers the running script's next command to the game on `tick`, and keeps each command
+    /// that ran in the intent track. A replay plays no script: it performs the commands the
+    /// recording holds for this tick, at this same point of the tick, so the zombie and the
+    /// meters see them when they did.
     fn step_script(&mut self, tick: Tick) {
         if self.replay.is_some() {
+            self.replay_script_commands(tick);
             return;
         }
         let Some(script) = self.script.take() else {
@@ -789,6 +842,9 @@ impl Running {
             Step::Ran { command, rest } => {
                 if let Command::SetBlock { pos, .. } = command {
                     self.remesh_around(pos);
+                }
+                if let Err(error) = self.intents.record_action(tick, Action::Script(command)) {
+                    tracing::warn!(%error, "cannot record a script command");
                 }
                 // A scripted edit is a new edit, so what was rewound can no longer come back.
                 self.redo.clear();
@@ -850,14 +906,29 @@ impl Running {
         Ok(())
     }
 
-    /// Steps back the latest edit still in effect. Reports whether it did. Nothing left to
-    /// undo is normal, and so is a respawn in the way; a refusal (the state moved on in a way
-    /// no event records, such as walking, or a meter that the undo would push out of range)
-    /// is logged.
+    /// Steps back the latest edit still in effect, paying [`rewind_price`] in fuel inside the
+    /// same all-or-nothing batch. Reports whether it did. Nothing left to undo is normal, and
+    /// so are a respawn in the way and a pack that cannot pay (the title says what it needs); a
+    /// refusal (the state moved on in a way no event records, such as walking, or a meter that
+    /// the undo would push out of range) is logged.
     fn rewind(&mut self) -> bool {
-        let Some(events) = rewind_events(&self.log) else {
+        let Some(mut events) = rewind_events(&self.log) else {
             return false;
         };
+        let price = rewind_price(&events);
+        match charge_events(&self.inventory, &events, ItemId::FUEL, price) {
+            Ok(charge) => events.extend(charge),
+            Err(ChargeError::NotEnough(_)) => {
+                self.script_note = Some(format!("rewind needs {price} fuel"));
+                self.refresh_title();
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "rewind rejected");
+                return false;
+            }
+        }
+        self.script_note = None;
         self.load_touched(&events);
         if let Err(error) = self.commit_as(&events, ActionKind::Rewind) {
             tracing::warn!(%error, "rewind rejected");
@@ -955,12 +1026,35 @@ impl Running {
     }
 
     /// Performs what the replay recorded for `tick`, before that tick's steps, as the player
-    /// did it then.
+    /// did it then. Script commands are left for [`Self::replay_script_commands`]: they ran
+    /// after the zombie's step.
     fn replay_actions(&mut self, tick: Tick) {
         let due: Vec<Action> = self
             .replay
             .as_ref()
-            .map(|replay| replay.actions_at(tick).collect())
+            .map(|replay| {
+                replay
+                    .actions_at(tick)
+                    .filter(|action| !matches!(action, Action::Script(_)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for action in due {
+            self.perform(tick, action);
+        }
+    }
+
+    /// Performs the script commands the replay recorded for `tick`.
+    fn replay_script_commands(&mut self, tick: Tick) {
+        let due: Vec<Action> = self
+            .replay
+            .as_ref()
+            .map(|replay| {
+                replay
+                    .actions_at(tick)
+                    .filter(|action| matches!(action, Action::Script(_)))
+                    .collect()
+            })
             .unwrap_or_default();
         for action in due {
             self.perform(tick, action);
@@ -978,6 +1072,7 @@ impl Running {
             Action::Strike(actor) => self.strike_mob(mob_of(actor)),
             Action::Rewind => self.rewind(),
             Action::Redo => self.redo(),
+            Action::Script(command) => self.script_command(tick, command),
         };
         if !done {
             return;
@@ -987,6 +1082,40 @@ impl Running {
         }
         self.inventory_dirty = true;
         self.refresh_title();
+    }
+
+    /// Runs one recorded script command with the checks a live script gets: permission, range,
+    /// fuel and wait. Reports whether it ran.
+    fn script_command(&mut self, tick: Tick, command: Command) -> bool {
+        let mut stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let mut pace = Pace {
+            tick,
+            cooldowns: &mut self.cooldowns,
+        };
+        let results = run_commands(
+            &[command],
+            Permissions::ALL,
+            Limits::standard(),
+            &mut pace,
+            &mut stage,
+            &mut self.log,
+            &mut self.next_mob,
+        );
+        let ran = matches!(results.as_slice(), [Ok(())]);
+        if ran {
+            if let Command::SetBlock { pos, .. } = command {
+                self.remesh_around(pos);
+            }
+            // A scripted edit is a new edit, so what was rewound can no longer come back.
+            self.redo.clear();
+        }
+        ran
     }
 
     /// Breaks the block at `pos` and keeps what it yields. Reports whether it did.
@@ -1051,9 +1180,12 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind, Y redo, T scripts)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, Q read)",
                 recipe.name
             ));
+        }
+        if self.readout_on && !self.readout.is_empty() {
+            title.push_str(&format!(" | {}", self.readout));
         }
         if let Some(script) = &self.script {
             title.push_str(&format!(
@@ -1125,14 +1257,25 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        let Some(running) = self.running.take() else {
+        let Some(mut running) = self.running.take() else {
             return;
         };
         // An empty log was never edited, so there is nothing worth writing.
-        if !running.log.is_empty()
-            && let Err(error) = persist::save(Path::new(SAVE_PATH), SEED, &running.log)
-        {
-            self.failure.get_or_insert(AppError::Save(error));
+        if !running.log.is_empty() {
+            let folded = running.log.take_folded();
+            match persist::save(Path::new(SAVE_PATH), SEED, &running.log) {
+                // The archive follows the world file, never the other way round: if the
+                // world file were not saved, the saved log would still hold these events
+                // and a later session would archive them a second time.
+                Ok(()) => {
+                    if let Err(error) = archive::append(Path::new(ARCHIVE_PATH), SEED, &folded) {
+                        self.failure.get_or_insert(AppError::SaveArchive(error));
+                    }
+                }
+                Err(error) => {
+                    self.failure.get_or_insert(AppError::Save(error));
+                }
+            }
         }
         if running.inventory_dirty
             && let Err(error) =

@@ -3,5 +3,6 @@
 
 pub mod library;
 pub mod model;
+pub mod readout;
 pub mod runner;
 pub mod service;
