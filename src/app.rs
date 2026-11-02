@@ -28,6 +28,7 @@ use crate::events::persist::{self, LoadError};
 use crate::events::redo::RedoStack;
 use crate::events::replay::replay_chunk;
 use crate::events::rewind::{log_action, rewind_events, rewind_price, touched_chunks};
+use crate::events::zone::{ZONE_BACK_STEPS, ZONE_RADIUS, Zone, zone_events, zone_price};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
@@ -210,6 +211,8 @@ struct Running {
     replay: Option<Replay>,
     /// The recipe the craft key makes.
     recipe: RecipeId,
+    /// Which of [`ZONE_BACK_STEPS`] the zone rewind key goes back by.
+    zone_step: usize,
     /// Whether the crafting panel is open: the pointer is free and clicks go to the panel.
     panel_open: bool,
     /// Whether the script panel is open. It shares the free pointer with the crafting panel,
@@ -293,6 +296,7 @@ impl App {
             intents,
             replay,
             recipe: RecipeId::FIRST,
+            zone_step: 0,
             panel_open: false,
             scripts_open: false,
             cooldowns: Cooldowns::default(),
@@ -341,6 +345,11 @@ impl App {
             KeyCode::KeyE if down => self.with_running(Running::eat_food),
             KeyCode::KeyZ if down => self.with_running(|running| running.act(Action::Rewind)),
             KeyCode::KeyY if down => self.with_running(|running| running.act(Action::Redo)),
+            KeyCode::KeyX if down => self.with_running(Running::zone_rewind_here),
+            KeyCode::KeyV if down => self.with_running(|running| {
+                running.zone_step = (running.zone_step + 1) % ZONE_BACK_STEPS.len();
+                running.refresh_title();
+            }),
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             KeyCode::KeyT if down => self.with_running(Running::toggle_scripts),
             KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
@@ -939,6 +948,54 @@ impl Running {
         true
     }
 
+    /// Zone-rewinds around the player's feet by the chosen number of actions (key `X`).
+    fn zone_rewind_here(&mut self) {
+        let feet = self.player.position().floor().as_ivec3();
+        let back = ZONE_BACK_STEPS[self.zone_step % ZONE_BACK_STEPS.len()];
+        self.act(Action::ZoneRewind {
+            centre: WorldPos {
+                x: feet.x,
+                y: feet.y,
+                z: feet.z,
+            },
+            back,
+        });
+    }
+
+    /// Puts the blocks near `centre` back as they were `back` block-changing actions ago,
+    /// paying [`zone_price`] in fuel inside the same all-or-nothing batch, as one edit that
+    /// `Z` takes back whole. Reports whether it did; nothing to restore and a pack that cannot
+    /// pay are normal (the title says which).
+    fn zone_rewind(&mut self, centre: WorldPos, back: u16) -> bool {
+        let mut events = zone_events(&self.log, Zone::around(centre, ZONE_RADIUS), back);
+        if events.is_empty() {
+            self.script_note = Some("zone: nothing to restore".to_owned());
+            self.refresh_title();
+            return false;
+        }
+        let price = zone_price(&events);
+        match charge_events(&self.inventory, &events, ItemId::FUEL, price) {
+            Ok(charge) => events.extend(charge),
+            Err(ChargeError::NotEnough(_)) => {
+                self.script_note = Some(format!("zone rewind needs {price} fuel"));
+                self.refresh_title();
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "zone rewind rejected");
+                return false;
+            }
+        }
+        self.script_note = None;
+        self.load_touched(&events);
+        if let Err(error) = self.commit(&events) {
+            tracing::warn!(%error, "zone rewind rejected");
+            return false;
+        }
+        self.finish_history_step(&events);
+        true
+    }
+
     /// Brings back the edit `Z` undid last. It is logged as a redo, which a later `Z` can
     /// undo again. If the game has moved on in a way no event records, the edit no longer
     /// fits: it is refused and logged, and the older ones are dropped with it. Reports whether
@@ -1072,6 +1129,7 @@ impl Running {
             Action::Strike(actor) => self.strike_mob(mob_of(actor)),
             Action::Rewind => self.rewind(),
             Action::Redo => self.redo(),
+            Action::ZoneRewind { centre, back } => self.zone_rewind(centre, back),
             Action::Script(command) => self.script_command(tick, command),
         };
         if !done {
@@ -1184,6 +1242,10 @@ impl Running {
                 recipe.name
             ));
         }
+        title.push_str(&format!(
+            " | X zone rewind {} back (V change)",
+            ZONE_BACK_STEPS[self.zone_step % ZONE_BACK_STEPS.len()]
+        ));
         if self.readout_on && !self.readout.is_empty() {
             title.push_str(&format!(" | {}", self.readout));
         }

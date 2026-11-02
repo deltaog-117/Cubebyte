@@ -40,6 +40,7 @@
 | 2026-11-02 | Redo across restarts and script reads | Redo is its own action kind and the stack is rebuilt from the log; reads are a separate `ask` call that cannot change the game | ✅ Confirmed |
 | 2026-11-02 | Script costs, panel, saved meters and more reads | Fuel item plus per-kind waits; a script panel and a runner; a separate `stats.mcst`; two small fixed reads | ✅ Confirmed |
 | 2026-11-02 | Readout, recorded scripts, priced rewind and the archive | A key for the reads; script commands recorded as they ran; rewind costs 1 fuel plus what it returns, inside the undo; folded history appended to `world.mcea` on exit | ✅ Confirmed |
+| 2026-11-02 | Local rewind zones | Restore a cube around the player to how it stood N block-changing actions ago, as one priced edit; no new log kind | ✅ Confirmed |
 
 ---
 
@@ -1261,6 +1262,41 @@ Four roadmap items were done in one cycle. Reads existed but nothing in the wind
 - `EventLog` keeps a `folded` buffer filled by `compact` and emptied by `take_folded`; equality ignores it.
 - Tests: property tests listed in the changelog, an integration test that runs real compaction through `log_action` and checks archive plus log equals the uncompacted history, and one that a priced rewind followed by a redo returns the game exactly.
 - The window was not run by the assistant. Try it by pressing `Q` and turning; by crafting fuel, running a script and pressing `Z` to see the fuel stay spent; by pressing `Z` with no fuel to see the note; and by playing past 512 actions, quitting and finding `world.mcea`.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Local Rewind Zones
+
+**Date:** 2026-11-02
+**Status:** Confirmed
+
+#### Context / Background
+`Z` undoes the whole newest action anywhere. A creeper blast or a trampled farm needs an undo that touches only one region. Actions can overlap a region only in part and later edits can pile on top, so the question was what "the region as it was" means.
+
+#### Decision & Rationale
+Three options were compared: A, undo the in-region part of the newest edit that touched the region; B, restore the region to how it stood N actions ago; C, saved region checkpoints. B was chosen.
+- B stays exact when edits overlap: for each block in the region, the newest event gives its value now and the oldest event of the span gives its value before, so only the log is needed.
+- A would have broken the rule that each rewind cancels the closest edit before it, which `Z` and `Y` rely on. C adds stored state that can drift from the history the log folds away.
+- **Deviation from the options text.** The options said B needs a new action kind and log version 8. It does not: the restore is logged as an ordinary edit, so `Z` already takes it back whole and a restart already rebuilds the redo stack correctly. The saved log format is unchanged. The intent track did need a new action (version 5), so a replay performs the same restore.
+- The region is a cube of radius 8 around the player's feet. Without a command line there is no way to mark corners; the command line can offer that later.
+- "N actions ago" counts edits, redos and rewinds (actions that change blocks); passive actions and respawns are not counted. Choices are 1, 3, 10, 30 and 100, cycled with `V`; `X` runs the restore.
+- Price: 1 fuel plus 1 per started group of 4 blocks restored, paid inside the same all-or-nothing batch. Only blocks come back; the pack is not touched, so without a price a break followed by a zone rewind would duplicate the yield.
+
+**Trade-offs accepted:**
+- It reaches only as far back as the log keeps history (256 actions); a larger step is clamped to what is there.
+- Undoing a zone rewind with `Z` keeps its price burned (the existing rewind price rule), so a `Z` after an `X` costs fuel too.
+- Walking is not an event, so a block restored under a standing player is the player's problem, as with `Z`.
+
+#### Implementation Notes
+- `events::zone`: `Zone::around`, `zone_events`, `zone_price`; `EventLog::recent_block_events` gives the events of the newest N block-changing actions.
+- Tests: a property test that the zone matches the world N actions ago, the rest is unchanged, and `Z` restores the world exactly; price and edge tests; intent file round trips for version 5 and a version 4 file still read.
+- The window was not run by the assistant. Try it by breaking and placing a few blocks, then pressing `X` with fuel in the pack; `V` changes how far back.
 
 #### Review / Update Log
 

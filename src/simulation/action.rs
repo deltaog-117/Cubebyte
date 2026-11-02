@@ -25,6 +25,11 @@ pub enum Action {
     Rewind,
     /// Bring back the edit the last rewind undid (key `Y`).
     Redo,
+    /// Put the blocks within [`ZONE_RADIUS`] of `centre` back as they were `back` block-changing
+    /// actions ago (key `X`). The centre is saved, so a replay restores the same region.
+    ///
+    /// [`ZONE_RADIUS`]: crate::events::zone::ZONE_RADIUS
+    ZoneRewind { centre: WorldPos, back: u16 },
     /// One command a script ran, saved as it ran: what a replay performs again. The script that
     /// produced it is not saved, so a recording does not depend on the script library.
     Script(Command),

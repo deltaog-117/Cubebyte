@@ -54,6 +54,7 @@ Items are organized by priority, not by timeline.
 - ✅ Script runs in intent tracks: every command a script really ran is saved in the session file as its own action (version 4; versions 1 to 3 still load) and a replay performs it again at the same point of the tick, so a replay of a run that used scripts no longer drifts; the script itself is not saved, so edits to the ready-made scripts cannot change an old recording
 - ✅ Time as a resource: `Z` costs fuel, a base of 1 plus whatever fuel the undo would hand back, paid inside the rewind's own all-or-nothing batch; undoing a scripted command no longer refunds its fuel, a pack that cannot pay refuses the rewind and the title says what it needs, and `Y` is the exact inverse so it gives the price back with the edit
 - ✅ Archive of folded-away history: the log hands over the events it folds, with their action ends, and the game appends them on exit to `world.mcea` (after the world file is saved, so nothing is written twice); a frame cut short by a crash is dropped on the next append
+- ✅ Local rewind zones: key `X` puts the blocks in a cube of radius 8 around the player back as they were 1, 3, 10, 30 or 100 block-changing actions ago (`V` picks), as one edit that `Z` takes back whole; it costs 1 fuel plus 1 per started group of 4 blocks restored; blocks only, so the pack and mobs are untouched; saved in intent tracks (version 5) so a replay restores the same region
 
 ---
 
@@ -75,7 +76,7 @@ Items are organized by priority, not by timeline.
   - the price is flat plus returned fuel; a price that grows with how old the undone action is would need ticks in the log;
   - undoing what is not an event yet: walking;
   - a rewind of a meal is refused (and logged) when the undo would push a meter out of 0 to 20, for example right after eating at near-zero hunger.
-- **Local rewind zones** – Rewind only a region, for example to undo a creeper blast or reset a farm.
+- **Local rewind zones** – First slice done (see Completed). Still to do: marking a region by two corners (needs the command line), and zones that also restore the pack and mobs.
 - **World interface for scripts** – Five slices done (see Completed): teleport, give item, set block and spawn a mob, each logged with its old value, checked for permission and range, capped per tick, and paid for with fuel and a wait; reads (look, find, count, health, hunger, mobs in range, facing, nearest mob) that change and log nothing; a script panel that plays ready-made scripts; a readout of the reads in the window (`Q`); and script commands recorded in intent tracks. Still to do:
   - the other event-less changes: breaking, placing, crafting, eating, hits, hunger drain, respawn and mob spawns, hits and removals are events now; still without events are walking and mob movement, so rewind cannot yet undo them;
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
@@ -138,8 +139,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Local rewind zones** – Rewind only a region, reusing the chunk-level undo.
-2. **Command line and command dictionary** – Needed before quick-hacks and the language.
+1. **Command line and command dictionary** – Needed before quick-hacks and the language.
 
 ---
 
@@ -149,26 +149,25 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Local rewind zones | Reuses chunk-level undo, region-scoped | H |
-| 2 | Command line and command dictionary | Needed before quick-hacks and the language | H |
-| 3 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
-| 4 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
-| 5 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
-| 6 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 7 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
-| 8 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 9 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
-| 10 | Shaped crafting grid | Builds on the recipe table | M |
-| 11 | Script-driven crafting | Needs the scripting language | M |
-| 12 | Shareable blueprints | Needs scripts and the event log | M |
-| 13 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 14 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
-| 15 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
-| 16 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 17 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 18 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 19 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 20 | Graphics: better mobs | Parts-based models and animation | M |
+| 1 | Command line and command dictionary | Needed before quick-hacks and the language | H |
+| 2 | Scripting language, blocks first | Needs the world interface, cost model and command line | H |
+| 3 | Quick-hacks | Ready-made scripts triggered from the command line; the script panel is the base | M |
+| 4 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
+| 5 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
+| 6 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
+| 7 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 8 | Fix: refused meal rewind at near-zero hunger | Small edge case in rewind | S |
+| 9 | Shaped crafting grid | Builds on the recipe table | M |
+| 10 | Script-driven crafting | Needs the scripting language | M |
+| 11 | Shareable blueprints | Needs scripts and the event log | M |
+| 12 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 13 | Graphics: face shading, sky and fog | Few lines, big visual change; first graphics step | S |
+| 14 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
+| 15 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 16 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 17 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 18 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 19 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

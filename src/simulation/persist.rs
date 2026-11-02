@@ -23,6 +23,7 @@
 //! | 6 | rewind | none |
 //! | 7 | redo | none |
 //! | 8 | script command | command kind (1), then by command kind |
+//! | 9 | zone rewind | centre x, y, z (4 each), back (2) |
 //!
 //! | Command kind | Command | Fields |
 //! |---|---|---|
@@ -43,7 +44,8 @@
 //! kinds 1 to 4 only; it is still read, unchanged. Version 3 had kinds 1 to 7 only; it is still
 //! read, unchanged. Kind 8 came with version 4: a script command is saved as the command that
 //! really ran, not as the script that produced it, so a recording stays exact when the ready-made
-//! scripts change or a scripting language replaces them.
+//! scripts change or a scripting language replaces them. Kind 9 came with version 5: a zone
+//! rewind is saved as its centre and how far back it went.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -61,7 +63,7 @@ use crate::simulation::intent_log::{ActionEntry, ActorId, Entry, IntentLog, Reco
 const MAGIC: [u8; 4] = *b"MCIT";
 
 /// Bump when the layout changes.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -92,6 +94,7 @@ const KIND_STRIKE: u8 = 5;
 const KIND_REWIND: u8 = 6;
 const KIND_REDO: u8 = 7;
 const KIND_SCRIPT: u8 = 8;
+const KIND_ZONE_REWIND: u8 = 9;
 
 /// Script command kinds, inside a script action.
 const COMMAND_TELEPORT: u8 = 1;
@@ -205,6 +208,11 @@ pub(super) fn push_actions(bytes: &mut Vec<u8>, actions: &[ActionEntry]) {
             }
             Action::Rewind => bytes.push(KIND_REWIND),
             Action::Redo => bytes.push(KIND_REDO),
+            Action::ZoneRewind { centre, back } => {
+                bytes.push(KIND_ZONE_REWIND);
+                push_pos(bytes, centre);
+                bytes.extend_from_slice(&back.to_le_bytes());
+            }
             Action::Script(command) => {
                 bytes.push(KIND_SCRIPT);
                 push_command(bytes, command);
@@ -346,6 +354,10 @@ fn read_action(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeErr
         KIND_STRIKE => Action::Strike(ActorId(u32::from_le_bytes(reader.take()?))),
         KIND_REWIND => Action::Rewind,
         KIND_REDO => Action::Redo,
+        KIND_ZONE_REWIND => Action::ZoneRewind {
+            centre: read_pos(reader)?,
+            back: u16::from_le_bytes(reader.take()?),
+        },
         KIND_SCRIPT => Action::Script(read_command(reader)?),
         other => return Err(DecodeError::BadActionKind(other)),
     };
@@ -662,6 +674,12 @@ mod tests {
             any::<u32>().prop_map(|id| Action::Strike(ActorId(id))),
             Just(Action::Rewind),
             Just(Action::Redo),
+            (any::<i32>(), any::<i32>(), any::<i32>(), any::<u16>()).prop_map(|(x, y, z, back)| {
+                Action::ZoneRewind {
+                    centre: pos(x, y, z),
+                    back,
+                }
+            }),
             command_strategy().prop_map(Action::Script),
         ]
     }
@@ -736,8 +754,8 @@ mod tests {
         let mut bytes = encode(&IntentLog::default());
         bytes.push(TAG_ACTION);
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.push(9);
-        assert_eq!(decode(&bytes), Err(DecodeError::BadActionKind(9)));
+        bytes.push(10);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadActionKind(10)));
     }
 
     #[test]
@@ -802,6 +820,29 @@ mod tests {
         let mut bytes = encode(&log);
         bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
         assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn a_version_four_file_is_still_read() {
+        let log = log_with_actions(&[(2, 0, 1, false)], &[(0, Action::Eat), (1, Action::Redo)]);
+        let mut bytes = encode(&log);
+        bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
+        assert_eq!(decode(&bytes), Ok(log));
+    }
+
+    #[test]
+    fn a_zone_rewind_keeps_its_centre_and_reach() {
+        let log = log_with_actions(
+            &[],
+            &[(
+                3,
+                Action::ZoneRewind {
+                    centre: pos(-5, 64, 9),
+                    back: 30,
+                },
+            )],
+        );
+        assert_eq!(decode(&encode(&log)), Ok(log));
     }
 
     #[test]

@@ -155,6 +155,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EventLog::take_folded`: the records `compact` folds away, with their action ends, for the caller to keep
 - `events::archive`: the append-only `world.mcea` (`MCEA`, version 1) of folded-away history, one length-prefixed frame per session, each frame a complete event log file; `append`, `decode` and `load`
 - Property tests: folded records plus the records left are the whole history; the price is the base plus the net fuel given back; a charge after slot events applies in one batch and takes exactly its count; appended archive frames read back in order and a cut frame is dropped; recorded script commands replay to the same game
+- `events::zone`: `Zone::around`, `zone_events` and `zone_price` restore a cube of blocks to how it stood some block-changing actions ago, for 1 fuel plus 1 per started group of 4 blocks; the restore is logged as one edit that `Z` takes back whole
+- `EventLog::recent_block_events`: the events of the newest N actions that changed blocks
+- Keys `X` (zone rewind around the player, radius 8) and `V` (cycle how far back: 1, 3, 10, 30, 100 actions); the title shows the choice
+- `Action::ZoneRewind`, saved in intent tracks as kind 9, so a replay restores the same region
 
 ### Changed
 - `app` spawns, hits, kills and drops zombies through `events::apply::apply_all` as passive events, and clears the mobs in the respawn action, so `Z` still steps over them; `Running` holds a `Mobs` store instead of one `Option<Zombie>`, and a mob's id is also its actor id in the intent log
@@ -197,6 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ui::layout` lays both panels out with one shared function; `ui::draw` draws the script panel with `script_overlay`
 - Escape closes whichever panel is open; mouse look pauses while either is open
 - `simulation::persist` writes version 4 (kind 8 holds a script command) and reads versions 1 to 4
+- `simulation::persist` writes version 5 (kind 9 holds a zone rewind) and reads versions 1 to 5
 - `Running::rewind` pays the rewind price in the same all-or-nothing batch as the undo and refuses, with a note in the title, when the pack cannot pay; a redo gives the price back, since it is the exact inverse
 - `EventLog` equality ignores records folded away and not yet taken, which are output waiting to be written
 - `app` writes `world.mcea` on exit, after the world file is saved

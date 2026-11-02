@@ -184,6 +184,35 @@ impl EventLog {
         std::mem::take(&mut self.folded)
     }
 
+    /// The events of the newest `back` actions that changed blocks (edits, redos and rewinds),
+    /// plus the passive actions between them, oldest first. Fewer actions are returned when
+    /// the log holds fewer, since folded history cannot be reached. Events not yet closed as an
+    /// action are left out, as in rewind.
+    pub fn recent_block_events(&self, back: usize) -> &[Event] {
+        let end = self.marks.last().map_or(0, |mark| mark.end);
+        let mut left = back;
+        let mut start = 0;
+        if left == 0 {
+            return &[];
+        }
+        for (index, mark) in self.marks.iter().enumerate().rev() {
+            if !matches!(
+                mark.kind,
+                ActionKind::Edit | ActionKind::Redo | ActionKind::Rewind
+            ) {
+                continue;
+            }
+            left -= 1;
+            if left == 0 {
+                start = index
+                    .checked_sub(1)
+                    .map_or(0, |before| self.marks[before].end);
+                break;
+            }
+        }
+        &self.events[start..end]
+    }
+
     /// The events of the latest edit that no later rewind has undone, in the order they
     /// happened, or `None` if a respawn comes first. Each rewind cancels the closest edit before it, like matching brackets, so
     /// rewinding again steps back through older edits instead of redoing the last one.
