@@ -9,6 +9,7 @@ pub mod crafting;
 pub mod events;
 pub mod inventory;
 pub mod items;
+pub mod logic;
 pub mod mobs;
 pub mod player;
 pub mod rendering;

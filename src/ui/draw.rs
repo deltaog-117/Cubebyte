@@ -5,7 +5,7 @@ use crate::crafting::registry::RecipeId;
 use crate::rendering::vertex::GpuVertex;
 use crate::scripting::library::ScriptId;
 use crate::ui::font::{GLYPH_WIDTH, glyph};
-use crate::ui::layout::{CommandPanel, Label, Panel, Rect, ScriptPanel};
+use crate::ui::layout::{CommandPanel, Label, Menu, Panel, Rect, ScriptPanel};
 
 const BACKDROP: [f32; 3] = [0.10, 0.10, 0.13];
 const ROW_READY: [f32; 3] = [0.18, 0.42, 0.24];
@@ -15,6 +15,8 @@ const ROW_BLOCKED_HOVER: [f32; 3] = [0.30, 0.30, 0.35];
 const TEXT: [f32; 3] = [0.95, 0.95, 0.95];
 const TEXT_BLOCKED: [f32; 3] = [0.55, 0.55, 0.60];
 const PROMPT_BOX: [f32; 3] = [0.04, 0.04, 0.06];
+const ROW_CHOSEN: [f32; 3] = [0.20, 0.30, 0.58];
+const ROW_CHOSEN_HOVER: [f32; 3] = [0.28, 0.42, 0.80];
 
 /// Quads collected in screen-space vertices, ready to upload.
 struct Quads {
@@ -131,6 +133,29 @@ pub fn script_overlay(
         );
     }
     quads.text(&panel.hint, panel.scale, TEXT_BLOCKED);
+    (quads.vertices, quads.indices)
+}
+
+/// [`overlay`] for a menu; `hovered` is what the line under the pointer stands for. The chosen
+/// line is blue, so the selection shows apart from the green lines that can be clicked.
+pub fn menu_overlay<A: Copy + PartialEq>(
+    menu: &Menu<A>,
+    size: (u32, u32),
+    hovered: Option<A>,
+) -> (Vec<GpuVertex>, Vec<u32>) {
+    let mut quads = Quads::new(size);
+    quads.rect(menu.rect, BACKDROP);
+    quads.text(&menu.title, menu.scale, TEXT);
+    for row in &menu.rows {
+        let over = hovered == Some(row.act);
+        if row.chosen {
+            quads.rect(row.rect, if over { ROW_CHOSEN_HOVER } else { ROW_CHOSEN });
+            quads.text(&row.label, menu.scale, TEXT);
+        } else {
+            quads.row(row.rect, &row.label, menu.scale, row.usable, over);
+        }
+    }
+    quads.text(&menu.hint, menu.scale, TEXT_BLOCKED);
     (quads.vertices, quads.indices)
 }
 

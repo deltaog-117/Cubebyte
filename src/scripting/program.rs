@@ -106,6 +106,22 @@ pub struct Test {
 }
 
 impl Test {
+    /// Whether the test holds for a working cell at `cell`, reading through `ask`. Nothing in
+    /// the game changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal of the read, or [`Denied::NothingToDo`] for an answer that cannot be
+    /// compared.
+    pub fn check(
+        self,
+        cell: WorldPos,
+        ask: &mut dyn FnMut(Query) -> Result<Answer, Denied>,
+    ) -> Result<bool, Denied> {
+        let answer = ask(self.query(cell))?;
+        self.holds(answer).ok_or(Denied::NothingToDo)
+    }
+
     /// The query that answers this test for a working cell at `cell`.
     fn query(self, cell: WorldPos) -> Query {
         match self.read {

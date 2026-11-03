@@ -40,6 +40,7 @@ use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
 use crate::items::registry::{self, ItemId};
+use crate::logic::model::{RuleId, Rules};
 use crate::mobs::model::Mobs;
 use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
@@ -50,10 +51,12 @@ use crate::rendering::fog::Fog;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
 use crate::rendering::pipeline::{RenderError, Renderer};
 use crate::rendering::vertex::{box_mesh, gpu_mesh};
+use crate::scripting::edit::Editor;
 use crate::scripting::library::{self, ScriptId, Target};
 use crate::scripting::model::{
     Answer, Command, Cooldowns, Denied, Facing, Limits, Pace, Permissions, Query,
 };
+use crate::scripting::program::{Compare, Program, Read, Test};
 use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
 use crate::scripting::service::{ask, run as run_commands};
@@ -71,8 +74,11 @@ use crate::simulation::stream::{
 use crate::survival::model::Stats;
 use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
-use crate::ui::draw::{command_overlay, overlay, script_overlay};
-use crate::ui::layout::{command_panel, hack_panel, panel, script_panel};
+use crate::ui::draw::{command_overlay, menu_overlay, overlay, script_overlay};
+use crate::ui::layout::{
+    EditAct, EditorView, RulesAct, command_panel, editor_menu, hack_panel, panel, rules_menu,
+    script_panel,
+};
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
 use crate::world::streaming::Streamer;
@@ -191,6 +197,47 @@ pub fn run() -> Result<(), AppError> {
     app.failure.map_or(Ok(()), Err)
 }
 
+/// Where an editor draft came from, which is where "keep" and "run" send it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Script(ScriptId),
+    Rule(RuleId),
+}
+
+/// The test a new rule starts with: act when hunger is low.
+const DEFAULT_WHEN: Test = Test {
+    read: Read::Hunger,
+    compare: Compare::Below,
+    than: 10,
+};
+
+/// A program being edited and where it came from.
+struct Draft {
+    editor: Editor,
+    origin: Origin,
+}
+
+impl Draft {
+    /// A draft of ready-made script `id`.
+    fn of_script(id: ScriptId) -> Option<Self> {
+        Some(Self {
+            editor: Editor::new(None, library::get(id)?.program()),
+            origin: Origin::Script(id),
+        })
+    }
+
+    /// A draft of rule `id`, with its test as the first line.
+    fn of_rule(rules: &Rules) -> impl Fn(RuleId) -> Option<Self> + '_ {
+        move |id| {
+            let rule = rules.get(id)?;
+            Some(Self {
+                editor: Editor::new(Some(rule.test()), rule.program()),
+                origin: Origin::Rule(id),
+            })
+        }
+    }
+}
+
 struct Running {
     window: Arc<Window>,
     renderer: Renderer,
@@ -252,6 +299,19 @@ struct Running {
     /// The hacks the menu offers, each with the cell it is anchored on, fixed when the menu
     /// opened: the pointer is free while it is open, so the aim must not change under a click.
     hack_menu: Vec<(ScriptId, WorldPos)>,
+    /// Whether the rules panel is open (key `N`). Like the other panels it shares the free
+    /// pointer, and only one panel is open at a time.
+    rules_open: bool,
+    /// The rules in play. They live for the session and are not saved.
+    rules: Rules,
+    /// The rule the rules panel has picked.
+    rule_pick: Option<RuleId>,
+    /// Whether the block editor is open (key `B`).
+    editor_open: bool,
+    /// The program being edited and where it came from; kept while the editor is closed.
+    draft: Option<Draft>,
+    /// What the rules panel or the block editor last had to say, shown as its hint.
+    panel_note: String,
     /// When each kind of script command may next run.
     cooldowns: Cooldowns,
     /// The ready-made script being played out, one command per ready tick.
@@ -366,6 +426,12 @@ impl App {
             scripts_open: false,
             hacks_open: false,
             hack_menu: Vec::new(),
+            rules_open: false,
+            rules: Rules::default(),
+            rule_pick: None,
+            editor_open: false,
+            draft: None,
+            panel_note: String::new(),
             cooldowns: Cooldowns::default(),
             script: None,
             script_note: None,
@@ -430,6 +496,8 @@ impl App {
             KeyCode::Tab if down => self.with_running(Running::toggle_panel),
             KeyCode::KeyT if down => self.with_running(Running::toggle_scripts),
             KeyCode::KeyG if down => self.with_running(Running::toggle_hacks),
+            KeyCode::KeyN if down => self.with_running(Running::toggle_rules),
+            KeyCode::KeyB if down => self.with_running(Running::toggle_editor),
             KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -509,6 +577,7 @@ impl App {
                 running.step_stats();
                 running.step_zombie(tick);
                 running.step_script(tick);
+                running.step_rules(tick);
             }
             if running.stats.is_dead() {
                 running.die();
@@ -774,7 +843,12 @@ impl Running {
 
     /// Whether a panel is open, so the pointer is free and clicks go to the panel.
     fn pointer_free(&self) -> bool {
-        self.panel_open || self.scripts_open || self.hacks_open || self.commands_open
+        self.panel_open
+            || self.scripts_open
+            || self.hacks_open
+            || self.commands_open
+            || self.rules_open
+            || self.editor_open
     }
 
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
@@ -783,6 +857,8 @@ impl Running {
         self.scripts_open = false;
         self.hacks_open = false;
         self.commands_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
         self.sync_pointer();
     }
 
@@ -792,6 +868,8 @@ impl Running {
         self.panel_open = false;
         self.hacks_open = false;
         self.commands_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
         self.sync_pointer();
     }
 
@@ -802,6 +880,8 @@ impl Running {
         self.panel_open = false;
         self.scripts_open = false;
         self.commands_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
         self.hack_menu = if self.hacks_open {
             self.hack_options()
         } else {
@@ -815,6 +895,8 @@ impl Running {
         self.scripts_open = false;
         self.hacks_open = false;
         self.commands_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
         self.sync_pointer();
     }
 
@@ -836,6 +918,21 @@ impl Running {
             let layout = self.command_layout();
             if let Some(id) = layout.row_at(cursor.0, cursor.1) {
                 self.click_command(id);
+            }
+            return;
+        }
+        if self.rules_open {
+            if let Some(act) = self.rules_layout().row_at(cursor.0, cursor.1) {
+                self.click_rules(act);
+            }
+            return;
+        }
+        if self.editor_open {
+            if let Some(act) = self
+                .editor_layout()
+                .and_then(|l| l.row_at(cursor.0, cursor.1))
+            {
+                self.click_editor(act);
             }
             return;
         }
@@ -870,6 +967,13 @@ impl Running {
             let layout = self.command_layout();
             let hovered = layout.row_at(cursor.0, cursor.1);
             command_overlay(&layout, size, hovered)
+        } else if self.rules_open {
+            let layout = self.rules_layout();
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            menu_overlay(&layout, size, hovered)
+        } else if let Some(layout) = self.editor_layout().filter(|_| self.editor_open) {
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            menu_overlay(&layout, size, hovered)
         } else if self.scripts_open {
             let layout = script_panel(size, &self.inventory, self.script.is_some());
             let hovered = layout.row_at(cursor.0, cursor.1);
@@ -897,6 +1001,8 @@ impl Running {
         self.panel_open = false;
         self.scripts_open = false;
         self.hacks_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
         self.commands_open = true;
         self.command_table = table;
         self.command_status.clear();
@@ -1121,23 +1227,302 @@ impl Running {
     /// runs (it supplies every action itself), while another script is playing, or when the
     /// pack cannot pay for the most the script can burn; the panels grey such rows.
     fn start_run(&mut self, id: ScriptId, anchor: WorldPos) -> Result<(), String> {
+        let Some(def) = library::get(id) else {
+            return Err("no such script".to_owned());
+        };
+        self.start_program(def.name, def.program(), anchor)
+    }
+
+    /// Starts `program` called `name` with its working cell on `anchor`, under the rules of
+    /// [`Self::start_run`]. Ready-made scripts, edited drafts and fired rules all start here.
+    fn start_program(
+        &mut self,
+        name: &'static str,
+        program: &Program,
+        anchor: WorldPos,
+    ) -> Result<(), String> {
         if self.replay.is_some() {
             return Err("not while a saved run replays".to_owned());
         }
         if self.script.is_some() {
             return Err("a script is already running".to_owned());
         }
-        let Some(def) = library::get(id) else {
-            return Err("no such script".to_owned());
-        };
-        let needed = def.fuel_cost();
+        let needed = program.fuel_cost();
         if self.inventory.count_of(ItemId::FUEL) < needed {
-            return Err(format!("{} needs {needed} fuel", def.name));
+            return Err(format!("{name} needs {needed} fuel"));
         }
-        self.script = Some(def.start(anchor));
+        self.script = Some(ScriptRun::from_program(name, program, anchor));
         self.script_note = None;
         self.refresh_title();
         Ok(())
+    }
+
+    /// Opens or closes the rules panel (key `N`).
+    fn toggle_rules(&mut self) {
+        let open = !self.rules_open;
+        self.close_panels_quietly();
+        self.rules_open = open;
+        self.panel_note.clear();
+        self.sync_pointer();
+    }
+
+    /// Opens or closes the block editor (key `B`). It reopens the draft it last held, or the
+    /// first ready-made script when there is none.
+    fn toggle_editor(&mut self) {
+        let open = !self.editor_open;
+        self.close_panels_quietly();
+        self.editor_open = open;
+        self.panel_note.clear();
+        if open && self.draft.is_none() {
+            self.draft = library::ids().next().and_then(Draft::of_script);
+        }
+        self.sync_pointer();
+    }
+
+    /// Closes every panel without touching the pointer, for a panel that opens right after.
+    fn close_panels_quietly(&mut self) {
+        self.panel_open = false;
+        self.scripts_open = false;
+        self.hacks_open = false;
+        self.commands_open = false;
+        self.rules_open = false;
+        self.editor_open = false;
+    }
+
+    fn rules_layout(&self) -> crate::ui::layout::Menu<RulesAct> {
+        rules_menu(
+            self.renderer.size(),
+            &self.rules,
+            self.rule_pick,
+            &self.panel_note,
+        )
+    }
+
+    /// The editor's layout, or `None` when there is no draft.
+    fn editor_layout(&self) -> Option<crate::ui::layout::Menu<EditAct>> {
+        let draft = self.draft.as_ref()?;
+        let title = match draft.origin {
+            Origin::Script(id) => format!("editing {}", library::get(id).map_or("?", |s| s.name)),
+            Origin::Rule(id) => format!("editing rule {}", u16::from(id.0) + 1),
+        };
+        let keep = match draft.origin {
+            Origin::Script(_) => "make a rule of it",
+            Origin::Rule(_) => "save to the rule",
+        };
+        let view = EditorView {
+            title: &title,
+            keep,
+            can_run: self.replay.is_none() && self.script.is_none(),
+            can_switch: matches!(draft.origin, Origin::Script(_)),
+            note: &self.panel_note,
+        };
+        Some(editor_menu(self.renderer.size(), &draft.editor, view))
+    }
+
+    fn click_rules(&mut self, act: RulesAct) {
+        self.panel_note.clear();
+        match act {
+            RulesAct::Pick(id) => self.rule_pick = Some(id),
+            RulesAct::Switch => {
+                if let Some(id) = self.rule_pick {
+                    self.rules.switch(id);
+                }
+            }
+            RulesAct::Edit => {
+                let draft = self.rule_pick.and_then(Draft::of_rule(&self.rules));
+                if let Some(draft) = draft {
+                    self.draft = Some(draft);
+                    self.close_panels_quietly();
+                    self.editor_open = true;
+                }
+            }
+            RulesAct::Remove => {
+                if let Some(id) = self.rule_pick.take() {
+                    self.rules.remove(id);
+                    if self
+                        .draft
+                        .as_ref()
+                        .is_some_and(|d| d.origin == Origin::Rule(id))
+                    {
+                        self.draft = None;
+                    }
+                }
+            }
+            RulesAct::New => {
+                let Some((_, stock)) = library::find("stock") else {
+                    return;
+                };
+                match self
+                    .rules
+                    .add(DEFAULT_WHEN, stock.program().clone(), self.feet_cell())
+                {
+                    Ok(id) => self.rule_pick = Some(id),
+                    Err(error) => self.panel_note = error.to_string(),
+                }
+            }
+        }
+    }
+
+    fn click_editor(&mut self, act: EditAct) {
+        self.panel_note.clear();
+        let Some(mut draft) = self.draft.take() else {
+            return;
+        };
+        match act {
+            EditAct::Row(index) => draft.editor.select(index),
+            EditAct::Up => draft.editor.up(),
+            EditAct::Down => draft.editor.down(),
+            EditAct::Field => draft.editor.next_field(),
+            EditAct::Less => {
+                draft.editor.nudge(-1);
+            }
+            EditAct::More => {
+                draft.editor.nudge(1);
+            }
+            EditAct::Kind => draft.editor.next_kind(),
+            EditAct::Add => {
+                if !draft.editor.add() {
+                    self.panel_note = "no room for another block there".to_owned();
+                }
+            }
+            EditAct::Delete => {
+                draft.editor.delete();
+            }
+            EditAct::Run => self.run_draft(&draft),
+            EditAct::Keep => self.keep_draft(&mut draft),
+            EditAct::Other => {
+                let next = match draft.origin {
+                    Origin::Script(id) => library::ids().find(|other| other.0 > id.0),
+                    Origin::Rule(_) => None,
+                };
+                if let Some(opened) = next
+                    .or_else(|| library::ids().next())
+                    .and_then(Draft::of_script)
+                {
+                    draft = opened;
+                }
+            }
+        }
+        self.draft = Some(draft);
+    }
+
+    /// Starts the draft as a script, anchored on what its origin needs.
+    fn run_draft(&mut self, draft: &Draft) {
+        let program = match draft.editor.program() {
+            Ok(program) => program,
+            Err(error) => {
+                self.panel_note = error.to_string();
+                return;
+            }
+        };
+        let anchor = match draft.origin {
+            Origin::Rule(id) => self.rules.get(id).map(|rule| rule.anchor()),
+            Origin::Script(id) => library::get(id).and_then(|script| {
+                let feet = self.feet_cell();
+                let (aimed, mob) = self.aim_context();
+                library::anchor(script.target, feet, aimed, mob)
+            }),
+        };
+        let Some(anchor) = anchor else {
+            self.panel_note = "nothing to aim at for this script".to_owned();
+            return;
+        };
+        if let Err(why) = self.start_program("draft", &program, anchor) {
+            self.panel_note = why;
+        }
+    }
+
+    /// Makes a rule of a script's draft, or writes a rule's draft back to the rule.
+    fn keep_draft(&mut self, draft: &mut Draft) {
+        let program = match draft.editor.program() {
+            Ok(program) => program,
+            Err(error) => {
+                self.panel_note = error.to_string();
+                return;
+            }
+        };
+        match draft.origin {
+            Origin::Script(_) => {
+                match self
+                    .rules
+                    .add(DEFAULT_WHEN, program.clone(), self.feet_cell())
+                {
+                    Ok(id) => {
+                        *draft = Draft {
+                            editor: Editor::new(Some(DEFAULT_WHEN), &program),
+                            origin: Origin::Rule(id),
+                        };
+                        self.rule_pick = Some(id);
+                        self.panel_note = format!("rule {} made", u16::from(id.0) + 1);
+                    }
+                    Err(error) => self.panel_note = error.to_string(),
+                }
+            }
+            Origin::Rule(id) => {
+                let test = draft.editor.when().unwrap_or(DEFAULT_WHEN);
+                self.panel_note = match self.rules.replace(id, test, program) {
+                    Ok(()) => format!("rule {} saved", u16::from(id.0) + 1),
+                    Err(error) => error.to_string(),
+                };
+            }
+        }
+    }
+
+    /// Fires the first rule whose test holds, as a script. Rules look at the world once per
+    /// [`CHECK_EVERY`](crate::logic::model::CHECK_EVERY) ticks and never during a replay: the
+    /// replay performs the commands the recording holds, which include what a rule once ran.
+    fn step_rules(&mut self, tick: Tick) {
+        if self.replay.is_some() || self.script.is_some() || self.rules.is_empty() {
+            return;
+        }
+        let due = {
+            let stage = Stage {
+                world: &mut self.world,
+                player: &mut self.player,
+                inventory: &mut self.inventory,
+                stats: &mut self.stats,
+                mobs: &mut self.mobs,
+            };
+            let mut read = |query| {
+                ask(
+                    &[query],
+                    Permissions::ALL,
+                    Limits::standard(),
+                    Facing::North,
+                    &stage,
+                )
+                .into_iter()
+                .next()
+                .unwrap_or(Err(Denied::NothingToDo))
+            };
+            self.rules.due(tick.0, &mut read)
+        };
+        let Some(id) = due else {
+            return;
+        };
+        let Some((program, anchor)) = self
+            .rules
+            .get(id)
+            .map(|rule| (rule.program().clone(), rule.anchor()))
+        else {
+            return;
+        };
+        let number = u16::from(id.0) + 1;
+        match self.start_program("rule", &program, anchor) {
+            Ok(()) => {
+                self.rules.fired(id, tick.0);
+                tracing::info!(rule = number, tick = tick.0, "rule fired");
+            }
+            Err(why) => {
+                // Not resting: the rule tries again at the next look, once fuel or the free
+                // script slot is there.
+                let note = format!("rule {number} waits: {why}");
+                if self.script_note.as_ref() != Some(&note) {
+                    self.script_note = Some(note);
+                    self.refresh_title();
+                }
+            }
+        }
     }
 
     /// Offers the running script's next command to the game on `tick`, and keeps each command
@@ -1584,7 +1969,7 @@ impl Running {
         }
         if let Some(recipe) = recipes::get(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, / or H commands)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, / or H commands)",
                 recipe.name
             ));
         }

@@ -44,6 +44,7 @@
 | 2026-11-02 | Command line and command dictionary | One table of commands read by the parser, the dictionary and the errors; typed line and clickable table in one panel; commands become existing actions | ✅ Confirmed |
 | 2026-11-02 | Scripting language, first slice, and quick-hacks | A script is a checked tree of blocks (do, shift, repeat, if) stepped under a budget; a quick-hack is a program anchored on the aimed block or the nearest mob, chosen from a menu or by `hack <name>` | ✅ Confirmed |
 | 2026-11-02 | Clamped meter rewind and distance fog | A rewind cuts its meter changes to what fits; fog is computed per pixel from a checked range tied to the load radius; the Kogama-style block editor is put on hold | ✅ Confirmed |
+| 2026-11-03 | Rules and the block editor | Rules are a test plus a program on a cell, fired as ordinary scripts; the editor is a click-driven draft that can only yield a checked program, session only | ✅ Confirmed |
 
 ---
 
@@ -1450,6 +1451,46 @@ Two roadmap items were taken in one cycle: the next graphics step (darkening cor
 - `simulation::stream::start_dir` and `prune_sessions` handle the folder; `Replay` remembers its source file and gives `start_dir`; `app` loads from the folder, saves a new one with `save_start` and skips the world, archive, inventory and meters on exit when the session began as a replay.
 - Tests: the eight neighbour cases of occlusion; a floor block beside a wall darkens exactly the two corners next to it; a nook is fully shut; the same across a chunk border; every quad's cut diagonal is the more shut-in one; the openness reaching the GPU is in 0 to 1; the folder is not mistaken for a session; pruning removes the folder; the starting world round-trips.
 - The window started for 10 seconds with no shader error and wrote its starting-world folder. The occlusion look was not seen by the assistant: stand beside a wall and the floor corners next to it should be darker.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-03 | Initial entry | deltaog-117 |
+
+
+### Rules and the Block Editor
+
+**Date:** 2026-11-03
+**Status:** Confirmed
+
+#### Context / Background
+Two roadmap items were taken together: logic and automation, and the block editor for programs. A rule is a condition plus a program, and the editor is how a player changes that program, so the two meet in one flow.
+
+#### Options Considered
+- **Logic:** placed sensor, wire and lamp blocks with a per-tick signal; rules ("when this test holds, run this program"); or one global trigger slot.
+- **Editor:** a click-driven list of blocks (session only); the same with a saved-programs file; or a typed text view.
+
+#### Decision & Rationale
+- **Rules, not wired blocks.** A rule reuses `Test`, `Program` and the existing permission, range, fuel and wait checks, so no new event kind, block type, mesher change or save format was needed, and replay stays exact. Wires would have been a different project (flood-filled signals, new blocks, a save-format history) and can still be built on top later.
+- **A rule fires as an ordinary script.** It starts a `ScriptRun`, so its commands are logged, recorded in the intent track and undone whole by `Z`. Rules look at the world once a second and never during a replay, which supplies the recorded commands itself. The decision that a rule is true is not recorded, only what it did.
+- **A rule rests for 10 seconds after firing, and waits when it cannot start.** A true rule would otherwise drain fuel every second. If the fuel or the script slot is missing it is not marked as fired, so it tries again at the next look.
+- **The editor can only yield a checked program.** It holds an unchecked draft (an empty repeat is allowed while building) but the only way out is `Program::try_new`. Limits that checking could not repair later (64 blocks, 4 levels) are refused at the click.
+- **Clicks, not typing.** Each line has fields (x, y, z, block, item, count, times, read, compare, number); one button picks the field and two step it. A new repeat or if is filled by adding while it is selected. Text input stays on the command line.
+- **A rule's test is the first line of its draft**, edited with the same buttons as an `if`, so no extra command grammar was needed to make rules.
+- **No saved format yet.** The Kogama-style design is still under review, so neither rules nor edited programs are saved; a format chosen now would have to load forever.
+
+**Trade-offs accepted:**
+- Rules and drafts vanish on exit.
+- Rules are checked once a second, so a very short condition can be missed.
+- Rules have no visible form in the world.
+- The font has no plus sign, so the buttons read "less" and "more".
+- The menu shrinks its text to fit tall lists, so the editor is small in small windows.
+
+#### Implementation Notes
+- `logic::model` (`Rules`, `Rule`, `RuleId`, limits), `scripting::edit` (`Editor`, `Kind`, `Row`), `Test::check`, `ui::layout::{Menu, rules_menu, editor_menu}`, `ui::draw::menu_overlay`; `app` gained `N` and `B`, `Draft`, `start_program` (shared by scripts, drafts and rules) and `step_rules`.
+- Tests: rule timing, limit and rest; a property test that any click sequence keeps the draft in its limits and a valid draft still ends; layout tests; an integration test of a rule running an edited program once and undoing exactly.
+- The window was not run by the assistant: open `B`, change a repeat, press run, and make a rule of it with `N`.
 
 #### Review / Update Log
 

@@ -174,6 +174,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GpuVertex::openness` and a shader term that darkens shut-in corners by a strength held in the camera uniform, so the look can change without re-meshing
 - A session now saves the world it started from in `intents/NNNN.start/` (`world.mcel`, `inventory.mcin`, `stats.mcst`); `--replay N` begins from that copy, so a replay is exact whatever the live world has become
 - `simulation::stream::start_dir` and `Replay::start_dir`
+- `logic::model`: rules, a `Test` and a `Program` fixed on a cell; `Rules` (at most 8) answers `due` once a second with the first rule that is on, not resting and true, and a fired rule rests 10 seconds; a refused read counts as false
+- Rules fire as ordinary scripts (permission, range, fuel and wait checks, logged, recorded in intent tracks, undone whole by `Z`) and never during a replay; `N` opens a panel to switch, edit, remove or add a rule (rules live for the session and are not saved)
+- `scripting::edit::Editor`: the core of the block editor, a draft of a program changed one click at a time (select, add a block of a chosen kind, delete, step a number or choice up and down); it refuses an add past 64 blocks or 4 levels and yields a program only through `Program::try_new`
+- `B` opens the block editor on a ready-made script or a rule's program (a rule's test is its first line); `run` plays the draft, `make a rule of it` and `save to the rule` keep it; `Test::check` reads a test through `ask` without changing anything
+- `ui::layout::Menu`, `menu`, `rules_menu`, `editor_menu` and `ui::draw::menu_overlay`: one generic clickable list the two new panels share; a panel's text scale now also shrinks to fit the window's height
+- Tests: rule timing and limits, editor properties (any click sequence keeps the draft within its limits and a valid draft still ends), menu layout, and an integration test where a rule runs an edited program once and undoes exactly
 
 ### Changed
 - The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before

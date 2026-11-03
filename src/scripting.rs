@@ -2,6 +2,7 @@
 //! scripts and quick-hacks a player can start, the programs they are made of, and the runner
 //! that plays one out over several ticks.
 
+pub mod edit;
 pub mod library;
 pub mod model;
 pub mod program;

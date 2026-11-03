@@ -62,6 +62,8 @@ Items are organized by priority, not by timeline.
 - ✅ Distance fog: far terrain fades into the sky colour, computed per pixel in the shader from a checked `Fog` range (half the load radius to the full radius), so chunks arrive hidden in the haze; the interface is never fogged. Per-face shading and the sky colour were already in place
 - ✅ Vertex ambient occlusion: every corner of a face is darkened by how many solid blocks crowd it (two beside it and one diagonal), as its own value that the shader applies, so strength can be tuned and later lighting can treat it separately; each quad is cut along its more shut-in diagonal, and an edit re-meshes the whole 3×3×3 cube of chunks around it. Meshing a surface chunk got about 44% slower (157 to 227 µs)
 - ✅ Starting world saved for replays: each session saves the world, pack and meters it began with in `intents/NNNN.start/`, and `--replay N` begins from that copy, so a replay is exact from any world; a session that began as a replay never writes over the live saves, and sessions recorded before this fall back to the live saves with a warning
+- ✅ Rules, first slice: a rule is a test plus a program fixed on a cell; once a second the first rule that is on, resting no longer and true fires as an ordinary script (permission, range, fuel and wait checks, logged, recorded in intent tracks, undone whole by `Z`), then rests 10 seconds; at most 8 rules, never during a replay; `N` opens a panel to switch, edit, remove or add one; rules live for the session
+- ✅ Block editor, first slice: `B` opens a ready-made script or a rule's program as an indented list of blocks (a rule's test is its first line); click a line, pick a field, step it less or more, add a block of a chosen kind, delete, run the draft, make a rule of it or save to the rule; the draft can only become a checked program and refuses growth past 64 blocks or 4 levels; edits last for the session
 
 ---
 
@@ -88,7 +90,7 @@ Items are organized by priority, not by timeline.
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
   - scripts cannot use reads: the window shows them to the player, but a script plays a fixed list of commands and cannot branch on an answer until the language exists;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
-- **Code as gameplay (scripting)** – Under review: the design of the clickable block editor is being thought through again before any code (Kogama-style blocks with a matching text view of the same program, so a player can use either; the text view would round-trip with the blocks). First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it. Still to do: the clickable block editor (open a hack as blocks and change it), a saved format for programs players make (not needed until the editor exists), a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
+- **Code as gameplay (scripting)** – Under review: the design of the clickable block editor is being thought through again before any code (Kogama-style blocks with a matching text view of the same program, so a player can use either; the text view would round-trip with the blocks). First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it; the first slice of the clickable block editor is done too. Still to do: a saved format for programs players make (the editor exists now, so this is the next gap), real drag and drop and typed numbers in the editor, a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
   - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
@@ -110,7 +112,7 @@ Items are organized by priority, not by timeline.
   - the command-line menu, fetching what the player asks for.
 - **Command line and command dictionary** – First slice done (see Completed); `hack` was added with quick-hacks. Still to do: more commands as features arrive (craft, eat, hits), command history with the arrow keys, aiming (`go` to the block under the crosshair), and the vim-like grammar growth (counts, modifiers, targets).
 - **Programmable mobs** – Craft a "brain" item and script its behavior: follow, guard, farm, haul. The best first use of scripting.
-- **Logic and automation** – Wires, sensors and triggers that scripts can read and write.
+- **Logic and automation** – First slice done (see Completed): rules, a test plus a program on a cell. Still to do: saving rules (waits for a program format), rules anchored on an aimed block or mob and not only the player's feet, rules that react to an event and not only to a reading polled once a second, a visible form in the world, and wires and sensor blocks if rules prove not enough (they would need a new block kind, a signal pass and a save format).
 
 ---
 
@@ -145,7 +147,7 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Block editor for programs** – Open a hack as blocks and change it; builds on the program tree and the panel click pattern. On hold while the Kogama-style design is reviewed (see Code as gameplay).
+1. **Saving player programs** – The editor and rules both vanish on exit. A versioned program file would keep them; the format is hard to undo, so it waits for the Kogama-style design review (see Code as gameplay).
 
 ---
 
@@ -155,10 +157,10 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Block editor for programs | On hold: the Kogama-style design (blocks plus a matching text view) is being reviewed first | H |
+| 1 | Saving player programs and rules | The editor and rules now exist and vanish on exit; the format waits for the design review | M |
 | 2 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
 | 3 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 4 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 4 | Logic and automation, next slices | Rules exist; next are event-driven rules, aimed anchors and a visible form | M |
 | 5 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
 | 6 | Shaped crafting grid | Builds on the recipe table | M |
 | 7 | Script-driven crafting | Needs the scripting language | M |

@@ -10,6 +10,8 @@ use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self as items, ItemId};
+use crate::logic::model::{RuleId, Rules};
+use crate::scripting::edit::{Editor, test_text};
 use crate::scripting::library::{self, ScriptId, Target};
 use crate::ui::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
 
@@ -129,7 +131,13 @@ fn arrange((width, height): (u32, u32), title: &str, hint: &str, texts: &[String
         .unwrap_or(0);
     // Big windows get big text, but never so big that the widest line leaves the window.
     let panel_units = widest as u32 * (GLYPH_WIDTH + 1) + 2 * ROW_PAD + 2 * MARGIN;
-    let scale = (height / PIXELS_PER_SCALE).min(width / panel_units).max(1);
+    // A tall list must not leave the window either: title, rows, hint and the margins around.
+    let panel_rows =
+        3 * MARGIN + 2 * GLYPH_HEIGHT + texts.len() as u32 * (GLYPH_HEIGHT + 2 * ROW_PAD + 2);
+    let scale = (height / PIXELS_PER_SCALE)
+        .min(width / panel_units)
+        .min(height / panel_rows)
+        .max(1);
     let unit = scale as f32;
     let advance = (GLYPH_WIDTH + 1) as f32 * unit;
     let text_height = GLYPH_HEIGHT as f32 * unit;
@@ -313,6 +321,229 @@ fn script_rows(
     }
 }
 
+/// One clickable line of a [`Menu`], before it is placed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuLine<A> {
+    pub act: A,
+    pub text: String,
+    /// Whether a click would do something right now.
+    pub usable: bool,
+    /// Whether the line is the one picked, such as the selected block.
+    pub chosen: bool,
+}
+
+/// One placed line of a [`Menu`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuRow<A> {
+    pub act: A,
+    pub rect: Rect,
+    pub label: Label,
+    pub usable: bool,
+    pub chosen: bool,
+}
+
+/// A titled list of clickable lines, each standing for an `A`: the form the rules panel and the
+/// block editor share.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu<A> {
+    /// Screen pixels per font pixel.
+    pub scale: u32,
+    pub rect: Rect,
+    pub title: Label,
+    pub hint: Label,
+    pub rows: Vec<MenuRow<A>>,
+}
+
+impl<A: Copy> Menu<A> {
+    /// What the line under the point stands for, if any.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<A> {
+        self.rows
+            .iter()
+            .find(|row| row.rect.contains(x, y))
+            .map(|row| row.act)
+    }
+}
+
+/// Most characters of a menu's hint shown at once.
+const MENU_HINT_SHOWN: usize = 56;
+
+/// Lays a menu out centred in a window of `size` pixels.
+pub fn menu<A: Copy>(
+    size: (u32, u32),
+    title: &str,
+    hint: &str,
+    lines: Vec<MenuLine<A>>,
+) -> Menu<A> {
+    let hint: String = hint.chars().take(MENU_HINT_SHOWN).collect();
+    let texts: Vec<_> = lines.iter().map(|line| line.text.clone()).collect();
+    let arranged = arrange(size, title, &hint, &texts);
+    let rows = lines
+        .into_iter()
+        .zip(arranged.rows)
+        .map(|(line, (rect, label))| MenuRow {
+            act: line.act,
+            rect,
+            label,
+            usable: line.usable,
+            chosen: line.chosen,
+        })
+        .collect();
+    Menu {
+        scale: arranged.scale,
+        rect: arranged.rect,
+        title: arranged.title,
+        hint: arranged.hint,
+        rows,
+    }
+}
+
+/// What a click in the rules panel asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RulesAct {
+    Pick(RuleId),
+    Switch,
+    Edit,
+    Remove,
+    New,
+}
+
+/// The rules panel: one line per rule, then what can be done with the picked one.
+pub fn rules_menu(
+    size: (u32, u32),
+    rules: &Rules,
+    picked: Option<RuleId>,
+    note: &str,
+) -> Menu<RulesAct> {
+    let mut lines: Vec<_> = rules
+        .iter()
+        .map(|(id, rule)| MenuLine {
+            act: RulesAct::Pick(id),
+            text: format!(
+                "{} {} {}",
+                u16::from(id.0) + 1,
+                if rule.is_on() { "on" } else { "off" },
+                test_text(rule.test())
+            ),
+            usable: true,
+            chosen: picked == Some(id),
+        })
+        .collect();
+    let has_pick = picked.is_some_and(|id| rules.get(id).is_some());
+    lines.extend([
+        MenuLine {
+            act: RulesAct::Switch,
+            text: "switch on or off".to_owned(),
+            usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::Edit,
+            text: "edit its blocks".to_owned(),
+            usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::Remove,
+            text: "remove".to_owned(),
+            usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::New,
+            text: "new rule".to_owned(),
+            usable: true,
+            chosen: false,
+        },
+    ]);
+    let hint = if note.is_empty() {
+        "click a rule - n closes"
+    } else {
+        note
+    };
+    menu(size, "rules", hint, lines)
+}
+
+/// What a click in the block editor asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditAct {
+    Row(usize),
+    Up,
+    Down,
+    Field,
+    Less,
+    More,
+    Kind,
+    Add,
+    Delete,
+    Run,
+    Keep,
+    Other,
+}
+
+/// How many lines of the draft show at once.
+pub const EDITOR_LINES: usize = 5;
+
+/// What the editor panel needs to know besides the draft itself.
+#[derive(Clone, Copy, Debug)]
+pub struct EditorView<'a> {
+    pub title: &'a str,
+    /// What the keep line says, or `None` when keeping makes no sense.
+    pub keep: &'a str,
+    /// Whether the draft can start right now.
+    pub can_run: bool,
+    /// Whether another ready-made script can be opened in its place.
+    pub can_switch: bool,
+    pub note: &'a str,
+}
+
+/// The block editor: a stretch of the draft's lines, then the buttons.
+pub fn editor_menu(size: (u32, u32), editor: &Editor, view: EditorView<'_>) -> Menu<EditAct> {
+    let rows = editor.rows();
+    let mut lines: Vec<_> = editor
+        .window(EDITOR_LINES)
+        .map(|index| MenuLine {
+            act: EditAct::Row(index),
+            text: format!("{}{}", "  ".repeat(rows[index].depth), rows[index].text),
+            usable: true,
+            chosen: index == editor.selected(),
+        })
+        .collect();
+    let field = editor.field_name();
+    let button = |act, text: &str, usable| MenuLine {
+        act,
+        text: text.to_owned(),
+        usable,
+        chosen: false,
+    };
+    lines.extend([
+        button(EditAct::Up, "up", !rows.is_empty()),
+        button(EditAct::Down, "down", !rows.is_empty()),
+        button(
+            EditAct::Field,
+            &format!("field {}", field.unwrap_or("none")),
+            field.is_some(),
+        ),
+        button(EditAct::Less, "less", field.is_some()),
+        button(EditAct::More, "more", field.is_some()),
+        button(
+            EditAct::Kind,
+            &format!("next kind - {}", editor.kind().name()),
+            true,
+        ),
+        button(EditAct::Add, &format!("add {}", editor.kind().name()), true),
+        button(EditAct::Delete, "delete", !rows.is_empty()),
+        button(EditAct::Run, "run", view.can_run),
+        button(EditAct::Keep, view.keep, !view.keep.is_empty()),
+        button(EditAct::Other, "other script", view.can_switch),
+    ]);
+    let hint = if view.note.is_empty() {
+        "click to edit - b closes"
+    } else {
+        view.note
+    };
+    menu(size, view.title, hint, lines)
+}
+
 /// One clickable command of the table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandRow {
@@ -428,10 +659,78 @@ pub fn command_panel(size: (u32, u32), typed: &str, status: &str, table: bool) -
 mod tests {
     use super::*;
     use crate::items::registry::ItemId;
+    use crate::scripting::program::{Compare, Read, Test};
     use proptest::prelude::*;
 
     fn size() -> impl Strategy<Value = (u32, u32)> {
         (320u32..4096, 240u32..2160)
+    }
+
+    fn view() -> EditorView<'static> {
+        EditorView {
+            title: "editing tower",
+            keep: "make a rule of it",
+            can_run: true,
+            can_switch: true,
+            note: "",
+        }
+    }
+
+    fn tower() -> Editor {
+        let (_, script) = library::find("tower").expect("tower exists");
+        Editor::new(None, script.program())
+    }
+
+    #[test]
+    fn the_editor_shows_only_a_window_of_lines_then_every_button() {
+        let menu = editor_menu((1280, 720), &tower(), view());
+        let acts: Vec<_> = menu.rows.iter().map(|row| row.act).collect();
+        assert_eq!(acts[..4], (0..4).map(EditAct::Row).collect::<Vec<_>>()[..]);
+        assert_eq!(acts.len(), 4 + 11);
+        assert!(acts.contains(&EditAct::Keep) && acts.contains(&EditAct::Run));
+        assert_eq!(menu.rows.iter().filter(|row| row.chosen).count(), 1);
+    }
+
+    #[test]
+    fn a_nested_line_is_indented_and_a_click_finds_its_act() {
+        let menu = editor_menu((1280, 720), &tower(), view());
+        assert_eq!(menu.rows[2].label.text, "  build stone 0 0 0");
+        let row = &menu.rows[2];
+        let (x, y) = (row.rect.x + 1.0, row.rect.y + 1.0);
+        assert_eq!(menu.row_at(x, y), Some(EditAct::Row(2)));
+        assert_eq!(menu.row_at(-1.0, -1.0), None);
+    }
+
+    #[test]
+    fn rules_are_listed_and_buttons_need_a_pick() {
+        let mut rules = Rules::default();
+        let (_, stock) = library::find("stock").expect("stock exists");
+        let test = Test {
+            read: Read::Hunger,
+            compare: Compare::Below,
+            than: 10,
+        };
+        let anchor = crate::shared::voxel::WorldPos { x: 0, y: 0, z: 0 };
+        let id = rules.add(test, stock.program().clone(), anchor).unwrap();
+        let none = rules_menu((1280, 720), &rules, None, "");
+        assert_eq!(none.rows[0].label.text, "1 on hunger below 10");
+        assert!(none.rows[1..4].iter().all(|row| !row.usable));
+        let picked = rules_menu((1280, 720), &rules, Some(id), "");
+        assert!(picked.rows[0].chosen);
+        assert!(picked.rows[1..].iter().all(|row| row.usable));
+    }
+
+    proptest! {
+        // The tallest editor always fits the window, whatever its size.
+        #[test]
+        fn the_editor_panel_always_fits_the_window((width, height) in size()) {
+            let menu = editor_menu((width, height), &tower(), view());
+            prop_assert!(menu.rect.y >= 0.0);
+            prop_assert!(menu.rect.y + menu.rect.height <= height as f32 + 0.5
+                || menu.scale == 1);
+            prop_assert!(menu.rect.x + menu.rect.width <= width as f32 + 0.5
+                || menu.scale == 1);
+        }
     }
 
     #[test]

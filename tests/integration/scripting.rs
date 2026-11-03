@@ -6,12 +6,15 @@ use minecraft_clone::events::redo::RedoStack;
 use minecraft_clone::events::rewind::{REWIND_BASE_FUEL, log_action, rewind_events, rewind_price};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
+use minecraft_clone::logic::model::{CHECK_EVERY, REST_TICKS, Rules};
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::{Player, PlayerError};
+use minecraft_clone::scripting::edit::Editor;
 use minecraft_clone::scripting::library;
 use minecraft_clone::scripting::model::{
     Answer, Command, Cooldowns, Facing, Limits, Pace, Permission, Permissions, Query,
 };
+use minecraft_clone::scripting::program::{Compare, Read, Test};
 use minecraft_clone::scripting::runner::{Step, step};
 use minecraft_clone::scripting::service::{ask, run};
 use minecraft_clone::shared::clock::Tick;
@@ -403,6 +406,115 @@ fn a_hack_runs_to_the_end_and_undoes_exactly() {
     }
     assert_eq!(inventory.count_of(ItemId::FUEL), FUEL - pillar.fuel_cost());
     assert_eq!(log.actions(), 3);
+
+    let mut undo: Vec<_> = log.iter().map(|event| event.inverse()).collect();
+    undo.reverse();
+    let mut stage = Stage {
+        world: &mut world,
+        player: &mut player,
+        inventory: &mut inventory,
+        stats: &mut stats,
+        mobs: &mut mobs,
+    };
+    assert_eq!(apply_all(&mut stage, &undo), Ok(()));
+    assert_eq!((world, inventory), before);
+}
+
+/// An edited program in a rule: the rule waits for its test, runs what the editor made, rests,
+/// and does not fire again once the test no longer holds. Every command it ran is in the log
+/// and undoes exactly.
+#[test]
+fn a_rule_runs_an_edited_program_when_its_test_holds_and_undoes_exactly() {
+    let mut world = floor();
+    let mut player = Player::try_new(Vec3::new(0.5, 1.0, 0.5)).expect("a valid spawn");
+    let mut inventory = fuelled(FUEL);
+    let (mut stats, mut mobs) = (Stats::default(), Mobs::default());
+    let mut log = EventLog::new();
+    let mut next_mob = MobId::FIRST;
+    let mut cooldowns = Cooldowns::default();
+    let before = (world.clone(), inventory.clone());
+
+    // "stock" gives 10 dirt; the player raises that to 12 in the editor.
+    let (_, stock) = library::find("stock").expect("the stock script exists");
+    let mut editor = Editor::new(None, stock.program());
+    editor.select(0);
+    editor.next_field();
+    assert_eq!(editor.field_name(), Some("count"));
+    assert!(editor.nudge(2));
+    let program = editor
+        .program()
+        .expect("an edited draft that is still valid");
+
+    let no_dirt = Test {
+        read: Read::Count { item: ItemId::DIRT },
+        compare: Compare::Below,
+        than: 1,
+    };
+    let mut rules = Rules::default();
+    let id = rules
+        .add(no_dirt, program, cell(0, 1, 0))
+        .expect("room for a rule");
+
+    let mut script = None;
+    let mut fired = Vec::new();
+    for tick in 0..(REST_TICKS + 2 * CHECK_EVERY) {
+        let mut stage = Stage {
+            world: &mut world,
+            player: &mut player,
+            inventory: &mut inventory,
+            stats: &mut stats,
+            mobs: &mut mobs,
+        };
+        if script.is_none() {
+            let mut read = |query| {
+                ask(
+                    &[query],
+                    Permissions::ALL,
+                    Limits::standard(),
+                    Facing::North,
+                    &stage,
+                )
+                .into_iter()
+                .next()
+                .expect("one answer per query")
+            };
+            if rules.due(tick, &mut read) == Some(id) {
+                rules.fired(id, tick);
+                fired.push(tick);
+                let rule = rules.get(id).expect("the rule is there");
+                script = Some(minecraft_clone::scripting::runner::ScriptRun::from_program(
+                    "rule",
+                    rule.program(),
+                    rule.anchor(),
+                ));
+            }
+        }
+        let Some(current) = script.take() else {
+            continue;
+        };
+        let mut pace = Pace {
+            tick: Tick(tick),
+            cooldowns: &mut cooldowns,
+        };
+        match step(
+            current,
+            Permissions::ALL,
+            Limits::standard(),
+            &mut pace,
+            &mut stage,
+            &mut log,
+            &mut next_mob,
+        ) {
+            Step::Ran { rest, .. } => script = rest,
+            Step::Waiting { run, .. } => script = Some(run),
+            Step::Finished { .. } => {}
+            Step::Stopped { reason, .. } => panic!("the rule's program stopped: {reason}"),
+        }
+    }
+
+    // It fired once; the dirt it gave made the test false, so it never fired again.
+    assert_eq!(fired, [0]);
+    assert_eq!(inventory.count_of(ItemId::DIRT), 12);
 
     let mut undo: Vec<_> = log.iter().map(|event| event.inverse()).collect();
     undo.reverse();
