@@ -6,21 +6,29 @@
 use glam::Vec3;
 
 use crate::blocks::registry;
-use crate::rendering::meshing::{Face, MeshData};
+use crate::rendering::meshing::{Face, MeshData, Occlusion};
 use crate::shared::voxel::{CHUNK_SIZE, ChunkPos};
 
-/// A corner in world space with its final colour. Lighting is baked in here, so the shader
-/// only interpolates.
+/// A corner in world space. The colour carries the per-face shading; how shut in the corner
+/// is travels separately, so the shader decides how strongly to darken it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
+    /// How open the corner is, from 0.0 (shut in) to 1.0 (nothing crowds it). Flat shapes
+    /// such as the interface use 1.0.
+    pub openness: f32,
 }
 
 impl GpuVertex {
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32];
+}
+
+/// A corner's occlusion as the 0.0 to 1.0 openness the shader reads.
+fn openness(occlusion: Occlusion) -> f32 {
+    f32::from(occlusion.level()) / f32::from(Occlusion::OPEN.level())
 }
 
 /// Fixed light from above: tops are brightest, bottoms darkest, so faces stay readable
@@ -47,6 +55,7 @@ pub fn gpu_mesh(mesh: &MeshData, chunk: ChunkPos) -> (Vec<GpuVertex>, Vec<u32>) 
             GpuVertex {
                 position: std::array::from_fn(|axis| vertex.position[axis] + origin[axis]),
                 color: registry::color(vertex.block).map(|channel| channel * shade),
+                openness: openness(vertex.occlusion),
             }
         })
         .collect();
@@ -79,6 +88,7 @@ pub fn box_mesh(min: Vec3, max: Vec3, color: [f32; 3]) -> (Vec<GpuVertex>, Vec<u
         vertices.extend(corners.map(|(x, y, z)| GpuVertex {
             position: corner(x == 1, y == 1, z == 1).to_array(),
             color: shaded,
+            openness: 1.0,
         }));
         indices.extend([0, 1, 2, 0, 2, 3].map(|offset| first + offset));
     }
@@ -123,6 +133,33 @@ mod tests {
             assert!((-8.0..=-7.0).contains(&y), "y = {y}");
             assert!((40.0..=41.0).contains(&z), "z = {z}");
         }
+    }
+
+    #[test]
+    fn openness_spans_zero_to_one_and_reaches_the_gpu_vertex() {
+        let levels =
+            (0..=1).flat_map(|a| (0..=1).flat_map(move |b| (0..=1).map(move |c| (a, b, c))));
+        for (a, b, c) in levels {
+            let value = openness(Occlusion::from_neighbours(a == 1, b == 1, c == 1));
+            assert!((0.0..=1.0).contains(&value), "{value}");
+        }
+        assert_eq!(openness(Occlusion::OPEN), 1.0);
+        assert_eq!(openness(Occlusion::from_neighbours(true, true, false)), 0.0);
+
+        // A floor block with a wall beside it: the shut-in corners reach the GPU darker.
+        let mut chunk = Chunk::default();
+        for (x, y) in [(5, 5), (6, 6)] {
+            chunk.set(
+                LocalPos::try_new(x, y, 5).expect("in range"),
+                BlockId::STONE,
+            );
+        }
+        let mut world = World::default();
+        let pos = ChunkPos { x: 0, y: 0, z: 0 };
+        assert_eq!(world.insert_generated(pos, chunk), Ok(()));
+        let (vertices, _) = gpu_mesh(&mesh_chunk(&world, pos), pos);
+        assert!(vertices.iter().any(|v| v.openness < 1.0));
+        assert!(vertices.iter().all(|v| (0.0..=1.0).contains(&v.openness)));
     }
 
     #[test]

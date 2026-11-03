@@ -1420,3 +1420,39 @@ Three roadmap items were picked for one cycle: the block editor, the refused mea
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-11-02 | Initial entry | deltaog-117 |
+
+---
+
+### Ambient Occlusion and Starting Worlds for Replays
+
+**Date:** 2026-11-03
+**Status:** Confirmed
+
+#### Context / Background
+Two roadmap items were taken in one cycle: the next graphics step (darkening corners where blocks meet) and saving the starting world so intent-track replays are exact. They touch different parts of the code, so they did not interact.
+
+#### Decision & Rationale
+- **Occlusion travels as its own number.** The mesher works out, for each corner of a face, how shut in it is (0 to 3) from the two blocks beside the corner and the one diagonal to it; both sides solid counts as fully shut. The shader applies it with a strength held in the camera uniform. The alternative, baking the darkness into the vertex colour, was smaller but could not be undone later: day and night would need re-meshing, and the sun-shadow look wants ambient occlusion to darken only ambient light. A screen-space version was dropped: untestable without a GPU and it shimmers.
+- **Quads are cut along the more shut-in diagonal.** With one dark corner, the default cut smears it into a streak. Starting the same index loop one corner later turns the diagonal and keeps every triangle facing outward.
+- **An edit re-meshes the 3×3×3 cube of chunks around it.** A corner's darkness reads diagonal blocks, so the old six face neighbours were not enough. The existing property test (an edit changes only the meshes it asks to re-mesh) is what guards this.
+- **The starting world is a folder next to the session file.** `intents/NNNN.start/` holds copies of `world.mcel`, `inventory.mcin` and `stats.mcst` in their existing formats. Embedding them in the session file would make a recording that cannot lose its world, but needs a new format version and bigger session files; the fingerprint-only option detects drift but does not make replays exact.
+- **A replay never writes over the live saves.** A replayed session plays in a copy of an old world; saving it on exit would clobber the player's own. The flag stays set after the replay ends and the keys go live.
+- **Old recordings still replay.** A session with no starting-world folder falls back to the live saves, with a warning.
+
+**Trade-offs accepted:**
+- Meshing a surface chunk is about 44% slower (157 to 227 µs on the benchmark) because every face reads 12 more blocks. A chunk is meshed once per edit or load, so it was accepted; the benchmark baseline is the new figure. Not tried: reading each 3×3 layer once per block instead of per face.
+- Occlusion darkens the whole colour for now, since there is no sun or block light to separate it from. That changes when lighting arrives.
+- A folder per session is two things to keep in step. Pruning removes both, and the writer overwrites a stale folder if a number is reused. A crash between the folder and the first recorded step leaves a folder with no session file; the next session reuses the number and overwrites it.
+- If the starting world cannot be saved, the game warns and carries on; that session will not replay exactly.
+
+#### Implementation Notes
+- `rendering::meshing`: `Occlusion` (built only by `from_neighbours`), `face_occlusion`, a wider `chunks_to_remesh`, and `neighbor` taking a step in blocks. `rendering::vertex` and `rendering::pipeline` carry `openness` and the strength.
+- `simulation::stream::start_dir` and `prune_sessions` handle the folder; `Replay` remembers its source file and gives `start_dir`; `app` loads from the folder, saves a new one with `save_start` and skips the world, archive, inventory and meters on exit when the session began as a replay.
+- Tests: the eight neighbour cases of occlusion; a floor block beside a wall darkens exactly the two corners next to it; a nook is fully shut; the same across a chunk border; every quad's cut diagonal is the more shut-in one; the openness reaching the GPU is in 0 to 1; the folder is not mistaken for a session; pruning removes the folder; the starting world round-trips.
+- The window started for 10 seconds with no shader error and wrote its starting-world folder. The occlusion look was not seen by the assistant: stand beside a wall and the floor corners next to it should be darker.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-03 | Initial entry | deltaog-117 |

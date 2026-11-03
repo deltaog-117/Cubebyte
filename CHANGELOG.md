@@ -170,6 +170,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ScriptRun::from_program`, `ScriptRun::ran` and `Step::Finished`
 - `events::rewind::clamp_meters`: cuts a rewind's hunger and health changes to what the meters can still move by, dropping a change that cannot move one at all
 - `rendering::fog`: a checked `Fog` range with `factor` (0 before the start, 1 from the end, rising evenly between) and `Fog::OFF`; `Renderer::set_fog`
+- `rendering::meshing::Occlusion`: how shut in a corner of a face is, from 0 to 3, built only from the two blocks beside the corner and the one diagonal to it; every mesh vertex carries one, and each quad is cut along its more shut-in diagonal so a single dark corner does not streak
+- `GpuVertex::openness` and a shader term that darkens shut-in corners by a strength held in the camera uniform, so the look can change without re-meshing
+- A session now saves the world it started from in `intents/NNNN.start/` (`world.mcel`, `inventory.mcin`, `stats.mcst`); `--replay N` begins from that copy, so a replay is exact whatever the live world has become
+- `simulation::stream::start_dir` and `Replay::start_dir`
 
 ### Changed
 - The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before
@@ -223,6 +227,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `app` writes `world.mcea` on exit, after the world file is saved
 - The shader reads the camera position, fog range and sky colour from the camera uniform and blends terrain and mobs towards the sky colour with distance; the interface has its own fragment entry and is not fogged; `app` sets the fog from the load radius
 - `Running::rewind` clamps the meter changes of an undo against the current meters before it prices and applies the rewind
+- `chunks_to_remesh` returns every chunk holding a block in the 3×3×3 cube around an edit, not only the six face neighbours, because corner shading reads diagonal blocks
+- `GpuVertex` has a third field and the vertex layout a third attribute; `Vertex` in the mesher has an `occlusion` field and `neighbor` takes a step in blocks instead of a face
+- `prune_sessions` deletes a session's starting-world folder together with its file
+- A session that began as a replay leaves the live `world.mcel`, `world.mcea`, `inventory.mcin` and `stats.mcst` untouched on exit, since it played in a copy of an old world
 
 ### Fixed
 - Undoing a meal was refused when hunger had drained below what the meal gave (for example eating at 0, a drain to 3, then `Z` asking for -4); the undo now stops at 0

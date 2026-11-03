@@ -33,7 +33,13 @@ struct CameraUniform {
     fog: [f32; 4],
     /// The sky colour fog fades into.
     sky: [f32; 4],
+    /// How strongly shut-in corners darken, in `x`: 0.0 is not at all, 1.0 is black.
+    shading: [f32; 4],
 }
+
+/// How strongly the shader darkens a fully shut-in corner. Terrain is not re-meshed to change
+/// it.
+const OCCLUSION_STRENGTH: f32 = 0.5;
 
 const SHADER: &str = "
 struct Camera {
@@ -41,18 +47,21 @@ struct Camera {
     eye: vec4<f32>,
     fog: vec4<f32>,
     sky: vec4<f32>,
+    shading: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Vertex {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) openness: f32,
 };
 
 struct Fragment {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) world: vec3<f32>,
+    @location(2) openness: f32,
 };
 
 @vertex
@@ -61,13 +70,14 @@ fn vs_main(vertex: Vertex) -> Fragment {
         camera.view_projection * vec4<f32>(vertex.position, 1.0),
         vertex.color,
         vertex.position,
+        vertex.openness,
     );
 }
 
 // The interface is already in clip space, so it skips the camera.
 @vertex
 fn vs_overlay(vertex: Vertex) -> Fragment {
-    return Fragment(vec4<f32>(vertex.position, 1.0), vertex.color, vertex.position);
+    return Fragment(vec4<f32>(vertex.position, 1.0), vertex.color, vertex.position, 1.0);
 }
 
 // Same blend as `Fog::factor`: clear up to the start, all sky from the end.
@@ -75,7 +85,8 @@ fn vs_overlay(vertex: Vertex) -> Fragment {
 fn fs_main(fragment: Fragment) -> @location(0) vec4<f32> {
     let distance = length(fragment.world - camera.eye.xyz);
     let amount = clamp((distance - camera.fog.x) / (camera.fog.y - camera.fog.x), 0.0, 1.0);
-    return vec4<f32>(mix(fragment.color, camera.sky.rgb, amount), 1.0);
+    let lit = fragment.color * (1.0 - camera.shading.x * (1.0 - fragment.openness));
+    return vec4<f32>(mix(lit, camera.sky.rgb, amount), 1.0);
 }
 
 // The interface is never fogged.
@@ -371,6 +382,7 @@ impl Renderer {
             eye: [eye.x, eye.y, eye.z, 0.0],
             fog: [self.fog.start(), self.fog.end(), 0.0, 0.0],
             sky: [SKY.r as f32, SKY.g as f32, SKY.b as f32, 1.0],
+            shading: [OCCLUSION_STRENGTH, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));

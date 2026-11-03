@@ -18,6 +18,7 @@ use crate::shared::intent::Intent;
 use crate::simulation::action::Action;
 use crate::simulation::intent_log::{ActorId, IntentLog};
 use crate::simulation::persist::{DecodeError, decode_recovering};
+use crate::simulation::stream;
 
 #[derive(Debug, Error)]
 pub enum ReplayError {
@@ -36,6 +37,8 @@ pub enum ReplayError {
 #[derive(Clone, Debug)]
 pub struct Replay {
     log: IntentLog,
+    /// The session file this was read from, if it came from one.
+    source: Option<PathBuf>,
 }
 
 impl Replay {
@@ -44,7 +47,7 @@ impl Replay {
     /// Returns [`ReplayError::NoPlayerTrack`] if the player has no intent on tick 0.
     pub fn try_new(log: IntentLog) -> Result<Self, ReplayError> {
         match log.track(ActorId::PLAYER).first() {
-            Some(first) if first.tick == Tick(0) => Ok(Self { log }),
+            Some(first) if first.tick == Tick(0) => Ok(Self { log, source: None }),
             _ => Err(ReplayError::NoPlayerTrack),
         }
     }
@@ -68,7 +71,17 @@ impl Replay {
                 "the session file was cut short; replaying what is left"
             );
         }
-        Self::try_new(log)
+        Ok(Self {
+            source: Some(path.to_owned()),
+            ..Self::try_new(log)?
+        })
+    }
+
+    /// The folder holding the world this session started from, or `None` for a replay that
+    /// was not read from a file. The folder may not exist: sessions recorded before starting
+    /// worlds were saved have none.
+    pub fn start_dir(&self) -> Option<PathBuf> {
+        self.source.as_deref().map(stream::start_dir)
     }
 
     /// What `actor` asked for on `tick`, or `None` if the session has nothing for it: the
@@ -186,6 +199,20 @@ mod tests {
         let at_one: Vec<_> = replay.actions_at(Tick(1)).collect();
         assert_eq!(at_one, [Action::Eat, Action::Craft(2)]);
         assert_eq!(replay.actions_at(Tick(0)).count(), 0);
+    }
+
+    #[test]
+    fn a_loaded_replay_knows_where_its_starting_world_is() {
+        let file = TempFile::new();
+        fs::write(&file.0, encode(&log_from(0, 3))).unwrap();
+        let Ok(replay) = Replay::load(&file.0) else {
+            panic!("the saved session must load");
+        };
+        assert_eq!(replay.start_dir(), Some(file.0.with_extension("start")));
+        let Ok(in_memory) = Replay::try_new(log_from(0, 3)) else {
+            panic!("a track from tick 0 must be accepted");
+        };
+        assert_eq!(in_memory.start_dir(), None);
     }
 
     #[test]

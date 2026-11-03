@@ -3,7 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,9 @@ use crate::simulation::action::Action;
 use crate::simulation::intent_log::ActorId;
 use crate::simulation::model::Simulation;
 use crate::simulation::replay::{ArgsError, Replay, ReplayError, replay_session};
-use crate::simulation::stream::{IntentStream, next_session_path, prune_sessions, session_path};
+use crate::simulation::stream::{
+    self, IntentStream, next_session_path, prune_sessions, session_path,
+};
 use crate::survival::model::Stats;
 use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
@@ -220,6 +222,9 @@ struct Running {
     /// What the player and each zombie asked for on every step; settled steps are written to
     /// this session's file as play goes on.
     intents: IntentStream,
+    /// Whether this session began as a replay. Its world is a copy of an old one, so exit
+    /// leaves the live saves alone. Stays set after the replay ends and the keys go live.
+    sandboxed: bool,
     /// The saved session driving the player and the zombie, until it has no step for a tick.
     replay: Option<Replay>,
     /// The recipe the craft key makes.
@@ -292,17 +297,36 @@ impl App {
             Err(error) => tracing::warn!(%error, "fog left off"),
         }
 
-        let log = open_log(Path::new(SAVE_PATH))?;
+        // A replay starts from the world its recording started from; any other session starts
+        // from the live saves.
+        let snapshot = replay.as_ref().and_then(Replay::start_dir);
+        let snapshot = snapshot.filter(|dir| dir.is_dir());
+        if replay.is_some() && snapshot.is_none() {
+            tracing::warn!(
+                "this recording has no saved starting world; replaying from the live saves, so it may drift"
+            );
+        }
+        let start_file = |name: &str| {
+            snapshot
+                .as_ref()
+                .map_or_else(|| PathBuf::from(name), |dir| dir.join(name))
+        };
+        let log = open_log(&start_file(SAVE_PATH))?;
         let redo = RedoStack::from_log(&log);
-        let inventory = inventory_persist::load(Path::new(INVENTORY_PATH))?.unwrap_or_default();
-        let stats = stats_persist::load(Path::new(STATS_PATH))?.unwrap_or_default();
-        // Makes room for the new session. A replayed session is already in memory by now.
+        let inventory = inventory_persist::load(&start_file(INVENTORY_PATH))?.unwrap_or_default();
+        let stats = stats_persist::load(&start_file(STATS_PATH))?.unwrap_or_default();
+        // Makes room for the new session. A replayed session is already in memory by now, and
+        // its starting world has been read above, so pruning it is harmless.
         if let Err(error) = prune_sessions(Path::new(INTENTS_DIR), MAX_SESSIONS - 1) {
             tracing::warn!(%error, "cannot delete old intent sessions");
         }
-        let intents = IntentStream::new(
-            next_session_path(Path::new(INTENTS_DIR)).map_err(AppError::SaveIntents)?,
-        );
+        let session = next_session_path(Path::new(INTENTS_DIR)).map_err(AppError::SaveIntents)?;
+        // Without the starting world a recording cannot be replayed exactly, but it is still
+        // worth playing, so a failure is reported and the game carries on.
+        if let Err(error) = save_start(&stream::start_dir(&session), &log, &inventory, stats) {
+            tracing::warn!(%error, "cannot save the starting world; this session will not replay exactly");
+        }
+        let intents = IntentStream::new(session);
         let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
         // Two blocks above the surface, so the player drops onto the ground.
@@ -329,6 +353,7 @@ impl App {
             zombie_timer: ZOMBIE_DELAY_STEPS,
             next_mob: MobId::FIRST,
             intents,
+            sandboxed: replay.is_some(),
             replay,
             recipe: RecipeId::FIRST,
             zone_step: 0,
@@ -1643,32 +1668,37 @@ impl ApplicationHandler for App {
         let Some(mut running) = self.running.take() else {
             return;
         };
-        // An empty log was never edited, so there is nothing worth writing.
-        if !running.log.is_empty() {
-            let folded = running.log.take_folded();
-            match persist::save(Path::new(SAVE_PATH), SEED, &running.log) {
-                // The archive follows the world file, never the other way round: if the
-                // world file were not saved, the saved log would still hold these events
-                // and a later session would archive them a second time.
-                Ok(()) => {
-                    if let Err(error) = archive::append(Path::new(ARCHIVE_PATH), SEED, &folded) {
-                        self.failure.get_or_insert(AppError::SaveArchive(error));
+        // A session that began as a replay played in a copy of an old world, and saving it
+        // would overwrite the player's own.
+        if !running.sandboxed {
+            // An empty log was never edited, so there is nothing worth writing.
+            if !running.log.is_empty() {
+                let folded = running.log.take_folded();
+                match persist::save(Path::new(SAVE_PATH), SEED, &running.log) {
+                    // The archive follows the world file, never the other way round: if the
+                    // world file were not saved, the saved log would still hold these events
+                    // and a later session would archive them a second time.
+                    Ok(()) => {
+                        if let Err(error) = archive::append(Path::new(ARCHIVE_PATH), SEED, &folded)
+                        {
+                            self.failure.get_or_insert(AppError::SaveArchive(error));
+                        }
+                    }
+                    Err(error) => {
+                        self.failure.get_or_insert(AppError::Save(error));
                     }
                 }
-                Err(error) => {
-                    self.failure.get_or_insert(AppError::Save(error));
-                }
             }
-        }
-        if running.inventory_dirty
-            && let Err(error) =
-                inventory_persist::save(Path::new(INVENTORY_PATH), &running.inventory)
-        {
-            self.failure.get_or_insert(AppError::SaveInventory(error));
-        }
-        // The meters change all the time, so they are always written; the file is eight bytes.
-        if let Err(error) = stats_persist::save(Path::new(STATS_PATH), running.stats) {
-            self.failure.get_or_insert(AppError::SaveStats(error));
+            if running.inventory_dirty
+                && let Err(error) =
+                    inventory_persist::save(Path::new(INVENTORY_PATH), &running.inventory)
+            {
+                self.failure.get_or_insert(AppError::SaveInventory(error));
+            }
+            // The meters change all the time, so they are always written; the file is eight bytes.
+            if let Err(error) = stats_persist::save(Path::new(STATS_PATH), running.stats) {
+                self.failure.get_or_insert(AppError::SaveStats(error));
+            }
         }
         if let Err(error) = running.intents.finish() {
             self.failure.get_or_insert(AppError::SaveIntents(error));
@@ -1750,6 +1780,15 @@ fn open_log(path: &Path) -> Result<EventLog, AppError> {
     }
 }
 
+/// Writes the world a session starts from into `dir`, in the same formats as the live saves,
+/// so a replay of the session can begin from it.
+fn save_start(dir: &Path, log: &EventLog, inventory: &Inventory, stats: Stats) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    persist::save(&dir.join(SAVE_PATH), SEED, log)?;
+    inventory_persist::save(&dir.join(INVENTORY_PATH), inventory)?;
+    stats_persist::save(&dir.join(STATS_PATH), stats)
+}
+
 fn remesh(renderer: &mut Renderer, world: &World, pos: ChunkPos) {
     let (vertices, indices) = gpu_mesh(&mesh_chunk(world, pos), pos);
     renderer.set_mesh(pos, &vertices, &indices);
@@ -1763,5 +1802,58 @@ fn load_chunk(world: &mut World, log: &EventLog, terrain: &TerrainGenerator, pos
     }
     if let Err(error) = replay_chunk(world, log, pos) {
         tracing::error!(?pos, %error, "cannot replay edits onto chunk");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::voxel::{BlockId, WorldPos};
+
+    #[test]
+    fn a_saved_starting_world_loads_back_as_it_was() {
+        let dir = std::env::temp_dir().join(format!("mcit-start-{}", std::process::id()));
+        let start = dir.join("0001.start");
+
+        let mut log = EventLog::new();
+        log.push(Event::BlockSet {
+            pos: WorldPos { x: 1, y: 2, z: 3 },
+            old: BlockId::AIR,
+            new: BlockId::STONE,
+        });
+        let mut inventory = Inventory::default();
+        assert!(inventory.add(ItemId::BREAD, 3).is_ok());
+        let mut stats = Stats::default();
+        stats.hurt(2);
+
+        assert!(save_start(&start, &log, &inventory, stats).is_ok());
+        let loaded_log = open_log(&start.join(SAVE_PATH));
+        let loaded_inventory = inventory_persist::load(&start.join(INVENTORY_PATH));
+        let loaded_stats = stats_persist::load(&start.join(STATS_PATH));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(loaded_log.is_ok_and(|saved| saved == log));
+        assert!(matches!(loaded_inventory, Ok(Some(saved)) if saved == inventory));
+        assert!(matches!(loaded_stats, Ok(Some(saved)) if saved == stats));
+    }
+
+    #[test]
+    fn a_fresh_world_saves_a_starting_world_that_loads_as_empty() {
+        let dir = std::env::temp_dir().join(format!("mcit-fresh-{}", std::process::id()));
+        let start = dir.join("0001.start");
+
+        assert!(
+            save_start(
+                &start,
+                &EventLog::new(),
+                &Inventory::default(),
+                Stats::default()
+            )
+            .is_ok()
+        );
+        let loaded_log = open_log(&start.join(SAVE_PATH));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(loaded_log.is_ok_and(|saved| saved.is_empty()));
     }
 }

@@ -57,6 +57,7 @@ impl Quads {
             [(left, top), (right, top), (right, bottom), (left, bottom)].map(|(x, y)| GpuVertex {
                 position: [x, y, 0.0],
                 color,
+                openness: 1.0,
             }),
         );
         self.indices

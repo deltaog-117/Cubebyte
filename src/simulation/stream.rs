@@ -34,6 +34,9 @@ const FLUSH_AT: usize = 2048;
 
 const EXTENSION: &str = "mcit";
 
+/// Extension of the folder that holds a session's starting world, next to its session file.
+const START_EXTENSION: &str = "start";
+
 #[derive(Debug, Error)]
 pub enum StreamError {
     /// The intent was refused and nothing changed.
@@ -242,7 +245,8 @@ fn session_numbers(dir: &Path) -> io::Result<Vec<u32>> {
 
 /// Deletes the oldest session files in `dir` until at most `keep` remain, and returns how
 /// many it deleted. The newest are the highest numbers, which [`next_session_path`] hands
-/// out in order. Files that are not session files are left alone.
+/// out in order. A deleted session takes its starting-world folder with it. Files that are
+/// not session files are left alone.
 ///
 /// # Errors
 ///
@@ -253,9 +257,22 @@ pub fn prune_sessions(dir: &Path, keep: usize) -> io::Result<usize> {
     numbers.sort_unstable();
     let surplus = numbers.len().saturating_sub(keep);
     for &number in &numbers[..surplus] {
-        fs::remove_file(session_path(dir, number))?;
+        let session = session_path(dir, number);
+        fs::remove_file(&session)?;
+        match fs::remove_dir_all(start_dir(&session)) {
+            Ok(()) => {}
+            // Sessions recorded before starting worlds were saved have no folder.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(surplus)
+}
+
+/// The folder next to the session file at `session` that holds the world the session started
+/// from: `intents/0003.mcit` has `intents/0003.start`.
+pub fn start_dir(session: &Path) -> PathBuf {
+    session.with_extension(START_EXTENSION)
 }
 
 /// The path of session `number` in `dir`, the name [`next_session_path`] gives it.
@@ -513,6 +530,40 @@ mod tests {
         assert_eq!(prune_sessions(&dir.0, 2).unwrap(), 0);
         assert_eq!(prune_sessions(&dir.0, 0).unwrap(), 2);
         assert_eq!(prune_sessions(&dir.0.join("missing"), 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_starting_world_folder_sits_next_to_its_session_and_is_not_a_session() {
+        let dir = TempDir::new();
+        let session = session_path(&dir.0, 3);
+        assert_eq!(start_dir(&session), dir.0.join("0003.start"));
+        fs::create_dir_all(start_dir(&session)).unwrap();
+        fs::write(&session, b"").unwrap();
+        // The folder must not count as session 3 or as a file to prune on its own.
+        assert_eq!(session_numbers(&dir.0).unwrap(), [3]);
+        assert_eq!(next_session_path(&dir.0).unwrap(), session_path(&dir.0, 4));
+    }
+
+    #[test]
+    fn pruning_a_session_takes_its_starting_world_with_it() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        for number in [1, 2, 3] {
+            let session = session_path(&dir.0, number);
+            fs::write(&session, b"").unwrap();
+            // Session 2 predates starting worlds, so it has no folder at all.
+            if number != 2 {
+                fs::create_dir_all(start_dir(&session)).unwrap();
+                fs::write(start_dir(&session).join("world.mcel"), b"x").unwrap();
+            }
+        }
+        assert_eq!(prune_sessions(&dir.0, 1).unwrap(), 2);
+        assert!(!start_dir(&session_path(&dir.0, 1)).exists());
+        assert!(
+            start_dir(&session_path(&dir.0, 3))
+                .join("world.mcel")
+                .exists()
+        );
     }
 
     #[test]

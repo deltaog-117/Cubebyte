@@ -60,6 +60,8 @@ Items are organized by priority, not by timeline.
 - ✅ Quick-hacks: a hack is a program anchored on something: the player's feet, the block under the crosshair or the nearest mob; key `G` opens a menu of the hacks that fit what you aim at (`pillar`, `perch`, `dig` for a block, `cage` for a mob), and the new `hack <name>` command runs any script from the command line; the `T` panel lists only the scripts that need no aim, and a `ward` script shows an `if`
 - ✅ Rewind of a meal at near-zero hunger: a rewind's hunger and health changes are cut down to what the meters can still move by (`clamp_meters`), so undoing a meal after a drain lands hunger on 0 instead of being refused; what is logged is what really moved, so `Y` still restores a valid state
 - ✅ Distance fog: far terrain fades into the sky colour, computed per pixel in the shader from a checked `Fog` range (half the load radius to the full radius), so chunks arrive hidden in the haze; the interface is never fogged. Per-face shading and the sky colour were already in place
+- ✅ Vertex ambient occlusion: every corner of a face is darkened by how many solid blocks crowd it (two beside it and one diagonal), as its own value that the shader applies, so strength can be tuned and later lighting can treat it separately; each quad is cut along its more shut-in diagonal, and an edit re-meshes the whole 3×3×3 cube of chunks around it. Meshing a surface chunk got about 44% slower (157 to 227 µs)
+- ✅ Starting world saved for replays: each session saves the world, pack and meters it began with in `intents/NNNN.start/`, and `--replay N` begins from that copy, so a replay is exact from any world; a session that began as a replay never writes over the live saves, and sessions recorded before this fall back to the live saves with a warning
 
 ---
 
@@ -67,7 +69,7 @@ Items are organized by priority, not by timeline.
 
 - **Tech stack: Rust + `wgpu` + `winit`, no engine** – Decided. Own game loop, world, meshing and simulation. Native first, with WASM possible later.
 - **Deterministic simulation** – The tick loop, player physics and whole-number intent recording are in place; mob AI must run on the tick too and draw from `Simulation::stream` only, so replays always match.
-- **Saving intent tracks** – Seven slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, recording actions, recording hits and rewinds, and recording script commands. A replay is exact as long as the world starts as it did when recorded; it does not yet save or restore the starting world itself.
+- **Saving intent tracks** – Seven slices done (see Completed): the file format, streaming to numbered session files, replay at startup, a limit of 20 kept sessions, recording actions, recording hits and rewinds, and recording script commands. Each session also saves the world it started from, and a replay begins from it, so a replay is exact from any world (sessions recorded before that fall back to the live saves).
 
 ---
 
@@ -121,7 +123,7 @@ Items are organized by priority, not by timeline.
 - **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
 - **Graphics upgrade** – Today blocks are flat colours with no lighting. Done after the current items, in this order. Light and shading are computed from world state and never logged, so replay and rewind are untouched; the mesher keeps producing plain vertex data with no `wgpu` types, so these stay testable without a GPU.
   - ✅ per-face shading (top brighter, sides darker) and ✅ sky colour and distance fog (the Kogama-style bright, simple look); a sun direction is still open;
-  - vertex ambient occlusion: darken corners and edges (the biggest gain for the cost);
+  - ✅ vertex ambient occlusion (darkening is applied in the shader and applies to all light for now; when sun and block light exist it should touch only ambient light);
   - texture atlas with nearest-neighbour sampling (the Minecraft pixel look; needs an art style first);
   - sky gradient or skybox with a sun and clouds;
   - translucent water and glass in a separate sorted pass;
@@ -156,19 +158,17 @@ Recommended order, row 1 first.
 | 1 | Block editor for programs | On hold: the Kogama-style design (blocks plus a matching text view) is being reviewed first | H |
 | 2 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
 | 3 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 4 | Save the starting world for replays | Makes intent-track replays exact from any world | M |
-| 5 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
-| 6 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
-| 7 | Shaped crafting grid | Builds on the recipe table | M |
-| 8 | Script-driven crafting | Needs the scripting language | M |
-| 9 | Shareable blueprints | Needs scripts and the event log | M |
-| 10 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 11 | Graphics: vertex ambient occlusion | Biggest look gain for the cost; extra vertex attribute from the mesher | M |
-| 12 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 13 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 14 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 15 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 16 | Graphics: better mobs | Parts-based models and animation | M |
+| 4 | Logic and automation (wires, sensors, triggers) | Scripts need things to read and write | H |
+| 5 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
+| 6 | Shaped crafting grid | Builds on the recipe table | M |
+| 7 | Script-driven crafting | Needs the scripting language | M |
+| 8 | Shareable blueprints | Needs scripts and the event log | M |
+| 9 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 10 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 11 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 12 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 13 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 14 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 
