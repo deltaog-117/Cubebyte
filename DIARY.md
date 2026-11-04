@@ -1497,3 +1497,42 @@ Two roadmap items were taken together: logic and automation, and the block edito
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-11-03 | Initial entry | deltaog-117 |
+
+
+### Saved Programs, Rule Anchors and Player Recipes
+
+**Date:** 2026-11-04
+**Status:** Confirmed
+
+#### Context / Background
+Three roadmap items were taken together: saving player programs and rules, the next logic slice, and script-driven crafting. They share one question, how a player's programs are written to disk, so that was decided first.
+
+#### Options Considered
+- **File format:** a binary file like the other saves; an own readable text grammar; JSON through a new dependency.
+- **Player recipes:** plain inputs-and-output rows; or a program of take and make steps that can branch.
+- **Logic slice:** anchors for rules now, event-driven rules later.
+
+#### Decision & Rationale
+- **Text, one grammar for scripts, rules and recipes.** The file doubles as the future typed view and as the export for blueprints, so no second format is needed later. It has a version line (`nib 1`) because a format chosen now must load forever. Reading is all or nothing and the parser ends in `Program::try_new` / `RecipeProgram::try_new`, so a file cannot hold a program the game could not build.
+- **A refused file is never overwritten.** If `programs.nib` has a typo the game logs the line, starts with nothing loaded and leaves the file alone on exit, so a typo cannot cost the player their work.
+- **Recipes as programs, with a worth rule.** A recipe that can branch could mint items, so every item has a worth and the worth made may never exceed the worth taken on any path (a repeat counts its body's best path every time). This is checked when the recipe is built. The built-in recipes are all exactly even, and a test keeps that true.
+- **Recipes copy the pack.** A run works on a copy and the result becomes ordinary slot events, so a craft is undone by `Z`, logged and recorded in intent tracks exactly as a built-in one. A recipe is recorded by its number, so the file is copied into each session's starting world and a replay uses the same recipes.
+- **Anchors:** a rule is anchored on a fixed cell, the feet, or the nearest mob (waits if none). An aimed block becomes a fixed cell.
+
+**Trade-offs accepted:**
+- Player recipes can only be written in the file by hand for now.
+- The file is rewritten on exit, so comments in it are not kept.
+- Edits to ready-made scripts in the editor are still not saved.
+- Event-driven rules were left out: they need a trigger vocabulary and would have made the cycle too large.
+
+#### Implementation Notes
+- `scripting::text`, `programs::file`, `crafting::{program, custom, text}`, `logic::model::Anchor`; `app` loads the file at startup (from the starting-world copy during a replay), saves it on exit, and crafts player recipes through `custom_events`.
+- A property test found a real bug during the work: a line holding only `{` crashed the reader. It is fixed, and its input is kept in `proptest-regressions/`.
+- Tests: print-then-parse round trips for programs, recipes and the whole file; a property test that an accepted recipe never adds worth and a failed run leaves the pack unchanged.
+- The window was not run by the assistant: write a `recipe` in `programs.nib`, start the game, press `Tab` to see it, and craft it.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-04 | Initial entry | deltaog-117 |

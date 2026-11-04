@@ -97,6 +97,21 @@ mod tests {
     }
 
     #[test]
+    fn a_built_in_recipe_obeys_the_worth_rule_players_recipes_must() {
+        let worth = |&(item, count): &(ItemId, u8)| {
+            u32::from(items::get(item).map_or(0, |def| def.worth)) * u32::from(count)
+        };
+        for recipe in &RECIPES {
+            let taken: u32 = recipe.inputs.iter().map(worth).sum();
+            assert!(
+                worth(&recipe.output) <= taken,
+                "{} makes more worth than it takes",
+                recipe.name
+            );
+        }
+    }
+
+    #[test]
     fn an_output_fits_in_one_stack() {
         for recipe in &RECIPES {
             let (item, count) = recipe.output;

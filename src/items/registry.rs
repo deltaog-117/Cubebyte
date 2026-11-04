@@ -32,6 +32,9 @@ pub struct ItemDef {
     pub restores_hunger: Option<u8>,
     /// Damage one hit deals while this item is held, if it is a weapon.
     pub damage: Option<u8>,
+    /// What the item is worth in the one scale recipes are balanced on: a recipe made by a
+    /// player may never give back more worth than it takes. At least 1.
+    pub worth: u16,
 }
 
 /// Indexed by `ItemId - 1`. The `ItemId` constants must match these positions.
@@ -42,6 +45,7 @@ const ITEMS: [ItemDef; 7] = [
         places: Some(BlockId::STONE),
         restores_hunger: None,
         damage: None,
+        worth: 2,
     },
     ItemDef {
         name: "dirt",
@@ -49,6 +53,7 @@ const ITEMS: [ItemDef; 7] = [
         places: Some(BlockId::DIRT),
         restores_hunger: None,
         damage: None,
+        worth: 2,
     },
     ItemDef {
         name: "grass",
@@ -56,6 +61,7 @@ const ITEMS: [ItemDef; 7] = [
         places: Some(BlockId::GRASS),
         restores_hunger: None,
         damage: None,
+        worth: 2,
     },
     ItemDef {
         name: "bread",
@@ -63,6 +69,7 @@ const ITEMS: [ItemDef; 7] = [
         places: None,
         restores_hunger: Some(4),
         damage: None,
+        worth: 6,
     },
     ItemDef {
         name: "stew",
@@ -70,6 +77,7 @@ const ITEMS: [ItemDef; 7] = [
         places: None,
         restores_hunger: Some(8),
         damage: None,
+        worth: 6,
     },
     ItemDef {
         name: "sword",
@@ -77,6 +85,7 @@ const ITEMS: [ItemDef; 7] = [
         places: None,
         restores_hunger: None,
         damage: Some(4),
+        worth: 16,
     },
     ItemDef {
         name: "fuel",
@@ -84,6 +93,7 @@ const ITEMS: [ItemDef; 7] = [
         places: None,
         restores_hunger: None,
         damage: None,
+        worth: 3,
     },
 ];
 
@@ -91,6 +101,12 @@ const ITEMS: [ItemDef; 7] = [
 pub fn get(id: ItemId) -> Option<&'static ItemDef> {
     let index = usize::from(id.0.checked_sub(1)?);
     ITEMS.get(index)
+}
+
+/// The item called `name`, or `None` when no item has that name.
+pub fn find(name: &str) -> Option<ItemId> {
+    let index = ITEMS.iter().position(|def| def.name == name)?;
+    u16::try_from(index + 1).ok().map(ItemId)
 }
 
 /// Every defined item, in ID order.
@@ -125,6 +141,20 @@ mod tests {
     fn id_zero_and_ids_past_the_table_are_not_items() {
         assert_eq!(get(ItemId(0)), None);
         assert_eq!(get(ItemId(ITEMS.len() as u16 + 1)), None);
+    }
+
+    #[test]
+    fn find_is_the_inverse_of_the_name() {
+        for id in ids() {
+            let name = get(id).expect("listed").name;
+            assert_eq!(find(name), Some(id));
+        }
+        assert_eq!(find("no such item"), None);
+    }
+
+    #[test]
+    fn every_item_is_worth_something() {
+        assert!(ITEMS.iter().all(|def| def.worth >= 1));
     }
 
     #[test]

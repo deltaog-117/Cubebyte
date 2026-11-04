@@ -52,6 +52,12 @@ pub fn color(id: BlockId) -> [f32; 3] {
     get(id).map_or(UNKNOWN_COLOR, |def| def.color)
 }
 
+/// The block called `name`, or `None` when no block has that name.
+pub fn find(name: &str) -> Option<BlockId> {
+    let index = BLOCKS.iter().position(|def| def.name == name)?;
+    u16::try_from(index).ok().map(BlockId)
+}
+
 /// Whether `id` is a defined block that can be placed.
 pub fn is_solid(id: BlockId) -> bool {
     get(id).is_some_and(|def| def.solid)
@@ -74,6 +80,16 @@ mod tests {
             assert_eq!(get(id).map(|def| def.name), Some(name));
         }
         assert_eq!(named.len(), BLOCKS.len());
+    }
+
+    #[test]
+    fn find_is_the_inverse_of_the_name() {
+        for index in 0..BLOCKS.len() {
+            let id = BlockId(u16::try_from(index).expect("small table"));
+            let name = get(id).expect("in the table").name;
+            assert_eq!(find(name), Some(id));
+        }
+        assert_eq!(find("no such block"), None);
     }
 
     #[test]

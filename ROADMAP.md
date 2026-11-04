@@ -65,6 +65,10 @@ Items are organized by priority, not by timeline.
 - ✅ Rules, first slice: a rule is a test plus a program fixed on a cell; once a second the first rule that is on, resting no longer and true fires as an ordinary script (permission, range, fuel and wait checks, logged, recorded in intent tracks, undone whole by `Z`), then rests 10 seconds; at most 8 rules, never during a replay; `N` opens a panel to switch, edit, remove or add one; rules live for the session
 - ✅ Block editor, first slice: `B` opens a ready-made script or a rule's program as an indented list of blocks (a rule's test is its first line); click a line, pick a field, step it less or more, add a block of a chosen kind, delete, run the draft, make a rule of it or save to the rule; the draft can only become a checked program and refuses growth past 64 blocks or 4 levels; edits last for the session
 
+- ✅ Saved programs, rules and player recipes (text format): `programs.nib` is a readable, versioned file (`nib 1`) holding every rule and every recipe a player wrote; scripts, rules and recipes share one line-based grammar (`build stone 0 1 0`, `repeat 3 {`, `if hunger below 8 {`), read all-or-nothing with the line to fix, and the game leaves a file it refused alone on exit; the file is copied into each session's starting world so replays use the same recipes
+- ✅ Rule anchors: a rule is anchored on a fixed cell, the player's feet, or the nearest mob (a rules panel button steps through them); the choice is saved with the rule
+- ✅ Script-driven crafting, first slice: a player recipe is a program of `take`, `make`, `repeat` and `if` that works on a copy of the pack and so does all of its steps or none; items have a worth, and the worth rule (every path through a recipe makes no more worth than it takes) is checked when the recipe is built; recipes join the crafting panel and the `R` and `C` keys, are crafted as ordinary slot events (so `Z` undoes them) and recorded in intent tracks by their number
+
 ---
 
 ## 🔥 High Priority (Critical)
@@ -90,7 +94,7 @@ Items are organized by priority, not by timeline.
   - more reads: a list of mobs with their kinds (there is only one kind so far), and a read cost tied to time as a resource;
   - scripts cannot use reads: the window shows them to the player, but a script plays a fixed list of commands and cannot branch on an answer until the language exists;
   - grants that survive a restart: the inventory is still saved as a snapshot, so replaying slot events at startup would apply them twice.
-- **Code as gameplay (scripting)** – Under review: the design of the clickable block editor is being thought through again before any code (Kogama-style blocks with a matching text view of the same program, so a player can use either; the text view would round-trip with the blocks). First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it; the first slice of the clickable block editor is done too. Still to do: a saved format for programs players make (the editor exists now, so this is the next gap), real drag and drop and typed numbers in the editor, a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
+- **Code as gameplay (scripting)** – Saving is done (see Completed: `programs.nib`, and the text grammar is the typed view's start). Under review: the design of the clickable block editor is being thought through again before any code (Kogama-style blocks with a matching text view of the same program, so a player can use either; the text view would round-trip with the blocks). First slice done (see Completed): the program tree, its stepper and the ready-made scripts built on it; the first slice of the clickable block editor is done too. Still to do: edits to the ready-made scripts in the editor are still not saved (rules and recipes are), a typed view inside the game, real drag and drop and typed numbers in the editor, a typed view of the same tree, variables and more reads and commands as the world interface grows. A beginner-friendly language for players aged about 13–25, many of them non-developers, that can influence almost anything the world interface allows. Decided so far:
   - High-level and domain-specific, with whole numbers only, a step budget per tick, and no way to freeze the game.
   - Our own language, grown in stages, so errors can be friendly and a running script can be stepped through and rewound. An embedded Rhai or Lua engine with generated text from blocks is the fallback if the schedule slips.
   - Blocks first (clickable, no syntax errors), reusing the crafting-panel click pattern. Blocks and text are the same program, so a typed view can come later.
@@ -112,7 +116,7 @@ Items are organized by priority, not by timeline.
   - the command-line menu, fetching what the player asks for.
 - **Command line and command dictionary** – First slice done (see Completed); `hack` was added with quick-hacks. Still to do: more commands as features arrive (craft, eat, hits), command history with the arrow keys, aiming (`go` to the block under the crosshair), and the vim-like grammar growth (counts, modifiers, targets).
 - **Programmable mobs** – Craft a "brain" item and script its behavior: follow, guard, farm, haul. The best first use of scripting.
-- **Logic and automation** – First slice done (see Completed): rules, a test plus a program on a cell. Still to do: saving rules (waits for a program format), rules anchored on an aimed block or mob and not only the player's feet, rules that react to an event and not only to a reading polled once a second, a visible form in the world, and wires and sensor blocks if rules prove not enough (they would need a new block kind, a signal pass and a save format).
+- **Logic and automation** – Two slices done (see Completed): rules, and saved rules with anchors on a cell, the feet or the nearest mob. Still to do: rules that react to an event and not only to a reading polled once a second, a visible form in the world, and wires and sensor blocks if rules prove not enough (they would need a new block kind, a signal pass and a save format).
 
 ---
 
@@ -122,7 +126,7 @@ Items are organized by priority, not by timeline.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
 - **Block shapes (moulding)** – Let players shape blocks beyond cubes. The meaning is still open: preset shapes (slab, stair, slope), stretching a block into a box, or sculpting cells inside a block. It touches storage, meshing and collision, and custom shapes must be saved so old event logs still replay, so it needs its own COAs first.
 - **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
-- **Script-driven crafting** – Recipes defined as functions, so players can create and share new ones.
+- **Script-driven crafting** – First slice done (see Completed). Still to do: making recipes in the game, recipes that read more of the world, and sharing them (see Shareable blueprints).
 - **Graphics upgrade** – Today blocks are flat colours with no lighting. Done after the current items, in this order. Light and shading are computed from world state and never logged, so replay and rewind are untouched; the mesher keeps producing plain vertex data with no `wgpu` types, so these stay testable without a GPU.
   - ✅ per-face shading (top brighter, sides darker) and ✅ sky colour and distance fog (the Kogama-style bright, simple look); a sun direction is still open;
   - ✅ vertex ambient occlusion (darkening is applied in the shader and applies to all light for now; when sun and block light exist it should touch only ambient light);
@@ -147,7 +151,8 @@ Items are organized by priority, not by timeline.
 
 ## 🎯 Next Actions (Immediate)
 
-1. **Saving player programs** – The editor and rules both vanish on exit. A versioned program file would keep them; the format is hard to undo, so it waits for the Kogama-style design review (see Code as gameplay).
+1. **Making recipes in the game** – Player recipes can only be written in `programs.nib` by hand. A recipe editor (the block editor with `take` and `make`) or a `recipe` command would let a player make one without leaving the window.
+2. **Saving edits to ready-made scripts** – The editor's changes to a ready-made script still vanish on exit; `programs.nib` could hold `script <name>` sections.
 
 ---
 
@@ -157,20 +162,19 @@ Recommended order, row 1 first.
 
 | # | Item | Why now | Difficulty |
 |---|---|---|---|
-| 1 | Saving player programs and rules | The editor and rules now exist and vanish on exit; the format waits for the design review | M |
+| 1 | Making recipes and saving script edits in the game | The text file exists; players still have to write recipes by hand | M |
 | 2 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
 | 3 | Walking and mob movement as events | Lets rewind undo them; the last gap in events | H |
-| 4 | Logic and automation, next slices | Rules exist; next are event-driven rules, aimed anchors and a visible form | M |
-| 5 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
+| 4 | Logic and automation, next slices | Event-driven rules and a visible form; anchors are done | M |
+| 5 | Shareable blueprints | The text grammar is the export format; needs a paste-in import | S |
 | 6 | Shaped crafting grid | Builds on the recipe table | M |
-| 7 | Script-driven crafting | Needs the scripting language | M |
-| 8 | Shareable blueprints | Needs scripts and the event log | M |
-| 9 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 10 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 11 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 12 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 13 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 14 | Graphics: better mobs | Parts-based models and animation | M |
+| 7 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
+| 8 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 9 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 10 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 11 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 12 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 13 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

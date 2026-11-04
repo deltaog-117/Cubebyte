@@ -6,7 +6,7 @@ use minecraft_clone::events::redo::RedoStack;
 use minecraft_clone::events::rewind::{REWIND_BASE_FUEL, log_action, rewind_events, rewind_price};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::items::registry::ItemId;
-use minecraft_clone::logic::model::{CHECK_EVERY, REST_TICKS, Rules};
+use minecraft_clone::logic::model::{Anchor, CHECK_EVERY, REST_TICKS, Rules};
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::player::model::{Player, PlayerError};
 use minecraft_clone::scripting::edit::Editor;
@@ -452,7 +452,7 @@ fn a_rule_runs_an_edited_program_when_its_test_holds_and_undoes_exactly() {
     };
     let mut rules = Rules::default();
     let id = rules
-        .add(no_dirt, program, cell(0, 1, 0))
+        .add(no_dirt, program, Anchor::Cell(cell(0, 1, 0)))
         .expect("room for a rule");
 
     let mut script = None;
@@ -478,14 +478,18 @@ fn a_rule_runs_an_edited_program_when_its_test_holds_and_undoes_exactly() {
                 .next()
                 .expect("one answer per query")
             };
-            if rules.due(tick, &mut read) == Some(id) {
+            let mut resolve = |anchor| match anchor {
+                Anchor::Cell(at) => Some(at),
+                Anchor::Feet | Anchor::Mob => None,
+            };
+            if rules.due(tick, &mut resolve, &mut read) == Some(id) {
                 rules.fired(id, tick);
                 fired.push(tick);
                 let rule = rules.get(id).expect("the rule is there");
                 script = Some(minecraft_clone::scripting::runner::ScriptRun::from_program(
                     "rule",
                     rule.program(),
-                    rule.anchor(),
+                    cell(0, 1, 0),
                 ));
             }
         }

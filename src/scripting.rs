@@ -9,3 +9,4 @@ pub mod program;
 pub mod readout;
 pub mod runner;
 pub mod service;
+pub mod text;

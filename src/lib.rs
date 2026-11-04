@@ -12,6 +12,7 @@ pub mod items;
 pub mod logic;
 pub mod mobs;
 pub mod player;
+pub mod programs;
 pub mod rendering;
 pub mod scripting;
 pub mod shared;

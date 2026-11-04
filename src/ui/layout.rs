@@ -10,7 +10,7 @@ use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self as items, ItemId};
-use crate::logic::model::{RuleId, Rules};
+use crate::logic::model::{Anchor, RuleId, Rules};
 use crate::scripting::edit::{Editor, test_text};
 use crate::scripting::library::{self, ScriptId, Target};
 use crate::ui::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
@@ -203,10 +203,25 @@ fn arrange((width, height): (u32, u32), title: &str, hint: &str, texts: &[String
     }
 }
 
-/// Lays the panel out centred in a window of `size` pixels, one row per recipe.
+/// A row for a recipe the table does not hold, such as one the player wrote. Whether it can be
+/// crafted depends on the world as well as the pack, so the caller works that out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraRow {
+    pub recipe: RecipeId,
+    pub text: String,
+    pub affordable: bool,
+}
+
+/// Lays the panel out centred in a window of `size` pixels, one row per built-in recipe.
 pub fn panel(size: (u32, u32), inventory: &Inventory) -> Panel {
+    panel_with(size, inventory, &[])
+}
+
+/// Like [`panel`], with `extra` rows after the built-in ones.
+pub fn panel_with(size: (u32, u32), inventory: &Inventory, extra: &[ExtraRow]) -> Panel {
     let described: Vec<_> = registry::ids()
         .filter_map(|id| Some((id, describe(id)?)))
+        .chain(extra.iter().map(|row| (row.recipe, row.text.clone())))
         .collect();
     let texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
     let arranged = arrange(size, TITLE, HINT, &texts);
@@ -217,7 +232,10 @@ pub fn panel(size: (u32, u32), inventory: &Inventory) -> Panel {
             recipe,
             rect,
             label,
-            affordable: can_craft(inventory, recipe),
+            affordable: extra
+                .iter()
+                .find(|row| row.recipe == recipe)
+                .map_or_else(|| can_craft(inventory, recipe), |row| row.affordable),
         })
         .collect();
     Panel {
@@ -404,6 +422,8 @@ pub enum RulesAct {
     Switch,
     Edit,
     Remove,
+    /// Steps the picked rule to the next kind of anchor: cell, feet, mob.
+    Anchor,
     New,
 }
 
@@ -419,9 +439,14 @@ pub fn rules_menu(
         .map(|(id, rule)| MenuLine {
             act: RulesAct::Pick(id),
             text: format!(
-                "{} {} {}",
+                "{} {} {} {}",
                 u16::from(id.0) + 1,
                 if rule.is_on() { "on" } else { "off" },
+                match rule.anchor() {
+                    Anchor::Cell(_) => "cell",
+                    Anchor::Feet => "feet",
+                    Anchor::Mob => "mob",
+                },
                 test_text(rule.test())
             ),
             usable: true,
@@ -439,6 +464,12 @@ pub fn rules_menu(
         MenuLine {
             act: RulesAct::Edit,
             text: "edit its blocks".to_owned(),
+            usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::Anchor,
+            text: "next anchor: cell, feet, mob".to_owned(),
             usable: has_pick,
             chosen: false,
         },
@@ -710,10 +741,10 @@ mod tests {
             compare: Compare::Below,
             than: 10,
         };
-        let anchor = crate::shared::voxel::WorldPos { x: 0, y: 0, z: 0 };
+        let anchor = Anchor::Cell(crate::shared::voxel::WorldPos { x: 0, y: 0, z: 0 });
         let id = rules.add(test, stock.program().clone(), anchor).unwrap();
         let none = rules_menu((1280, 720), &rules, None, "");
-        assert_eq!(none.rows[0].label.text, "1 on hunger below 10");
+        assert_eq!(none.rows[0].label.text, "1 on cell hunger below 10");
         assert!(none.rows[1..4].iter().all(|row| !row.usable));
         let picked = rules_menu((1280, 720), &rules, Some(id), "");
         assert!(picked.rows[0].chosen);

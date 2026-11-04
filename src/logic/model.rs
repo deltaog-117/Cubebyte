@@ -28,12 +28,35 @@ pub const REST_TICKS: u64 = 200;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuleId(pub u8);
 
+/// What a rule's program and test are anchored on, which is what their offsets count from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    /// One fixed cell: where the rule was made, or the block it was aimed at.
+    Cell(WorldPos),
+    /// The cell the player stands in, so the rule follows the player.
+    Feet,
+    /// The cell of the mob nearest to the player. With no mob in range the rule waits.
+    Mob,
+}
+
+impl Anchor {
+    /// The next kind in the cycle the rules panel steps through. `pin` is the cell a fixed
+    /// anchor takes when the cycle comes back to it.
+    pub fn next(self, pin: WorldPos) -> Self {
+        match self {
+            Self::Cell(_) => Self::Feet,
+            Self::Feet => Self::Mob,
+            Self::Mob => Self::Cell(pin),
+        }
+    }
+}
+
 /// One rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     test: Test,
     program: Program,
-    anchor: WorldPos,
+    anchor: Anchor,
     on: bool,
     /// The first tick at which the rule may fire again.
     rests_until: u64,
@@ -48,8 +71,8 @@ impl Rule {
         &self.program
     }
 
-    /// The cell the program's working cell starts on, and the test's reads count from.
-    pub fn anchor(&self) -> WorldPos {
+    /// What the program's working cell starts on, and the test's reads count from.
+    pub fn anchor(&self) -> Anchor {
         self.anchor
     }
 
@@ -114,7 +137,7 @@ impl Rules {
         &mut self,
         test: Test,
         program: Program,
-        anchor: WorldPos,
+        anchor: Anchor,
     ) -> Result<RuleId, RulesError> {
         if self.list.len() >= MAX_RULES {
             return Err(RulesError::Full);
@@ -150,6 +173,18 @@ impl Rules {
         Ok(())
     }
 
+    /// Moves rule `id` onto `anchor`. It is ready to fire again at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RulesError::Missing`] for an ID no rule has.
+    pub fn set_anchor(&mut self, id: RuleId, anchor: Anchor) -> Result<(), RulesError> {
+        let rule = self.get_mut(id).ok_or(RulesError::Missing)?;
+        rule.anchor = anchor;
+        rule.rests_until = 0;
+        Ok(())
+    }
+
     /// Switches rule `id` on or off and returns the new state, or `None` for a missing rule.
     pub fn switch(&mut self, id: RuleId) -> Option<bool> {
         let rule = self.get_mut(id)?;
@@ -165,11 +200,14 @@ impl Rules {
     }
 
     /// The first rule that is on, not resting and whose test holds, if `tick` is one of the
-    /// ticks rules are looked at. A read that is refused counts as a test that does not hold.
-    /// Nothing changes: call [`Self::fired`] once the rule really started.
+    /// ticks rules are looked at. `resolve` turns an anchor into the cell it stands for right
+    /// now; a rule whose anchor has no cell (no mob in range) is skipped. A read that is
+    /// refused counts as a test that does not hold. Nothing changes: call [`Self::fired`] once
+    /// the rule really started.
     pub fn due(
         &self,
         tick: u64,
+        resolve: &mut dyn FnMut(Anchor) -> Option<WorldPos>,
         ask: &mut dyn FnMut(Query) -> Result<Answer, Denied>,
     ) -> Option<RuleId> {
         if !tick.is_multiple_of(CHECK_EVERY) {
@@ -178,7 +216,9 @@ impl Rules {
         self.list
             .iter()
             .filter(|(_, rule)| rule.on && !rule.is_resting(tick))
-            .find(|(_, rule)| rule.test.check(rule.anchor, ask).unwrap_or(false))
+            .find(|(_, rule)| {
+                resolve(rule.anchor).is_some_and(|cell| rule.test.check(cell, ask).unwrap_or(false))
+            })
             .map(|(id, _)| *id)
     }
 
@@ -197,8 +237,21 @@ mod tests {
     use super::*;
     use crate::scripting::program::{Block, Compare, Plan, Read};
 
-    fn cell() -> WorldPos {
+    fn origin() -> WorldPos {
         WorldPos { x: 0, y: 0, z: 0 }
+    }
+
+    fn cell() -> Anchor {
+        Anchor::Cell(origin())
+    }
+
+    /// Feet and fixed cells are at the origin; no mob is in range.
+    fn resolve(anchor: Anchor) -> Option<WorldPos> {
+        match anchor {
+            Anchor::Cell(cell) => Some(cell),
+            Anchor::Feet => Some(origin()),
+            Anchor::Mob => None,
+        }
     }
 
     fn program() -> Program {
@@ -221,16 +274,25 @@ mod tests {
     fn a_true_rule_is_due_only_on_a_check_tick() {
         let mut rules = Rules::default();
         let id = rules.add(hunger_below(10), program(), cell()).unwrap();
-        assert_eq!(rules.due(CHECK_EVERY, &mut answer(3)), Some(id));
-        assert_eq!(rules.due(CHECK_EVERY + 1, &mut answer(3)), None);
+        assert_eq!(
+            rules.due(CHECK_EVERY, &mut resolve, &mut answer(3)),
+            Some(id)
+        );
+        assert_eq!(
+            rules.due(CHECK_EVERY + 1, &mut resolve, &mut answer(3)),
+            None
+        );
     }
 
     #[test]
     fn a_false_test_or_a_refused_read_is_not_due() {
         let mut rules = Rules::default();
         rules.add(hunger_below(10), program(), cell()).unwrap();
-        assert_eq!(rules.due(0, &mut answer(10)), None);
-        assert_eq!(rules.due(0, &mut |_| Err(Denied::OverLimit)), None);
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(10)), None);
+        assert_eq!(
+            rules.due(0, &mut resolve, &mut |_| Err(Denied::OverLimit)),
+            None
+        );
     }
 
     #[test]
@@ -238,8 +300,11 @@ mod tests {
         let mut rules = Rules::default();
         let id = rules.add(hunger_below(10), program(), cell()).unwrap();
         rules.fired(id, 0);
-        assert_eq!(rules.due(CHECK_EVERY, &mut answer(0)), None);
-        assert_eq!(rules.due(REST_TICKS, &mut answer(0)), Some(id));
+        assert_eq!(rules.due(CHECK_EVERY, &mut resolve, &mut answer(0)), None);
+        assert_eq!(
+            rules.due(REST_TICKS, &mut resolve, &mut answer(0)),
+            Some(id)
+        );
     }
 
     #[test]
@@ -247,9 +312,9 @@ mod tests {
         let mut rules = Rules::default();
         let id = rules.add(hunger_below(10), program(), cell()).unwrap();
         assert_eq!(rules.switch(id), Some(false));
-        assert_eq!(rules.due(0, &mut answer(0)), None);
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(0)), None);
         assert_eq!(rules.switch(id), Some(true));
-        assert_eq!(rules.due(0, &mut answer(0)), Some(id));
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(0)), Some(id));
     }
 
     #[test]
@@ -257,9 +322,12 @@ mod tests {
         let mut rules = Rules::default();
         let first = rules.add(hunger_below(10), program(), cell()).unwrap();
         let second = rules.add(hunger_below(10), program(), cell()).unwrap();
-        assert_eq!(rules.due(0, &mut answer(0)), Some(first));
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(0)), Some(first));
         rules.fired(first, 0);
-        assert_eq!(rules.due(CHECK_EVERY, &mut answer(0)), Some(second));
+        assert_eq!(
+            rules.due(CHECK_EVERY, &mut resolve, &mut answer(0)),
+            Some(second)
+        );
     }
 
     #[test]
@@ -280,7 +348,7 @@ mod tests {
     #[test]
     fn replacing_keeps_the_spot_and_the_switch() {
         let mut rules = Rules::default();
-        let anchor = WorldPos { x: 4, y: 5, z: 6 };
+        let anchor = Anchor::Cell(WorldPos { x: 4, y: 5, z: 6 });
         let id = rules.add(hunger_below(10), program(), anchor).unwrap();
         rules.switch(id);
         rules.replace(id, hunger_below(2), program()).unwrap();
@@ -291,6 +359,76 @@ mod tests {
             rules.replace(RuleId(99), hunger_below(2), program()),
             Err(RulesError::Missing)
         );
+    }
+
+    #[test]
+    fn a_rule_on_a_mob_waits_while_there_is_none() {
+        let mut rules = Rules::default();
+        let id = rules.add(hunger_below(10), program(), Anchor::Mob).unwrap();
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(0)), None);
+        let mut mob_at = |anchor| match anchor {
+            Anchor::Mob => Some(WorldPos { x: 3, y: 0, z: 0 }),
+            other => resolve(other),
+        };
+        assert_eq!(rules.due(0, &mut mob_at, &mut answer(0)), Some(id));
+    }
+
+    #[test]
+    fn reads_count_from_the_resolved_cell() {
+        let mut rules = Rules::default();
+        rules
+            .add(
+                Test {
+                    read: Read::Look { by: [0, 0, 0] },
+                    compare: Compare::Is,
+                    than: 7,
+                },
+                program(),
+                Anchor::Feet,
+            )
+            .unwrap();
+        let mut seen = None;
+        let mut ask = |query| {
+            seen = Some(query);
+            Ok(Answer::Number(0))
+        };
+        let mut feet_at = |_| Some(WorldPos { x: 9, y: 8, z: 7 });
+        rules.due(0, &mut feet_at, &mut ask);
+        assert_eq!(
+            seen,
+            Some(Query::Look {
+                pos: WorldPos { x: 9, y: 8, z: 7 }
+            })
+        );
+    }
+
+    #[test]
+    fn moving_a_rule_to_a_new_anchor_wakes_it() {
+        let mut rules = Rules::default();
+        let id = rules.add(hunger_below(10), program(), cell()).unwrap();
+        rules.fired(id, 0);
+        assert_eq!(rules.set_anchor(id, Anchor::Feet), Ok(()));
+        assert_eq!(rules.get(id).map(Rule::anchor), Some(Anchor::Feet));
+        assert_eq!(
+            rules.due(CHECK_EVERY, &mut resolve, &mut answer(0)),
+            Some(id)
+        );
+        assert_eq!(
+            rules.set_anchor(RuleId(99), Anchor::Mob),
+            Err(RulesError::Missing)
+        );
+    }
+
+    #[test]
+    fn the_anchor_cycle_visits_every_kind_and_returns() {
+        let pin = WorldPos { x: 1, y: 2, z: 3 };
+        let mut anchor = Anchor::Cell(origin());
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            anchor = anchor.next(pin);
+            seen.push(anchor);
+        }
+        assert_eq!(seen, [Anchor::Feet, Anchor::Mob, Anchor::Cell(pin)]);
     }
 
     proptest! {
@@ -328,7 +466,7 @@ mod tests {
             rules.fired(id, at);
             let tick = (at + gap).next_multiple_of(CHECK_EVERY);
             if tick < at + REST_TICKS {
-                prop_assert_eq!(rules.due(tick, &mut answer(0)), None);
+                prop_assert_eq!(rules.due(tick, &mut resolve, &mut answer(0)), None);
             }
         }
     }

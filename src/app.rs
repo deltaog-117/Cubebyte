@@ -24,8 +24,9 @@ use crate::command::model::CommandId;
 use crate::command::parse::parse;
 use crate::command::plan::{Plan, plan};
 use crate::command::table as command_table;
-use crate::crafting::registry::{self as recipes, RecipeId};
-use crate::crafting::service::craft_events;
+use crate::crafting::custom::CustomRecipes;
+use crate::crafting::registry::RecipeId;
+use crate::crafting::service::{CraftError, craft_events, custom_craft_events};
 use crate::events::apply::{ChargeError, Stage, StageError, apply_all, charge_events};
 use crate::events::archive;
 use crate::events::log::{ActionKind, EventLog};
@@ -40,12 +41,13 @@ use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
 use crate::items::registry::{self, ItemId};
-use crate::logic::model::{RuleId, Rules};
+use crate::logic::model::{Anchor, RuleId, Rules};
 use crate::mobs::model::Mobs;
 use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
 use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
 use crate::player::service::{Intent, step};
+use crate::programs::file as programs_file;
 use crate::rendering::camera::Camera;
 use crate::rendering::fog::Fog;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
@@ -76,8 +78,8 @@ use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
 use crate::ui::draw::{command_overlay, menu_overlay, overlay, script_overlay};
 use crate::ui::layout::{
-    EditAct, EditorView, RulesAct, command_panel, editor_menu, hack_panel, panel, rules_menu,
-    script_panel,
+    EditAct, EditorView, ExtraRow, RulesAct, command_panel, editor_menu, hack_panel, panel_with,
+    rules_menu, script_panel,
 };
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
@@ -96,6 +98,9 @@ const ARCHIVE_PATH: &str = "world.mcea";
 
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
+
+/// Where the player's rules and recipes are kept, as readable text.
+const PROGRAMS_PATH: &str = "programs.nib";
 
 /// Where the health and hunger meters are kept, relative to the working directory.
 const STATS_PATH: &str = "stats.mcst";
@@ -276,6 +281,11 @@ struct Running {
     replay: Option<Replay>,
     /// The recipe the craft key makes.
     recipe: RecipeId,
+    /// The recipes the player wrote, after the built-in table. Fixed for the session.
+    custom: CustomRecipes,
+    /// Whether `programs.nib` was read (or did not exist). When it was refused, exit leaves the
+    /// file alone, so a typo cannot cost the player their work.
+    programs_ok: bool,
     /// Which of [`ZONE_BACK_STEPS`] the zone rewind key goes back by.
     zone_step: usize,
     /// Whether the command line is open: keys type into it and the pointer is free.
@@ -375,6 +385,7 @@ impl App {
         let redo = RedoStack::from_log(&log);
         let inventory = inventory_persist::load(&start_file(INVENTORY_PATH))?.unwrap_or_default();
         let stats = stats_persist::load(&start_file(STATS_PATH))?.unwrap_or_default();
+        let (programs, programs_ok) = load_programs(&start_file(PROGRAMS_PATH));
         // Makes room for the new session. A replayed session is already in memory by now, and
         // its starting world has been read above, so pruning it is harmless.
         if let Err(error) = prune_sessions(Path::new(INTENTS_DIR), MAX_SESSIONS - 1) {
@@ -383,7 +394,13 @@ impl App {
         let session = next_session_path(Path::new(INTENTS_DIR)).map_err(AppError::SaveIntents)?;
         // Without the starting world a recording cannot be replayed exactly, but it is still
         // worth playing, so a failure is reported and the game carries on.
-        if let Err(error) = save_start(&stream::start_dir(&session), &log, &inventory, stats) {
+        if let Err(error) = save_start(
+            &stream::start_dir(&session),
+            &log,
+            &inventory,
+            stats,
+            &programs_file::write(&programs.rules, &programs.recipes),
+        ) {
             tracing::warn!(%error, "cannot save the starting world; this session will not replay exactly");
         }
         let intents = IntentStream::new(session);
@@ -416,6 +433,8 @@ impl App {
             sandboxed: replay.is_some(),
             replay,
             recipe: RecipeId::FIRST,
+            custom: programs.recipes,
+            programs_ok,
             zone_step: 0,
             commands_open: false,
             command_table: false,
@@ -427,7 +446,7 @@ impl App {
             hacks_open: false,
             hack_menu: Vec::new(),
             rules_open: false,
-            rules: Rules::default(),
+            rules: programs.rules,
             rule_pick: None,
             editor_open: false,
             draft: None,
@@ -481,7 +500,7 @@ impl App {
             KeyCode::Digit3 if down => self.selected = SolidBlock::GRASS,
             KeyCode::KeyF if down => self.with_running(Running::toggle_flying),
             KeyCode::KeyR if down => self.with_running(|running| {
-                running.recipe = recipes::next(running.recipe);
+                running.recipe = running.custom.next(running.recipe);
                 running.refresh_title();
             }),
             KeyCode::KeyC if down => self.with_running(Running::craft_selected),
@@ -954,7 +973,8 @@ impl Running {
             }
             return;
         }
-        let layout = panel(self.renderer.size(), &self.inventory);
+        let extra = self.custom_rows();
+        let layout = panel_with(self.renderer.size(), &self.inventory, &extra);
         if let Some(id) = layout.row_at(cursor.0, cursor.1) {
             self.craft_recipe(id);
         }
@@ -983,7 +1003,8 @@ impl Running {
             let hovered = layout.row_at(cursor.0, cursor.1);
             script_overlay(&layout, size, hovered)
         } else if self.panel_open {
-            let layout = panel(size, &self.inventory);
+            let extra = self.custom_rows();
+            let layout = panel_with(size, &self.inventory, &extra);
             let hovered = layout.row_at(cursor.0, cursor.1);
             overlay(&layout, size, hovered)
         } else {
@@ -1348,14 +1369,28 @@ impl Running {
                     }
                 }
             }
+            RulesAct::Anchor => {
+                let picked = self
+                    .rule_pick
+                    .and_then(|id| Some((id, self.rules.get(id)?.anchor())));
+                if let Some((id, anchor)) = picked {
+                    let pin = self.aim_context().0.unwrap_or_else(|| self.feet_cell());
+                    let next = anchor.next(pin);
+                    self.panel_note = match self.rules.set_anchor(id, next) {
+                        Ok(()) => String::new(),
+                        Err(error) => error.to_string(),
+                    };
+                }
+            }
             RulesAct::New => {
                 let Some((_, stock)) = library::find("stock") else {
                     return;
                 };
-                match self
-                    .rules
-                    .add(DEFAULT_WHEN, stock.program().clone(), self.feet_cell())
-                {
+                match self.rules.add(
+                    DEFAULT_WHEN,
+                    stock.program().clone(),
+                    Anchor::Cell(self.feet_cell()),
+                ) {
                     Ok(id) => self.rule_pick = Some(id),
                     Err(error) => self.panel_note = error.to_string(),
                 }
@@ -1416,7 +1451,10 @@ impl Running {
             }
         };
         let anchor = match draft.origin {
-            Origin::Rule(id) => self.rules.get(id).map(|rule| rule.anchor()),
+            Origin::Rule(id) => {
+                let anchor = self.rules.get(id).map(|rule| rule.anchor());
+                anchor.and_then(|anchor| self.resolve_anchor(anchor))
+            }
             Origin::Script(id) => library::get(id).and_then(|script| {
                 let feet = self.feet_cell();
                 let (aimed, mob) = self.aim_context();
@@ -1443,10 +1481,11 @@ impl Running {
         };
         match draft.origin {
             Origin::Script(_) => {
-                match self
-                    .rules
-                    .add(DEFAULT_WHEN, program.clone(), self.feet_cell())
-                {
+                match self.rules.add(
+                    DEFAULT_WHEN,
+                    program.clone(),
+                    Anchor::Cell(self.feet_cell()),
+                ) {
                     Ok(id) => {
                         *draft = Draft {
                             editor: Editor::new(Some(DEFAULT_WHEN), &program),
@@ -1468,6 +1507,16 @@ impl Running {
         }
     }
 
+    /// The cell a rule's anchor stands for right now, or `None` when it has none (no mob in
+    /// range).
+    fn resolve_anchor(&mut self, anchor: Anchor) -> Option<WorldPos> {
+        match anchor {
+            Anchor::Cell(cell) => Some(cell),
+            Anchor::Feet => Some(self.feet_cell()),
+            Anchor::Mob => self.aim_context().1,
+        }
+    }
+
     /// Fires the first rule whose test holds, as a script. Rules look at the world once per
     /// [`CHECK_EVERY`](crate::logic::model::CHECK_EVERY) ticks and never during a replay: the
     /// replay performs the commands the recording holds, which include what a rule once ran.
@@ -1475,6 +1524,7 @@ impl Running {
         if self.replay.is_some() || self.script.is_some() || self.rules.is_empty() {
             return;
         }
+        let (feet, mob) = (self.feet_cell(), self.aim_context().1);
         let due = {
             let stage = Stage {
                 world: &mut self.world,
@@ -1495,16 +1545,24 @@ impl Running {
                 .next()
                 .unwrap_or(Err(Denied::NothingToDo))
             };
-            self.rules.due(tick.0, &mut read)
+            let mut resolve = |anchor| match anchor {
+                Anchor::Cell(cell) => Some(cell),
+                Anchor::Feet => Some(feet),
+                Anchor::Mob => mob,
+            };
+            self.rules.due(tick.0, &mut resolve, &mut read)
         };
         let Some(id) = due else {
             return;
         };
-        let Some((program, anchor)) = self
-            .rules
-            .get(id)
-            .map(|rule| (rule.program().clone(), rule.anchor()))
-        else {
+        let Some((program, anchor)) = self.rules.get(id).and_then(|rule| {
+            let cell = match rule.anchor() {
+                Anchor::Cell(cell) => Some(cell),
+                Anchor::Feet => Some(feet),
+                Anchor::Mob => mob,
+            };
+            Some((rule.program().clone(), cell?))
+        }) else {
             return;
         };
         let number = u16::from(id.0) + 1;
@@ -1939,10 +1997,59 @@ impl Running {
 
     /// Crafts `id` once. Reports whether it did.
     fn craft_once(&mut self, id: RecipeId) -> bool {
-        let Ok(events) = craft_events(&self.inventory, id) else {
+        let events = if self.custom.get(id).is_some() {
+            self.custom_events(id)
+        } else {
+            craft_events(&self.inventory, id)
+        };
+        let Ok(events) = events else {
             return false;
         };
         self.commit_or_warn(&events)
+    }
+
+    /// The slot events that crafting player recipe `id` would apply right now. The recipe reads
+    /// the world as a script's `if` does, from the player's feet; nothing changes.
+    fn custom_events(&mut self, id: RecipeId) -> Result<Vec<Event>, CraftError> {
+        let pack = self.inventory.clone();
+        let feet = self.feet_cell();
+        let stage = Stage {
+            world: &mut self.world,
+            player: &mut self.player,
+            inventory: &mut self.inventory,
+            stats: &mut self.stats,
+            mobs: &mut self.mobs,
+        };
+        let mut read = |query| {
+            ask(
+                &[query],
+                Permissions::ALL,
+                Limits::standard(),
+                Facing::North,
+                &stage,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Err(Denied::NothingToDo))
+        };
+        custom_craft_events(&self.custom, &pack, id, feet, &mut read)
+    }
+
+    /// The crafting panel's rows for the player's recipes, each marked with whether it would
+    /// craft right now.
+    fn custom_rows(&mut self) -> Vec<ExtraRow> {
+        let ids: Vec<(RecipeId, String)> = self
+            .custom
+            .iter()
+            .map(|(id, recipe)| (id, format!("{} - yours", recipe.name())))
+            .collect();
+        ids.into_iter()
+            .map(|(recipe, text)| ExtraRow {
+                recipe,
+                text,
+                affordable: self.custom_events(recipe).is_ok(),
+            })
+            .collect()
     }
 
     /// Eats one food item. Reports whether it did.
@@ -1967,10 +2074,10 @@ impl Running {
                 title.push_str(&format!(" {} {}", def.name, self.inventory.count_of(id)));
             }
         }
-        if let Some(recipe) = recipes::get(self.recipe) {
+        if let Some(name) = self.custom.name_of(self.recipe) {
             title.push_str(&format!(
                 " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, / or H commands)",
-                recipe.name
+                name
             ));
         }
         title.push_str(&format!(
@@ -2080,6 +2187,10 @@ impl ApplicationHandler for App {
             {
                 self.failure.get_or_insert(AppError::SaveInventory(error));
             }
+            // A file the game refused is left as the player wrote it.
+            if running.programs_ok {
+                save_programs(Path::new(PROGRAMS_PATH), &running.rules, &running.custom);
+            }
             // The meters change all the time, so they are always written; the file is eight bytes.
             if let Err(error) = stats_persist::save(Path::new(STATS_PATH), running.stats) {
                 self.failure.get_or_insert(AppError::SaveStats(error));
@@ -2167,11 +2278,52 @@ fn open_log(path: &Path) -> Result<EventLog, AppError> {
 
 /// Writes the world a session starts from into `dir`, in the same formats as the live saves,
 /// so a replay of the session can begin from it.
-fn save_start(dir: &Path, log: &EventLog, inventory: &Inventory, stats: Stats) -> io::Result<()> {
+fn save_start(
+    dir: &Path,
+    log: &EventLog,
+    inventory: &Inventory,
+    stats: Stats,
+    programs: &str,
+) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     persist::save(&dir.join(SAVE_PATH), SEED, log)?;
     inventory_persist::save(&dir.join(INVENTORY_PATH), inventory)?;
-    stats_persist::save(&dir.join(STATS_PATH), stats)
+    stats_persist::save(&dir.join(STATS_PATH), stats)?;
+    // Recipes decide what a recorded craft means, so a replay needs the ones the session had.
+    std::fs::write(dir.join(PROGRAMS_PATH), programs)
+}
+
+/// Reads the programs file at `path`. A missing file is an empty set. A file the game cannot
+/// read gives an empty set too, but is reported and flagged (`false`) so it is not overwritten.
+fn load_programs(path: &Path) -> (programs_file::Programs, bool) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (programs_file::Programs::default(), true);
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "cannot read the programs file; it is left alone");
+            return (programs_file::Programs::default(), false);
+        }
+    };
+    match programs_file::parse(&text) {
+        Ok(programs) => (programs, true),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "the programs file was not loaded; it is left alone");
+            (programs_file::Programs::default(), false)
+        }
+    }
+}
+
+/// Writes the programs file. Nothing is written when there is nothing to keep and no file to
+/// update. A failure is reported and the game carries on: the next exit tries again.
+fn save_programs(path: &Path, rules: &Rules, recipes: &CustomRecipes) {
+    if rules.is_empty() && recipes.is_empty() && !path.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::write(path, programs_file::write(rules, recipes)) {
+        tracing::warn!(%error, path = %path.display(), "cannot save the programs file");
+    }
 }
 
 fn remesh(renderer: &mut Renderer, world: &World, pos: ChunkPos) {
@@ -2211,11 +2363,16 @@ mod tests {
         let mut stats = Stats::default();
         stats.hurt(2);
 
-        assert!(save_start(&start, &log, &inventory, stats).is_ok());
+        let programs = "nib 1\nrecipe loaf\ntake grass 3\nmake bread 1\nend\n";
+        assert!(save_start(&start, &log, &inventory, stats, programs).is_ok());
         let loaded_log = open_log(&start.join(SAVE_PATH));
         let loaded_inventory = inventory_persist::load(&start.join(INVENTORY_PATH));
         let loaded_stats = stats_persist::load(&start.join(STATS_PATH));
+        let (loaded_programs, programs_ok) = load_programs(&start.join(PROGRAMS_PATH));
         let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(programs_ok);
+        assert_eq!(loaded_programs.recipes.len(), 1);
 
         assert!(loaded_log.is_ok_and(|saved| saved == log));
         assert!(matches!(loaded_inventory, Ok(Some(saved)) if saved == inventory));
@@ -2232,7 +2389,8 @@ mod tests {
                 &start,
                 &EventLog::new(),
                 &Inventory::default(),
-                Stats::default()
+                Stats::default(),
+                ""
             )
             .is_ok()
         );

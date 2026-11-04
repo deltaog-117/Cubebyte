@@ -2,10 +2,14 @@
 
 use thiserror::Error;
 
+use crate::crafting::custom::CustomRecipes;
+use crate::crafting::program::RunError;
 use crate::crafting::registry::{self, RecipeId};
 use crate::events::apply::slot_events;
 use crate::inventory::model::{Inventory, NotEnough, UnknownItem};
+use crate::scripting::model::{Answer, Denied, Query};
 use crate::shared::event::Event;
+use crate::shared::voxel::WorldPos;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CraftError {
@@ -17,6 +21,8 @@ pub enum CraftError {
     Item(#[from] UnknownItem),
     #[error("the inventory has no room for the result")]
     Full,
+    #[error("the recipe could not run: {0}")]
+    Recipe(#[from] RunError),
 }
 
 /// Crafts `id` once from `inventory`.
@@ -45,6 +51,26 @@ pub fn craft(inventory: &mut Inventory, id: RecipeId) -> Result<(), CraftError> 
 /// The same as [`craft`].
 pub fn craft_events(inventory: &Inventory, id: RecipeId) -> Result<Vec<Event>, CraftError> {
     Ok(slot_events(inventory, &crafted(inventory, id)?))
+}
+
+/// The slot events that crafting the player recipe `id` once would apply, without changing
+/// `inventory`. `cell` is where the recipe's `look` reads count from (the player's feet), and
+/// `ask` answers the reads the pack cannot.
+///
+/// # Errors
+///
+/// - [`CraftError::UnknownRecipe`] when `id` names no player recipe.
+/// - [`CraftError::Recipe`] when the recipe cannot run (a short input, no room, a refused read).
+pub fn custom_craft_events(
+    custom: &CustomRecipes,
+    inventory: &Inventory,
+    id: RecipeId,
+    cell: WorldPos,
+    ask: &mut dyn FnMut(Query) -> Result<Answer, Denied>,
+) -> Result<Vec<Event>, CraftError> {
+    let recipe = custom.get(id).ok_or(CraftError::UnknownRecipe(id.0))?;
+    let after = recipe.program().run(inventory, cell, ask)?;
+    Ok(slot_events(inventory, &after))
 }
 
 /// `inventory` after one craft of `id`, or why it cannot be done.
@@ -122,6 +148,47 @@ mod tests {
 
         assert_eq!(craft(&mut inventory, BREAD), Err(CraftError::Full));
         assert_eq!(inventory, before);
+    }
+
+    #[test]
+    fn a_player_recipe_crafts_through_the_same_slot_events() {
+        use crate::crafting::program::{RecipeProgram, Step};
+
+        let mut custom = CustomRecipes::default();
+        let id = custom
+            .add(
+                "loaf",
+                RecipeProgram::try_new(vec![
+                    Step::Take {
+                        item: ItemId::GRASS,
+                        count: 3,
+                    },
+                    Step::Make {
+                        item: ItemId::BREAD,
+                        count: 1,
+                    },
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        let mut inventory = Inventory::default();
+        inventory.add(ItemId::GRASS, 4).unwrap();
+        let origin = WorldPos { x: 0, y: 0, z: 0 };
+        let mut no_world = |_| Err(Denied::NothingToDo);
+
+        let events = custom_craft_events(&custom, &inventory, id, origin, &mut no_world).unwrap();
+        let mut expected = inventory.clone();
+        expected.take(ItemId::GRASS, 3).unwrap();
+        expected.add(ItemId::BREAD, 1).unwrap();
+        assert_eq!(events, slot_events(&inventory, &expected));
+        assert!(matches!(
+            custom_craft_events(&custom, &Inventory::default(), id, origin, &mut no_world),
+            Err(CraftError::Recipe(RunError::Missing(_)))
+        ));
+        assert_eq!(
+            custom_craft_events(&custom, &inventory, RecipeId(0), origin, &mut no_world),
+            Err(CraftError::UnknownRecipe(0))
+        );
     }
 
     #[test]

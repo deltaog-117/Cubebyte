@@ -180,6 +180,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `B` opens the block editor on a ready-made script or a rule's program (a rule's test is its first line); `run` plays the draft, `make a rule of it` and `save to the rule` keep it; `Test::check` reads a test through `ask` without changing anything
 - `ui::layout::Menu`, `menu`, `rules_menu`, `editor_menu` and `ui::draw::menu_overlay`: one generic clickable list the two new panels share; a panel's text scale now also shrinks to fit the window's height
 - Tests: rule timing and limits, editor properties (any click sequence keeps the draft within its limits and a valid draft still ends), menu layout, and an integration test where a rule runs an edited program once and undoes exactly
+- `scripting::text`: a line-based text form of a program (`print` and `parse`), shared by rules and recipes; reading ends in `Program::try_new`, errors name the line, and a property test checks that printing then parsing gives the same program
+- `programs::file`: the `programs.nib` file (`nib 1`) holding every rule and player recipe as readable text; read all or nothing, written on exit, copied into each session's starting world, and left untouched when it was refused
+- `logic::model::Anchor` (fixed cell, player's feet, nearest mob) for rules, a rules-panel button to step through them, and `Rules::set_anchor`
+- `crafting::program::RecipeProgram`: player recipes made of `take`, `make`, `repeat` and `if` steps, with a worth rule checked on every path and a size limit; `crafting::custom::CustomRecipes`, `crafting::text` and `crafting::service::custom_craft_events`
+- `worth` for every item, `blocks::registry::find` and `items::registry::find`, and a test that every built-in recipe obeys the worth rule
+- Player recipes in the crafting panel (`ui::layout::panel_with`, `ExtraRow`) and on the `R` and `C` keys; a craft is recorded in intent tracks by its number
 
 ### Changed
 - The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before
@@ -237,6 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GpuVertex` has a third field and the vertex layout a third attribute; `Vertex` in the mesher has an `occlusion` field and `neighbor` takes a step in blocks instead of a face
 - `prune_sessions` deletes a session's starting-world folder together with its file
 - A session that began as a replay leaves the live `world.mcel`, `world.mcea`, `inventory.mcin` and `stats.mcst` untouched on exit, since it played in a copy of an old world
+- `Rules::add` takes an `Anchor`, `Rule::anchor` returns one, and `Rules::due` takes a function that turns an anchor into the cell it stands for
+- The rules panel lists each rule's anchor and gains a "next anchor" row
+- `ItemDef` gains a `worth` field
 
 ### Fixed
 - Undoing a meal was refused when hunger had drained below what the meal gave (for example eating at 0, a drain to 3, then `Z` asking for -4); the undo now stops at 0
