@@ -24,6 +24,7 @@
 //! | 7 | redo | none |
 //! | 8 | script command | command kind (1), then by command kind |
 //! | 9 | zone rewind | centre x, y, z (4 each), back (2) |
+//! | 10 | mould | tiny cube x, y, z (4 each), add (1) |
 //!
 //! | Command kind | Command | Fields |
 //! |---|---|---|
@@ -45,7 +46,8 @@
 //! read, unchanged. Kind 8 came with version 4: a script command is saved as the command that
 //! really ran, not as the script that produced it, so a recording stays exact when the ready-made
 //! scripts change or a scripting language replaces them. Kind 9 came with version 5: a zone
-//! rewind is saved as its centre and how far back it went.
+//! rewind is saved as its centre and how far back it went. Kind 10 came with version 6: a chisel
+//! edit is saved as the tiny cube it changed and whether it put the cube back.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -63,7 +65,7 @@ use crate::simulation::intent_log::{ActionEntry, ActorId, Entry, IntentLog, Reco
 const MAGIC: [u8; 4] = *b"MCIT";
 
 /// Bump when the layout changes.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -95,6 +97,7 @@ const KIND_REWIND: u8 = 6;
 const KIND_REDO: u8 = 7;
 const KIND_SCRIPT: u8 = 8;
 const KIND_ZONE_REWIND: u8 = 9;
+const KIND_MOULD: u8 = 10;
 
 /// Script command kinds, inside a script action.
 const COMMAND_TELEPORT: u8 = 1;
@@ -216,6 +219,11 @@ pub(super) fn push_actions(bytes: &mut Vec<u8>, actions: &[ActionEntry]) {
             Action::Script(command) => {
                 bytes.push(KIND_SCRIPT);
                 push_command(bytes, command);
+            }
+            Action::Mould { cell, add } => {
+                bytes.push(KIND_MOULD);
+                push_pos(bytes, cell);
+                bytes.push(u8::from(add));
             }
         }
     }
@@ -359,6 +367,14 @@ fn read_action(reader: &mut Reader, log: &mut IntentLog) -> Result<(), DecodeErr
             back: u16::from_le_bytes(reader.take()?),
         },
         KIND_SCRIPT => Action::Script(read_command(reader)?),
+        KIND_MOULD => Action::Mould {
+            cell: read_pos(reader)?,
+            add: match reader.take::<1>()?[0] {
+                0 => false,
+                1 => true,
+                other => return Err(DecodeError::BadActionKind(other)),
+            },
+        },
         other => return Err(DecodeError::BadActionKind(other)),
     };
     log.record_action(tick, action)?;
@@ -671,6 +687,12 @@ mod tests {
             ),
             any::<u8>().prop_map(Action::Craft),
             Just(Action::Eat),
+            (any::<i32>(), any::<i32>(), any::<i32>(), any::<bool>()).prop_map(|(x, y, z, add)| {
+                Action::Mould {
+                    cell: pos(x, y, z),
+                    add,
+                }
+            }),
             any::<u32>().prop_map(|id| Action::Strike(ActorId(id))),
             Just(Action::Rewind),
             Just(Action::Redo),
@@ -754,8 +776,8 @@ mod tests {
         let mut bytes = encode(&IntentLog::default());
         bytes.push(TAG_ACTION);
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.push(10);
-        assert_eq!(decode(&bytes), Err(DecodeError::BadActionKind(10)));
+        bytes.push(11);
+        assert_eq!(decode(&bytes), Err(DecodeError::BadActionKind(11)));
     }
 
     #[test]

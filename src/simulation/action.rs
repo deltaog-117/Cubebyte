@@ -17,6 +17,9 @@ pub enum Action {
     Place { pos: WorldPos, block: BlockId },
     /// Craft the recipe at this position of the recipe table once.
     Craft(u8),
+    /// Chip the tiny cube at `cell` off its block, or put it back when `add` is set. `cell` is
+    /// in tiny cubes, four to a block along each axis. It needs a chisel in the pack.
+    Mould { cell: WorldPos, add: bool },
     /// Eat one food item.
     Eat,
     /// Hit the mob with this id with the best weapon in the pack. Refused if that mob is gone.

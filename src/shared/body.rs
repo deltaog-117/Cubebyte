@@ -1,7 +1,8 @@
 //! A walking box: gravity, jumping and collision with solid cells, one tick at a time.
 //!
 //! Players and mobs move with this one set of rules. A body knows nothing about worlds: the
-//! caller says which cells are solid.
+//! caller says what is solid through a [`Terrain`], in tiny cubes a quarter of a block wide so
+//! a moulded block can be walked on and bumped into by its real shape.
 //!
 //! Only `+ - * /` and comparisons touch positions, with no trigonometry, and nothing reads
 //! wall-clock time, so the same start and the same [`Intent`]s always give the same result.
@@ -10,6 +11,25 @@ use glam::Vec3;
 use thiserror::Error;
 
 pub use crate::shared::intent::Intent;
+use crate::shared::voxel::{TINY_SIDE, tiny_bit};
+
+/// Tiny cubes along one side of a block, as a [`Terrain`] sees the world.
+pub const FINE: i32 = TINY_SIDE;
+
+/// What a body bumps into.
+pub trait Terrain {
+    /// The tiny cubes of the block at `cell` (in whole blocks) that are solid, one bit each as
+    /// [`tiny_bit`] numbers them: all 64 for a whole block, none for an open one. A body asks
+    /// once per block instead of once per tiny cube.
+    fn solid_bits(&self, cell: [i32; 3]) -> u64;
+}
+
+/// A closure that says which whole blocks are solid is a terrain of whole blocks only.
+impl<F: Fn([i32; 3]) -> bool> Terrain for F {
+    fn solid_bits(&self, cell: [i32; 3]) -> u64 {
+        if self(cell) { u64::MAX } else { 0 }
+    }
+}
 
 /// Blocks per second on level ground.
 pub const WALK_SPEED: f32 = 4.3;
@@ -134,13 +154,12 @@ impl Body {
     }
 }
 
-/// Moves `body` through one tick of `dt` seconds. `solid` says whether the cell at the given
-/// integer coordinates blocks movement.
+/// Moves `body` through one tick of `dt` seconds over `terrain`.
 ///
 /// Gravity pulls first, then the box moves along Y, X and Z in turn and is stopped by solid
 /// cells, so it slides along walls. A jump starts only from the ground. A box that already
 /// overlaps a cell, for example one placed on top of the body, can still move out of it.
-pub fn step(body: &mut Body, intent: Intent, solid: &impl Fn([i32; 3]) -> bool, dt: f32) {
+pub fn step(body: &mut Body, intent: Intent, terrain: &impl Terrain, dt: f32) {
     body.previous = body.position;
     if !(dt.is_finite() && dt > 0.0) || body.position.abs().max_element() > COORD_LIMIT {
         return;
@@ -157,9 +176,10 @@ pub fn step(body: &mut Body, intent: Intent, solid: &impl Fn([i32; 3]) -> bool, 
     velocity.y = (velocity.y - GRAVITY * dt).max(-TERMINAL_SPEED);
 
     body.on_ground = false;
+    let mut cache = BlockCache::new(terrain);
     for axis in [1, 0, 2] {
         let wanted = velocity[axis] * dt;
-        let allowed = clip(solid, body, axis, wanted);
+        let allowed = clip(&mut cache, body, axis, wanted);
         body.position[axis] += allowed;
         if allowed != wanted {
             velocity[axis] = 0.0;
@@ -169,47 +189,159 @@ pub fn step(body: &mut Body, intent: Intent, solid: &impl Fn([i32; 3]) -> bool, 
     body.velocity = velocity;
 }
 
-/// Whether the body's box overlaps a solid cell.
-pub fn collides(body: &Body, solid: &impl Fn([i32; 3]) -> bool) -> bool {
-    let (min, max) = body.bounds();
-    cell_range(min.x, max.x).any(|x| {
-        cell_range(min.y, max.y).any(|y| cell_range(min.z, max.z).any(|z| solid([x, y, z])))
-    })
+/// Whether a solid tiny cube lies in the box of tiny cubes from `low` to `high`, both ends
+/// included. It asks the terrain once per block, and looks at single tiny cubes only inside a
+/// block that is partly carved. A block with every tiny cube solid counts unless `skip_whole`
+/// says to leave it out.
+fn solid_in<T: Terrain>(
+    cache: &mut BlockCache<'_, T>,
+    low: [i32; 3],
+    high: [i32; 3],
+    skip_whole: impl Fn([i32; 3]) -> bool,
+) -> bool {
+    let block_range = |axis: usize| low[axis].div_euclid(FINE)..=high[axis].div_euclid(FINE);
+    for bx in block_range(0) {
+        for by in block_range(1) {
+            for bz in block_range(2) {
+                let block = [bx, by, bz];
+                let found = match cache.bits(block) {
+                    0 => false,
+                    u64::MAX => !skip_whole(block),
+                    bits => bits & tiny_cubes_in(block, low, high) != 0,
+                };
+                if found {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
-/// How far the box can move along `axis` towards `delta` before touching a solid cell,
+/// The blocks of a terrain a step has already asked about, so the same block is not asked
+/// about again for every tiny cube and every axis. It is small and fixed, so it never allocates;
+/// a block that shares a slot with another is simply asked about again.
+struct BlockCache<'a, T: Terrain> {
+    terrain: &'a T,
+    slots: [Option<([i32; 3], u64)>; 16],
+}
+
+impl<'a, T: Terrain> BlockCache<'a, T> {
+    fn new(terrain: &'a T) -> Self {
+        Self {
+            terrain,
+            slots: [None; 16],
+        }
+    }
+
+    fn bits(&mut self, block: [i32; 3]) -> u64 {
+        let hash = block[0]
+            .wrapping_mul(3)
+            .wrapping_add(block[1].wrapping_mul(5))
+            .wrapping_add(block[2].wrapping_mul(7));
+        let slot = &mut self.slots[hash.rem_euclid(16) as usize];
+        match *slot {
+            Some((seen, bits)) if seen == block => bits,
+            _ => {
+                let bits = self.terrain.solid_bits(block);
+                *slot = Some((block, bits));
+                bits
+            }
+        }
+    }
+}
+
+/// The tiny cubes of `block` that lie inside the box from `low` to `high`, as a mask.
+fn tiny_cubes_in(block: [i32; 3], low: [i32; 3], high: [i32; 3]) -> u64 {
+    let span = |axis: usize| {
+        let first = (low[axis] - block[axis] * FINE).max(0);
+        let last = (high[axis] - block[axis] * FINE).min(FINE - 1);
+        first..=last
+    };
+    let mut mask = 0;
+    for x in span(0) {
+        for y in span(1) {
+            for z in span(2) {
+                mask |= tiny_bit(x, y, z).unwrap_or(0);
+            }
+        }
+    }
+    mask
+}
+
+/// The tiny cubes a span from `low` to `high` overlaps, as a first and a last index.
+fn fine_span(low: f32, high: f32) -> (i32, i32) {
+    let cells = cell_range(low, high);
+    (*cells.start(), *cells.end())
+}
+
+/// Whether the body's box overlaps a solid tiny cube.
+pub fn collides(body: &Body, terrain: &impl Terrain) -> bool {
+    let (min, max) = scaled(body.bounds());
+    let spans = [0, 1, 2].map(|axis| fine_span(min[axis], max[axis]));
+    let low = spans.map(|(first, _)| first);
+    let high = spans.map(|(_, last)| last);
+    solid_in(&mut BlockCache::new(terrain), low, high, |_| false)
+}
+
+/// Opposite corners of a box, in tiny cubes instead of blocks. Multiplying by a power of two
+/// is exact, so everything below gives the same numbers as working in whole blocks.
+fn scaled((low, high): (Vec3, Vec3)) -> (Vec3, Vec3) {
+    (low * FINE as f32, high * FINE as f32)
+}
+
+/// How far the box can move along `axis` towards `delta` before touching a solid tiny cube,
 /// never more than `delta` and never in the opposite direction.
-fn clip(solid: &impl Fn([i32; 3]) -> bool, body: &Body, axis: usize, delta: f32) -> f32 {
-    let (min, max) = body.bounds();
+///
+/// A tiny cube inside a whole block that the box already overlaps along `axis` is ignored,
+/// so a box that was put inside a block can still walk out of it, as before moulding existed.
+fn clip<T: Terrain>(cache: &mut BlockCache<'_, T>, body: &Body, axis: usize, delta: f32) -> f32 {
+    let (block_min, block_max) = body.bounds();
+    let (min, max) = scaled((block_min, block_max));
+    let (delta, skin) = (delta * FINE as f32, SKIN * FINE as f32);
     let (first, second) = ((axis + 1) % 3, (axis + 2) % 3);
-    let blocked = |cell: i32| {
-        cell_range(min[first], max[first]).any(|a| {
-            cell_range(min[second], max[second]).any(|b| {
-                let mut at = [0; 3];
-                at[axis] = cell;
-                at[first] = a;
-                at[second] = b;
-                solid(at)
-            })
+    // The first block along the axis the box has not reached yet, going up, and the last one
+    // it has left behind, going down: whole blocks beyond these are real obstacles.
+    let (not_reached, left_behind) = (
+        block_max[axis].ceil() as i32,
+        block_min[axis].floor() as i32 - 1,
+    );
+    let across = [first, second].map(|axis| fine_span(min[axis], max[axis]));
+    let mut blocked = |cell: i32| {
+        let mut low = [0; 3];
+        let mut high = [0; 3];
+        low[axis] = cell;
+        high[axis] = cell;
+        low[first] = across[0].0;
+        high[first] = across[0].1;
+        low[second] = across[1].0;
+        high[second] = across[1].1;
+        solid_in(cache, low, high, |block| {
+            if delta > 0.0 {
+                block[axis] < not_reached
+            } else {
+                block[axis] > left_behind
+            }
         })
     };
 
-    if delta > 0.0 {
+    let allowed = if delta > 0.0 {
         // Cells whose near face lies at or beyond the front of the box.
         let mut cells = max[axis].ceil() as i32..=(max[axis] + delta).floor() as i32;
         cells.find(|&cell| blocked(cell)).map_or(delta, |cell| {
-            (cell as f32 - max[axis] - SKIN).clamp(0.0, delta)
+            (cell as f32 - max[axis] - skin).clamp(0.0, delta)
         })
     } else if delta < 0.0 {
         // Cells whose near face lies at or behind the back of the box, nearest first.
         let mut cells =
             ((min[axis] + delta).ceil() as i32 - 1..=min[axis].floor() as i32 - 1).rev();
         cells.find(|&cell| blocked(cell)).map_or(delta, |cell| {
-            ((cell + 1) as f32 - min[axis] + SKIN).clamp(delta, 0.0)
+            ((cell + 1) as f32 - min[axis] + skin).clamp(delta, 0.0)
         })
     } else {
         0.0
-    }
+    };
+    allowed / FINE as f32
 }
 
 /// The cells a span from `low` to `high` overlaps. A span that only touches a cell's face

@@ -16,6 +16,7 @@
 use std::fmt::Write as _;
 
 use crate::crafting::program::{RecipeProgram, Step};
+use crate::crafting::shaped::{Pattern, program_for};
 use crate::items::registry::{self as items, ItemId};
 use crate::scripting::text::{Node, TextError, item_named, number, test_of, test_text};
 
@@ -89,6 +90,50 @@ pub fn recipe_of(nodes: &[Node<'_>], line: usize) -> Result<RecipeProgram, TextE
         .map_err(|error| TextError::new(line, error.to_string()))
 }
 
+/// Builds a shaped recipe from nodes that are `shape` rows (an item or `.` for an empty cell
+/// per word) and `make` lines. What it spends is the pattern's items, one per filled cell.
+///
+/// # Errors
+///
+/// Returns a [`TextError`] for a line that is neither, a picture that is not a [`Pattern`], or
+/// the rule the recipe breaks, reported on `line`.
+pub fn shaped_of(nodes: &[Node<'_>], line: usize) -> Result<(Pattern, RecipeProgram), TextError> {
+    let mut rows = Vec::new();
+    let mut makes = Vec::new();
+    for node in nodes {
+        match node.words[0] {
+            "shape" if !node.opens => {
+                let cells = node.words[1..]
+                    .iter()
+                    .map(|&word| {
+                        if word == "." {
+                            Ok(None)
+                        } else {
+                            item_named(word, node.line).map(Some)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows.push(cells);
+            }
+            "make" => match step_of(node)? {
+                Step::Make { item, count } => makes.push((item, count)),
+                _ => unreachable!("step_of reads a make line as a make"),
+            },
+            _ => {
+                return Err(TextError::new(
+                    node.line,
+                    "a shaped recipe is 'shape' rows and 'make' lines",
+                ));
+            }
+        }
+    }
+    let pattern =
+        Pattern::try_new(&rows).map_err(|error| TextError::new(line, error.to_string()))?;
+    let program =
+        program_for(&pattern, &makes).map_err(|error| TextError::new(line, error.to_string()))?;
+    Ok((pattern, program))
+}
+
 fn item_text(item: ItemId) -> String {
     items::get(item).map_or_else(|| format!("item{}", item.0), |def| def.name.to_owned())
 }
@@ -122,6 +167,26 @@ fn print_steps(list: &[Step], indent: usize, out: &mut String) {
             }
         };
     }
+}
+
+/// A shaped recipe as text: its `shape` rows, then what it makes. [`shaped_of`] reads it back
+/// to an equal recipe.
+pub fn print_shaped(pattern: &Pattern, program: &RecipeProgram) -> String {
+    let mut out = String::new();
+    for row in pattern.rows() {
+        let words: Vec<String> = row
+            .iter()
+            .map(|cell| cell.map_or_else(|| ".".to_owned(), item_text))
+            .collect();
+        // Writing to a String cannot fail.
+        let _ = writeln!(out, "shape {}", words.join(" "));
+    }
+    for step in program.steps() {
+        if let Step::Make { item, count } = step {
+            let _ = writeln!(out, "make {} {count}", item_text(*item));
+        }
+    }
+    out
 }
 
 /// A recipe as text. Reading it back gives an equal recipe.
@@ -158,6 +223,49 @@ mod tests {
         assert!(error.message.contains("no item called 'gold'"));
         assert_eq!(parse("take grass").unwrap_err().line, 1);
         assert_eq!(parse("hop 0 1 0").unwrap_err().line, 1);
+    }
+
+    fn shaped(text: &str) -> Result<(Pattern, RecipeProgram), TextError> {
+        let mut cursor = Cursor::new(text);
+        let (nodes, _) = cursor.body(0)?;
+        shaped_of(&nodes, 1)
+    }
+
+    #[test]
+    fn a_shaped_recipe_reads_and_prints_back_the_same() {
+        let text = "shape stone .\nshape stone dirt\nmake fuel 2\n";
+        let (pattern, program) = shaped(text).unwrap();
+        assert_eq!(print_shaped(&pattern, &program), text);
+    }
+
+    #[test]
+    fn a_shaped_recipe_spends_one_item_per_filled_cell() {
+        let (_, program) = shaped("shape stone stone\nshape . dirt\nmake fuel 1\n").unwrap();
+        assert_eq!(
+            program.steps()[..2],
+            [
+                Step::Take {
+                    item: ItemId::STONE,
+                    count: 2
+                },
+                Step::Take {
+                    item: ItemId::DIRT,
+                    count: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_shaped_recipe_names_its_line() {
+        assert_eq!(
+            shaped("shape stone gold\nmake fuel 1\n").unwrap_err().line,
+            1
+        );
+        assert_eq!(shaped("shape stone\ntake dirt 1\n").unwrap_err().line, 2);
+        assert!(shaped("shape stone\nshape stone stone\nmake fuel 1\n").is_err());
+        assert!(shaped("shape stone stone\nmake sword 1\n").is_err());
+        assert!(shaped("shape stone\n").is_err());
     }
 
     #[test]

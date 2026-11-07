@@ -16,6 +16,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::blocks::mould::SIDE;
+use crate::blocks::mould::persist as mould_persist;
+use crate::blueprints::capture::capture;
+use crate::blueprints::model::{Blueprint, Build};
+use crate::blueprints::text as blueprint_text;
+use crate::building::chisel::{aim, chisel_events, split};
 use crate::building::model::{EditError, SolidBlock};
 use crate::building::service::{REACH, break_target, place_target};
 use crate::combat::service::{hit_events, respawn, respawn_events, strike};
@@ -29,6 +35,7 @@ use crate::crafting::draft::RecipeDraft;
 use crate::crafting::program::RecipeProgram;
 use crate::crafting::registry::RecipeId;
 use crate::crafting::service::{CraftError, craft_events, custom_craft_events};
+use crate::crafting::shaped::{Grid, Pattern, program_for};
 use crate::events::apply::{ChargeError, Stage, StageError, apply_all, charge_events};
 use crate::events::archive;
 use crate::events::log::{ActionKind, EventLog};
@@ -67,6 +74,7 @@ use crate::scripting::program::{Program, Test};
 use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
 use crate::scripting::service::{ask, run as run_commands};
+use crate::shared::clipboard::Clipboard;
 use crate::shared::clock::{ClockError, FixedClock, Tick};
 use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::intent::Walk;
@@ -83,8 +91,9 @@ use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
 use crate::ui::draw::{command_overlay, menu_overlay, overlay, script_overlay};
 use crate::ui::layout::{
-    EditAct, EditorView, ExtraRow, RecipeAct, RecipeView, RulesAct, command_panel, editor_menu,
-    hack_panel, panel_with, recipe_menu, rules_menu, script_panel,
+    EditAct, EditorView, ExtraRow, GRID_OUT_MAX, GridAct, GridView, RecipeAct, RecipeView,
+    RulesAct, command_panel, editor_menu, grid_menu, hack_panel, panel_with, recipe_menu,
+    rules_menu, script_panel,
 };
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
@@ -103,6 +112,10 @@ const ARCHIVE_PATH: &str = "world.mcea";
 
 /// Where the inventory snapshot is kept, relative to the working directory.
 const INVENTORY_PATH: &str = "inventory.mcin";
+
+/// Where the table of moulded blocks is kept, relative to the working directory. A saved world
+/// that holds moulded blocks needs it, so it is written before the world file.
+const MOULDS_PATH: &str = "moulds.mcmd";
 
 /// Where the player's rules and recipes are kept, as readable text.
 const PROGRAMS_PATH: &str = "programs.nib";
@@ -172,6 +185,10 @@ pub enum AppError {
     LoadStats(#[from] stats_persist::LoadError),
     #[error("cannot save the meters")]
     SaveStats(#[source] io::Error),
+    #[error("cannot load the saved moulded blocks")]
+    LoadMoulds(#[from] mould_persist::LoadError),
+    #[error("cannot save the moulded blocks")]
+    SaveMoulds(#[source] io::Error),
     #[error("cannot save the intent track")]
     SaveIntents(#[source] io::Error),
     #[error("bad command line")]
@@ -295,11 +312,19 @@ struct Running {
     custom: CustomRecipes,
     /// The edits the player saved to the ready-made scripts.
     scripts: ScriptEdits,
+    /// The system clipboard, which blueprints travel through.
+    clipboard: Clipboard,
     /// The folder holding the world this session started from, where a replay finds the
     /// recipes (see [`Self::keep_start_programs`]).
     start_dir: PathBuf,
     /// Whether the recipe editor is open (key `M`).
     recipe_open: bool,
+    /// Whether the shaped crafting grid is open (key `K`).
+    grid_open: bool,
+    /// What the player has laid out in the grid.
+    grid: Grid,
+    /// What a recipe written in the grid would make.
+    grid_out: (ItemId, u8),
     /// The recipe being made; kept while the editor is closed.
     recipe_draft: Option<RecipeDraft>,
     /// Whether `programs.nib` was read (or did not exist). When it was refused, exit leaves the
@@ -350,6 +375,9 @@ struct Running {
     script_note: Option<String>,
     /// Whether the window title shows the live readout of facing, aimed block and mobs (key `Q`).
     readout_on: bool,
+    /// Whether the chisel is out (key `U`): clicks chip and fill tiny cubes instead of breaking
+    /// and placing blocks.
+    chisel_on: bool,
     /// The readout text last put in the title, so the title is only rewritten when it changes.
     readout: String,
     terrain: TerrainGenerator,
@@ -404,6 +432,7 @@ impl App {
         let redo = RedoStack::from_log(&log);
         let inventory = inventory_persist::load(&start_file(INVENTORY_PATH))?.unwrap_or_default();
         let stats = stats_persist::load(&start_file(STATS_PATH))?.unwrap_or_default();
+        let moulds = mould_persist::load(&start_file(MOULDS_PATH))?.unwrap_or_default();
         let (programs, programs_ok) = load_programs(&start_file(PROGRAMS_PATH));
         // Makes room for the new session. A replayed session is already in memory by now, and
         // its starting world has been read above, so pruning it is harmless.
@@ -421,6 +450,11 @@ impl App {
             &programs_file::write(&programs.rules, &programs.recipes, &programs.scripts),
         ) {
             tracing::warn!(%error, "cannot save the starting world; this session will not replay exactly");
+        }
+        if let Err(error) =
+            mould_persist::save(&stream::start_dir(&session).join(MOULDS_PATH), &moulds)
+        {
+            tracing::warn!(%error, "cannot save the moulded blocks of the starting world; a replay may show them wrong");
         }
         let start_dir = stream::start_dir(&session);
         let intents = IntentStream::new(session);
@@ -440,7 +474,11 @@ impl App {
             flying: false,
             last_frame: Instant::now(),
             simulation: Simulation::new(SEED, clock),
-            world: World::default(),
+            world: {
+                let mut world = World::default();
+                world.set_moulds(moulds);
+                world
+            },
             log,
             redo,
             inventory,
@@ -456,8 +494,12 @@ impl App {
             recipe: RecipeId::FIRST,
             custom: programs.recipes,
             scripts: programs.scripts,
+            clipboard: Clipboard::new(),
             start_dir,
             recipe_open: false,
+            grid_open: false,
+            grid: Grid::default(),
+            grid_out: (ItemId::FUEL, 1),
             recipe_draft: None,
             programs_ok,
             zone_step: 0,
@@ -480,6 +522,7 @@ impl App {
             script: None,
             script_note: None,
             readout_on: false,
+            chisel_on: false,
             readout: String::new(),
             terrain,
             streamer: Streamer::new(
@@ -543,6 +586,8 @@ impl App {
             KeyCode::KeyN if down => self.with_running(Running::toggle_rules),
             KeyCode::KeyB if down => self.with_running(Running::toggle_editor),
             KeyCode::KeyM if down => self.with_running(Running::toggle_recipe_editor),
+            KeyCode::KeyK if down => self.with_running(Running::toggle_grid),
+            KeyCode::KeyU if down => self.with_running(Running::toggle_chisel),
             KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -580,6 +625,23 @@ impl App {
             return;
         }
         let (origin, direction) = (running.camera.position, running.camera.forward());
+        if running.chisel_ready() {
+            let target = aim(&running.world, origin, direction);
+            let action = match (button, target) {
+                (MouseButton::Left, Some(aimed)) => Some(Action::Mould {
+                    cell: aimed.chip,
+                    add: false,
+                }),
+                (MouseButton::Right, Some(aimed)) => {
+                    aimed.fill.map(|cell| Action::Mould { cell, add: true })
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                running.act(action);
+            }
+            return;
+        }
         if button == MouseButton::Left
             && let Some(id) = running.aimed_mob(origin, direction)
         {
@@ -896,6 +958,7 @@ impl Running {
             || self.rules_open
             || self.editor_open
             || self.recipe_open
+            || self.grid_open
     }
 
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
@@ -907,6 +970,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
         self.sync_pointer();
     }
 
@@ -919,6 +983,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
         self.sync_pointer();
     }
 
@@ -932,6 +997,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
         self.hack_menu = if self.hacks_open {
             self.hack_options()
         } else {
@@ -948,6 +1014,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
         self.sync_pointer();
     }
 
@@ -969,6 +1036,13 @@ impl Running {
             let layout = self.command_layout();
             if let Some(id) = layout.row_at(cursor.0, cursor.1) {
                 self.click_command(id);
+            }
+            return;
+        }
+        if self.grid_open {
+            let layout = self.grid_layout();
+            if let Some(act) = layout.row_at(cursor.0, cursor.1) {
+                self.click_grid(act);
             }
             return;
         }
@@ -1033,6 +1107,10 @@ impl Running {
             let layout = self.command_layout();
             let hovered = layout.row_at(cursor.0, cursor.1);
             command_overlay(&layout, size, hovered)
+        } else if self.grid_open {
+            let layout = self.grid_layout();
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            menu_overlay(&layout, size, hovered)
         } else if let Some(layout) = self.recipe_layout().filter(|_| self.recipe_open) {
             let hovered = layout.row_at(cursor.0, cursor.1);
             menu_overlay(&layout, size, hovered)
@@ -1074,6 +1152,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
         self.commands_open = true;
         self.command_table = table;
         self.command_status.clear();
@@ -1170,6 +1249,16 @@ impl Running {
                 name,
                 program: None,
             } => self.open_recipe_editor(Some(&name)),
+            Plan::Copy(what) => {
+                self.command_status = match self.copy_blueprint(&what) {
+                    Ok(note) | Err(note) => note,
+                };
+            }
+            Plan::Paste => {
+                self.command_status = match self.paste_blueprint() {
+                    Ok(note) | Err(note) => note,
+                };
+            }
             Plan::Queue(_) if self.typed.len() >= MAX_TYPED => {
                 self.command_status = "too many commands waiting".to_owned();
             }
@@ -1345,6 +1434,115 @@ impl Running {
         Ok(())
     }
 
+    /// Opens or closes the shaped crafting grid (key `K`). The grid keeps what was laid out.
+    fn toggle_grid(&mut self) {
+        if self.grid_open {
+            self.close_panels();
+        } else {
+            self.close_panels_quietly();
+            self.grid_open = true;
+            self.panel_note.clear();
+            self.sync_pointer();
+        }
+    }
+
+    /// The recipe the grid shows, if any.
+    fn grid_match(&self) -> Option<(RecipeId, String)> {
+        let shown = self.grid.pattern()?;
+        self.custom
+            .find_shaped(&shown)
+            .map(|(id, recipe)| (id, recipe.name().to_owned()))
+    }
+
+    /// The pattern and recipe the grid would be kept as, or what is wrong with them.
+    fn grid_keep(&self) -> Result<(Pattern, RecipeProgram), String> {
+        let pattern = self
+            .grid
+            .pattern()
+            .ok_or_else(|| "put items in the grid".to_owned())?;
+        let program = program_for(&pattern, &[self.grid_out])
+            .map_err(|error| error.to_string().replace(';', ","))?;
+        Ok((pattern, program))
+    }
+
+    fn grid_layout(&mut self) -> crate::ui::layout::Menu<GridAct> {
+        let matched = self.grid_match();
+        let made = matched.map(|(id, name)| (name, self.custom_events(id).is_ok()));
+        let keep = self.grid_keep();
+        let hint = if !self.panel_note.is_empty() {
+            self.panel_note.clone()
+        } else if made.is_some() {
+            "a recipe already makes this - k closes".to_owned()
+        } else {
+            match &keep {
+                Ok(_) => "fair - keep it - k closes".to_owned(),
+                Err(why) => why.clone(),
+            }
+        };
+        let view = GridView {
+            made: made.as_ref().map(|(name, ok)| (name.as_str(), *ok)),
+            output: self.grid_out,
+            keepable: keep.is_ok() && made.is_none(),
+            hint: &hint,
+        };
+        grid_menu(self.renderer.size(), &self.grid, view)
+    }
+
+    fn click_grid(&mut self, act: GridAct) {
+        self.panel_note.clear();
+        match act {
+            GridAct::Cell(index) => {
+                self.grid.cycle(index);
+            }
+            GridAct::Clear => self.grid.clear(),
+            GridAct::OutItem => {
+                let (item, _) = self.grid_out;
+                self.grid_out.0 = registry::ids()
+                    .find(|candidate| candidate.0 > item.0)
+                    .or_else(|| registry::ids().next())
+                    .unwrap_or(item);
+            }
+            GridAct::OutMore => self.grid_out.1 = self.grid_out.1 % GRID_OUT_MAX + 1,
+            GridAct::Craft => {
+                if let Some((id, _)) = self.grid_match() {
+                    self.craft_recipe(id);
+                }
+            }
+            GridAct::Keep => {
+                self.panel_note = match self
+                    .grid_keep()
+                    .and_then(|(pattern, program)| self.add_shaped_recipe(&pattern, program))
+                {
+                    Ok(name) => format!("recipe {name} kept"),
+                    Err(why) => why,
+                };
+            }
+        }
+    }
+
+    /// Keeps a shaped recipe of the player's under a free name and returns the name. Like
+    /// [`Self::add_recipe`], it is only ever added, and the starting world is rewritten so a
+    /// replay can craft it.
+    fn add_shaped_recipe(
+        &mut self,
+        pattern: &Pattern,
+        program: RecipeProgram,
+    ) -> Result<String, String> {
+        if self.replay.is_some() {
+            return Err("not while a saved run replays".to_owned());
+        }
+        let name = self
+            .custom
+            .suggest_name()
+            .ok_or_else(|| CustomError::Full.to_string())?;
+        self.custom
+            .add_shaped(&name, pattern.clone(), program)
+            .map_err(|error| error.to_string())?;
+        self.keep_start_programs();
+        self.refresh_title();
+        Ok(name)
+    }
+
     /// Opens or closes the recipe editor (key `M`). It reopens the recipe it last held.
     fn toggle_recipe_editor(&mut self) {
         if self.recipe_open {
@@ -1464,6 +1662,88 @@ impl Running {
         Ok(())
     }
 
+    /// Puts a blueprint of `what` (`rules`, `recipes` or `build`) on the clipboard and says what
+    /// it holds. A build is the blocks around the feet, at most 64 of them.
+    fn copy_blueprint(&mut self, what: &str) -> Result<String, String> {
+        let (rules, recipes, build, note) = match what {
+            "rules" => (
+                self.rules.clone(),
+                CustomRecipes::default(),
+                None,
+                format!("{} rules copied", self.rules.len()),
+            ),
+            "recipes" => (
+                Rules::default(),
+                self.custom.clone(),
+                None,
+                format!("{} recipes copied", self.custom.len()),
+            ),
+            "build" => {
+                let program = capture(&self.world, self.feet_cell()).map_err(|e| e.to_string())?;
+                let count = program.blocks().len();
+                let build = Build::try_new("build", program).map_err(|e| e.to_string())?;
+                (
+                    Rules::default(),
+                    CustomRecipes::default(),
+                    Some(build),
+                    format!("{count} blocks copied"),
+                )
+            }
+            _ => return Err("copy what? rules, recipes or build".to_owned()),
+        };
+        let blueprint = Blueprint::try_new(rules, recipes, build)
+            .map_err(|_| format!("you have no {what} to copy"))?;
+        self.clipboard
+            .write(&blueprint_text::write(&blueprint))
+            .map_err(|e| e.to_string())?;
+        Ok(note)
+    }
+
+    /// Reads a blueprint from the clipboard and uses it: its rules and recipes are added, and its
+    /// build starts as a script on the feet, paid with fuel like any script. Everything is
+    /// refused if any part would be, so a failed paste changes nothing.
+    fn paste_blueprint(&mut self) -> Result<String, String> {
+        let text = self.clipboard.read().map_err(|e| e.to_string())?;
+        let blueprint = blueprint_text::parse(&text).map_err(|e| e.to_string())?;
+        let mut rules = self.rules.clone();
+        for (_, rule) in blueprint.rules().iter() {
+            let id = rules
+                .add_with(
+                    rule.trigger(),
+                    rule.test(),
+                    rule.program().clone(),
+                    rule.anchor(),
+                )
+                .map_err(|e| e.to_string())?;
+            if !rule.is_on() {
+                rules.switch(id);
+            }
+        }
+        let mut custom = self.custom.clone();
+        for (_, recipe) in blueprint.recipes().iter() {
+            custom
+                .add(recipe.name(), recipe.program().clone())
+                .map_err(|e| format!("recipe {}: {e}", recipe.name()))?;
+        }
+        if let Some(build) = blueprint.build() {
+            let feet = self.feet_cell();
+            self.start_program("blueprint", build.program(), feet)?;
+        }
+        let (added_rules, added_recipes) = (blueprint.rules().len(), blueprint.recipes().len());
+        self.rules = rules;
+        self.custom = custom;
+        if added_recipes > 0 {
+            self.keep_start_programs();
+        }
+        self.refresh_title();
+        let build_note = blueprint.build().map_or(String::new(), |b| {
+            format!(", build of {} blocks started", b.program().blocks().len())
+        });
+        Ok(format!(
+            "pasted {added_rules} rules, {added_recipes} recipes{build_note}"
+        ))
+    }
+
     /// Rewrites the programs file inside this session's starting world so it holds every
     /// recipe made so far. A replay loads recipes from there, and a recorded craft names its
     /// recipe by number, so without this a replay of a session that made a recipe could not
@@ -1529,6 +1809,7 @@ impl Running {
         self.rules_open = false;
         self.editor_open = false;
         self.recipe_open = false;
+        self.grid_open = false;
     }
 
     fn rules_layout(&self) -> crate::ui::layout::Menu<RulesAct> {
@@ -2192,6 +2473,7 @@ impl Running {
             Action::Break(pos) => self.break_at(pos),
             Action::Place { pos, block } => self.place_at(pos, block),
             Action::Craft(recipe) => self.craft_once(RecipeId(recipe)),
+            Action::Mould { cell, add } => self.mould_at(cell, add),
             Action::Eat => self.eat_once(),
             Action::Strike(actor) => self.strike_mob(mob_of(actor)),
             Action::Rewind => self.rewind(),
@@ -2271,6 +2553,48 @@ impl Running {
         true
     }
 
+    /// Whether clicks chisel: the chisel is out and still in the pack.
+    fn chisel_ready(&self) -> bool {
+        self.chisel_on && self.inventory.count_of(ItemId::CHISEL) > 0
+    }
+
+    /// Takes the chisel out or puts it away (key `U`). It needs a chisel in the pack; craft one
+    /// in the grid (key `K`).
+    fn toggle_chisel(&mut self) {
+        if self.chisel_on {
+            self.chisel_on = false;
+            self.script_note = Some("chisel away".to_owned());
+        } else if self.inventory.count_of(ItemId::CHISEL) == 0 {
+            self.script_note = Some("no chisel - craft one in the grid (k)".to_owned());
+        } else {
+            self.chisel_on = true;
+            self.script_note = Some(
+                "chisel out: left click chips a tiny cube, right click puts one back".to_owned(),
+            );
+        }
+        self.refresh_title();
+    }
+
+    /// Chips the tiny cube at `cell` off its block, or puts it back when `add` is set. It needs
+    /// a chisel in the pack, and never fills a tiny cube the player's box is in. Reports
+    /// whether it did.
+    fn mould_at(&mut self, cell: WorldPos, add: bool) -> bool {
+        if self.inventory.count_of(ItemId::CHISEL) == 0 {
+            return false;
+        }
+        if add && tiny_cube_overlaps(self.player.bounds(), cell) {
+            return false;
+        }
+        let Ok(events) = chisel_events(&mut self.world, cell, add) else {
+            return false;
+        };
+        if !self.commit_or_warn(&events) {
+            return false;
+        }
+        self.remesh_around(split(cell).0);
+        true
+    }
+
     /// Places `block` at `pos`, spending one from the pack. Reports whether it did.
     fn place_at(&mut self, pos: WorldPos, block: BlockId) -> bool {
         let Ok(block) = SolidBlock::try_new(block) else {
@@ -2334,6 +2658,7 @@ impl Running {
         let ids: Vec<(RecipeId, String)> = self
             .custom
             .iter()
+            .filter(|(_, recipe)| recipe.pattern().is_none())
             .map(|(id, recipe)| (id, format!("{} - yours", recipe.name())))
             .collect();
         ids.into_iter()
@@ -2369,7 +2694,7 @@ impl Running {
         }
         if let Some(name) = self.custom.name_of(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, M recipes, / or H commands)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, M recipes, K grid, U chisel, / or H commands)",
                 name
             ));
         }
@@ -2456,6 +2781,14 @@ impl ApplicationHandler for App {
         // A session that began as a replay played in a copy of an old world, and saving it
         // would overwrite the player's own.
         if !running.sandboxed {
+            // The table goes first: a world file that names a moulded block the table lacks would
+            // show it as an unknown block.
+            if !running.world.moulds().is_empty()
+                && let Err(error) =
+                    mould_persist::save(Path::new(MOULDS_PATH), running.world.moulds())
+            {
+                self.failure.get_or_insert(AppError::SaveMoulds(error));
+            }
             // An empty log was never edited, so there is nothing worth writing.
             if !running.log.is_empty() {
                 let folded = running.log.take_folded();
@@ -2504,6 +2837,14 @@ impl ApplicationHandler for App {
             running.window.request_redraw();
         }
     }
+}
+
+/// Whether the box with these opposite corners overlaps the tiny cube at `cell`, in tiny
+/// cubes from the origin.
+fn tiny_cube_overlaps((low, high): (Vec3, Vec3), cell: WorldPos) -> bool {
+    let size = 1.0 / SIDE as f32;
+    let at = [cell.x, cell.y, cell.z].map(|axis| axis as f32 * size);
+    (0..3).all(|axis| low[axis] < at[axis] + size && high[axis] > at[axis])
 }
 
 /// The mob that is intent-log actor `actor`; the inverse of [`actor_of`].
@@ -2639,7 +2980,11 @@ fn reaction_to(action: Action) -> Option<PlayerAction> {
         Action::Craft(_) => Some(PlayerAction::Craft),
         Action::Eat => Some(PlayerAction::Eat),
         Action::Strike(_) => Some(PlayerAction::Hit),
-        Action::Rewind | Action::Redo | Action::ZoneRewind { .. } | Action::Script(_) => None,
+        Action::Rewind
+        | Action::Redo
+        | Action::ZoneRewind { .. }
+        | Action::Script(_)
+        | Action::Mould { .. } => None,
     }
 }
 

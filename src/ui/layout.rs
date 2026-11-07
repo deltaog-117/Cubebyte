@@ -9,6 +9,7 @@ use crate::command::table as commands;
 use crate::crafting::draft::RecipeDraft;
 use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
+use crate::crafting::shaped::{CELLS, Grid};
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self as items, ItemId};
 use crate::logic::model::{Anchor, RuleId, Rules, Trigger};
@@ -711,6 +712,97 @@ pub fn recipe_menu(size: (u32, u32), draft: &RecipeDraft, view: RecipeView<'_>) 
     menu(size, &format!("recipe {}", draft.name()), &hint, lines)
 }
 
+/// What a click in the shaped crafting grid asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GridAct {
+    /// Gives the cell the next item, or empties it after the last.
+    Cell(usize),
+    /// Crafts the recipe the grid shows.
+    Craft,
+    Clear,
+    /// Gives a recipe being written the next item to make.
+    OutItem,
+    /// Makes one more of it, wrapping from [`GRID_OUT_MAX`] to 1.
+    OutMore,
+    /// Keeps the grid as a recipe of the player's.
+    Keep,
+}
+
+/// Most of one item a recipe written in the grid may make.
+pub const GRID_OUT_MAX: u8 = 9;
+
+/// The words for each cell of the grid, row by row.
+const CELL_NAMES: [&str; CELLS] = [
+    "top left",
+    "top mid",
+    "top right",
+    "mid left",
+    "centre",
+    "mid right",
+    "low left",
+    "low mid",
+    "low right",
+];
+
+/// What the grid panel needs besides the grid itself.
+#[derive(Clone, Copy, Debug)]
+pub struct GridView<'a> {
+    /// The recipe the grid shows, and whether the pack could pay for it now.
+    pub made: Option<(&'a str, bool)>,
+    /// What a recipe written here would make.
+    pub output: (ItemId, u8),
+    /// Whether the grid can be kept as a new recipe.
+    pub keepable: bool,
+    pub hint: &'a str,
+}
+
+fn item_name(item: ItemId) -> &'static str {
+    items::get(item).map_or("?", |def| def.name)
+}
+
+/// The grid panel: one line per cell, then the buttons. Where an item sits matters to a shaped
+/// recipe, so each cell is named by its place.
+pub fn grid_menu(size: (u32, u32), grid: &Grid, view: GridView<'_>) -> Menu<GridAct> {
+    let mut lines: Vec<_> = (0..CELLS)
+        .map(|index| MenuLine {
+            act: GridAct::Cell(index),
+            text: format!(
+                "{}: {}",
+                CELL_NAMES[index],
+                grid.get(index).map_or("empty", item_name)
+            ),
+            usable: true,
+            chosen: grid.get(index).is_some(),
+        })
+        .collect();
+    let button = |act, text: String, usable| MenuLine {
+        act,
+        text,
+        usable,
+        chosen: false,
+    };
+    let (craft_text, craftable) = match view.made {
+        Some((name, affordable)) => (format!("make {name}"), affordable),
+        None => ("no recipe matches".to_owned(), false),
+    };
+    lines.extend([
+        button(GridAct::Craft, craft_text, craftable),
+        button(GridAct::Clear, "clear the grid".to_owned(), true),
+        button(
+            GridAct::OutItem,
+            format!(
+                "a new recipe makes {} x{} - next item",
+                item_name(view.output.0),
+                view.output.1
+            ),
+            true,
+        ),
+        button(GridAct::OutMore, "make one more of it".to_owned(), true),
+        button(GridAct::Keep, "keep as a recipe".to_owned(), view.keepable),
+    ]);
+    menu(size, "crafting grid", view.hint, lines)
+}
+
 /// One clickable command of the table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommandRow {
@@ -831,6 +923,27 @@ mod tests {
 
     fn size() -> impl Strategy<Value = (u32, u32)> {
         (320u32..4096, 240u32..2160)
+    }
+
+    #[test]
+    fn the_grid_panel_has_a_line_per_cell_then_the_buttons() {
+        let view = GridView {
+            made: None,
+            output: (ItemId::FUEL, 1),
+            keepable: false,
+            hint: "",
+        };
+        let panel = grid_menu((1280, 720), &Grid::default(), view);
+        assert_eq!(panel.rows.len(), CELLS + 5);
+        let centre = &panel.rows[4];
+        assert_eq!(
+            panel.row_at(centre.rect.x + 1.0, centre.rect.y + 1.0),
+            Some(GridAct::Cell(4))
+        );
+        assert!(
+            !panel.rows[CELLS].usable,
+            "no recipe matches, so craft is dull"
+        );
     }
 
     fn view() -> EditorView<'static> {

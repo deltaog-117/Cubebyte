@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["deltaog-117"]
 
 [dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = "0.34.1"
 pollster = "1.0.1"

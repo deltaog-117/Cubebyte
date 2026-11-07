@@ -6,10 +6,14 @@
 //! recorded craft means the same recipe when it is replayed (the file is copied into the
 //! session's starting world).
 
+use std::sync::LazyLock;
+
 use thiserror::Error;
 
 use crate::crafting::program::RecipeProgram;
 use crate::crafting::registry::{self, RecipeId};
+use crate::crafting::shaped::{Pattern, program_for};
+use crate::items::registry::ItemId;
 
 /// Most player recipes at once.
 pub const MAX_CUSTOM: usize = 16;
@@ -27,16 +31,67 @@ pub enum CustomError {
     Taken(String),
 }
 
-/// One recipe of the player's.
+/// The number of the first built-in shaped recipe. These sit at the top of the numbers, far
+/// from the table's and the player's, so adding one never changes the number a recording
+/// names for a recipe that already existed.
+pub const SHAPED_FIRST: u8 = 200;
+
+const _: () = assert!(
+    registry::RECIPE_COUNT + MAX_CUSTOM < SHAPED_FIRST as usize,
+    "player recipe numbers must stay below the built-in shaped ones"
+);
+
+/// One recipe of the player's, or a built-in shaped one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustomRecipe {
     name: String,
+    /// The picture the grid must show, for a shaped recipe. A shaped recipe is crafted only
+    /// from the grid, so the crafting panel and the craft key leave it out.
+    pattern: Option<Pattern>,
     program: RecipeProgram,
 }
+
+/// Built-in shaped recipes: a name, rows of items and what they make.
+type ShapedDef = (
+    &'static str,
+    &'static [&'static [Option<ItemId>]],
+    (ItemId, u8),
+);
+
+const SHAPED: [ShapedDef; 1] = [(
+    "chisel",
+    &[
+        &[Some(ItemId::STONE), Some(ItemId::STONE)],
+        &[Some(ItemId::DIRT), None],
+    ],
+    (ItemId::CHISEL, 1),
+)];
+
+// A definition that fails its checks is left out; a test proves none is.
+static BUILTIN_SHAPED: LazyLock<Vec<CustomRecipe>> = LazyLock::new(|| {
+    SHAPED
+        .iter()
+        .filter_map(|&(name, rows, output)| {
+            let rows: Vec<Vec<Option<ItemId>>> = rows.iter().map(|row| row.to_vec()).collect();
+            let pattern = Pattern::try_new(&rows).ok()?;
+            let program = program_for(&pattern, &[output]).ok()?;
+            Some(CustomRecipe {
+                name: name.to_owned(),
+                pattern: Some(pattern),
+                program,
+            })
+        })
+        .collect()
+});
 
 impl CustomRecipe {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The picture the grid must show, or `None` for a recipe crafted from the panel.
+    pub fn pattern(&self) -> Option<&Pattern> {
+        self.pattern.as_ref()
     }
 
     pub fn program(&self) -> &RecipeProgram {
@@ -89,10 +144,15 @@ impl CustomRecipes {
     /// to the first.
     pub fn next(&self, id: RecipeId) -> RecipeId {
         let total = usize::from(first_id()) + self.list.len();
-        match usize::from(id.0) + 1 {
-            n if n < total => u8::try_from(n).map_or(RecipeId::FIRST, RecipeId),
-            _ => RecipeId::FIRST,
-        }
+        // A shaped recipe is skipped: the craft key would bypass its picture.
+        (1..=total)
+            .map(|step| (usize::from(id.0) + step) % total)
+            .filter_map(|n| u8::try_from(n).ok().map(RecipeId))
+            .find(|&candidate| {
+                self.get(candidate)
+                    .is_none_or(|recipe| recipe.pattern.is_none())
+            })
+            .unwrap_or(RecipeId::FIRST)
     }
 
     /// The name of recipe `id`, built-in or the player's.
@@ -102,9 +162,30 @@ impl CustomRecipes {
             .or_else(|| self.get(id).map(CustomRecipe::name))
     }
 
-    /// The recipe `id` names, or `None` for a built-in or an ID past the list.
+    /// The recipe `id` names, or `None` for a table recipe or an ID past the lists. Built-in
+    /// shaped recipes answer too.
     pub fn get(&self, id: RecipeId) -> Option<&CustomRecipe> {
-        self.list.get(usize::from(id.0.checked_sub(first_id())?))
+        match id.0.checked_sub(SHAPED_FIRST) {
+            Some(index) => BUILTIN_SHAPED.get(usize::from(index)),
+            None => self.list.get(usize::from(id.0.checked_sub(first_id())?)),
+        }
+    }
+
+    /// The recipe whose picture the grid shows, built-in ones first.
+    pub fn find_shaped(&self, shown: &Pattern) -> Option<(RecipeId, &CustomRecipe)> {
+        let built_in = BUILTIN_SHAPED
+            .iter()
+            .enumerate()
+            .filter_map(|(index, recipe)| {
+                let id = SHAPED_FIRST.checked_add(u8::try_from(index).ok()?)?;
+                Some((RecipeId(id), recipe))
+            });
+        built_in.chain(self.iter()).find(|(_, recipe)| {
+            recipe
+                .pattern
+                .as_ref()
+                .is_some_and(|pattern| pattern.accepts(shown))
+        })
     }
 
     /// A valid name no recipe has yet: `mine`, then `mine2`, `mine3` and so on, or `None` when
@@ -130,6 +211,7 @@ impl CustomRecipes {
             .filter_map(registry::get)
             .any(|recipe| recipe.name == name)
             && !self.list.iter().any(|recipe| recipe.name == name)
+            && !BUILTIN_SHAPED.iter().any(|recipe| recipe.name == name)
     }
 
     /// Adds a recipe and returns its ID.
@@ -140,6 +222,30 @@ impl CustomRecipes {
     /// - [`CustomError::BadName`] for a name outside the allowed letters or length.
     /// - [`CustomError::Taken`] when a built-in or an earlier recipe has the name.
     pub fn add(&mut self, name: &str, program: RecipeProgram) -> Result<RecipeId, CustomError> {
+        self.push(name, None, program)
+    }
+
+    /// Adds a shaped recipe, crafted from the grid, and returns its ID. `program` is what
+    /// crafting it does; [`program_for`] makes the program that spends the pattern's items.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::add`].
+    pub fn add_shaped(
+        &mut self,
+        name: &str,
+        pattern: Pattern,
+        program: RecipeProgram,
+    ) -> Result<RecipeId, CustomError> {
+        self.push(name, Some(pattern), program)
+    }
+
+    fn push(
+        &mut self,
+        name: &str,
+        pattern: Option<Pattern>,
+        program: RecipeProgram,
+    ) -> Result<RecipeId, CustomError> {
         if !name_is_valid(name) {
             return Err(CustomError::BadName);
         }
@@ -151,6 +257,7 @@ impl CustomRecipes {
         }
         self.list.push(CustomRecipe {
             name: name.to_owned(),
+            pattern,
             program,
         });
         Ok(RecipeId(first_id() + (self.list.len() - 1) as u8))
@@ -159,6 +266,11 @@ impl CustomRecipes {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_built_in_shaped_recipe_is_valid_and_fair() {
+        assert_eq!(super::BUILTIN_SHAPED.len(), super::SHAPED.len());
+    }
+
     use super::*;
     use crate::crafting::program::Step;
     use crate::items::registry::ItemId;
@@ -199,7 +311,48 @@ mod tests {
         assert_eq!(recipes.next(mine), RecipeId::FIRST);
         assert_eq!(recipes.name_of(mine), Some("mine"));
         assert_eq!(recipes.name_of(RecipeId::FIRST), Some("bread"));
-        assert_eq!(recipes.name_of(RecipeId(200)), None);
+        assert_eq!(recipes.name_of(RecipeId(250)), None);
+    }
+
+    #[test]
+    fn the_chisel_is_a_shaped_recipe_found_by_its_picture_and_its_mirror() {
+        let recipes = CustomRecipes::default();
+        let chisel = RecipeId(SHAPED_FIRST);
+        assert_eq!(recipes.name_of(chisel), Some("chisel"));
+        let shown = |rows: &[&[Option<ItemId>]]| {
+            let rows: Vec<_> = rows.iter().map(|row| row.to_vec()).collect();
+            Pattern::try_new(&rows).unwrap()
+        };
+        let (s, d, n) = (Some(ItemId::STONE), Some(ItemId::DIRT), None);
+        assert_eq!(
+            recipes
+                .find_shaped(&shown(&[&[s, s], &[d, n]]))
+                .map(|(id, _)| id),
+            Some(chisel)
+        );
+        assert_eq!(
+            recipes
+                .find_shaped(&shown(&[&[s, s], &[n, d]]))
+                .map(|(id, _)| id),
+            Some(chisel)
+        );
+        assert!(recipes.find_shaped(&shown(&[&[s, s], &[n, n]])).is_none());
+    }
+
+    #[test]
+    fn the_craft_key_skips_a_shaped_player_recipe() {
+        let mut recipes = CustomRecipes::default();
+        let pattern = Pattern::try_new(&[vec![Some(ItemId::STONE), Some(ItemId::STONE)]]).unwrap();
+        let shaped = recipes
+            .add_shaped(
+                "pair",
+                pattern.clone(),
+                program_for(&pattern, &[(ItemId::FUEL, 1)]).unwrap(),
+            )
+            .unwrap();
+        let last_built_in = RecipeId(first_id() - 1);
+        assert_eq!(recipes.next(last_built_in), RecipeId::FIRST);
+        assert!(recipes.get(shaped).is_some_and(|r| r.pattern().is_some()));
     }
 
     #[test]

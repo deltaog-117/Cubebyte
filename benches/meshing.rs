@@ -4,7 +4,8 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use minecraft_clone::rendering::meshing::mesh_chunk;
-use minecraft_clone::shared::voxel::ChunkPos;
+use minecraft_clone::shared::event::Event;
+use minecraft_clone::shared::voxel::{BlockId, ChunkPos, WorldPos};
 use minecraft_clone::world::generation::TerrainGenerator;
 use minecraft_clone::world::model::World;
 
@@ -35,5 +36,34 @@ fn mesh_terrain(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, mesh_terrain);
+/// A chunk whose every block is moulded, each with a different quarter of its tiny cubes gone:
+/// the worst case for the moulded pass, far beyond what play produces.
+fn mesh_moulded(c: &mut Criterion) {
+    let mut world = World::default();
+    for x in 0..16 {
+        for y in 0..16 {
+            for z in 0..16 {
+                let bits = 0x0123_4567_89AB_CDEF_u64.rotate_left((x + y + z) as u32) | 1;
+                let Ok(id) = world.moulds_mut().id_for(BlockId::STONE, bits) else {
+                    return;
+                };
+                let pos = WorldPos { x, y, z };
+                let event = Event::BlockSet {
+                    pos,
+                    old: BlockId::AIR,
+                    new: id,
+                };
+                if world.apply(&event).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+    let chunk = ChunkPos { x: 0, y: 0, z: 0 };
+    c.bench_function("mesh_fully_moulded_chunk", |b| {
+        b.iter(|| mesh_chunk(black_box(&world), black_box(chunk)));
+    });
+}
+
+criterion_group!(benches, mesh_terrain, mesh_moulded);
 criterion_main!(benches);

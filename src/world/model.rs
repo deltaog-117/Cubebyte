@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
+use crate::blocks::mould::{MOULD_FIRST, Moulds, SIDE};
+use crate::blocks::registry;
+use crate::shared::body::Terrain;
 use crate::shared::event::Event;
 use crate::shared::voxel::{BlockId, CHUNK_VOLUME, ChunkPos, LocalPos, WorldPos};
 
@@ -45,6 +48,20 @@ impl Chunk {
     }
 }
 
+impl Terrain for World {
+    fn solid_bits(&self, [x, y, z]: [i32; 3]) -> u64 {
+        let block = self.block_at(WorldPos { x, y, z });
+        if block.0 < MOULD_FIRST {
+            return if registry::is_solid(block) {
+                u64::MAX
+            } else {
+                0
+            };
+        }
+        self.moulds.get(block).map_or(0, |(_, shape)| shape.bits())
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ApplyError {
     /// The world no longer matches what the event was recorded against.
@@ -73,9 +90,59 @@ pub enum InsertError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
     chunks: HashMap<ChunkPos, Chunk>,
+    /// What each moulded block ID in `chunks` means. It only grows, so an ID in the event log
+    /// keeps its meaning.
+    moulds: Moulds,
 }
 
 impl World {
+    pub fn moulds(&self) -> &Moulds {
+        &self.moulds
+    }
+
+    pub fn moulds_mut(&mut self) -> &mut Moulds {
+        &mut self.moulds
+    }
+
+    /// Replaces the table of moulded blocks, as when a saved one is loaded.
+    pub fn set_moulds(&mut self, moulds: Moulds) {
+        self.moulds = moulds;
+    }
+
+    /// The material at `pos`: the block itself, or what a moulded block is cut from.
+    pub fn base_block_at(&self, pos: WorldPos) -> BlockId {
+        self.moulds.base_of(self.block_at(pos))
+    }
+
+    /// Whether any part of the block at `pos` is solid. A moulded block counts as solid here
+    /// even where it is carved; [`Self::fine_solid`] knows the carving.
+    pub fn solid_at(&self, pos: WorldPos) -> bool {
+        let block = self.block_at(pos);
+        if block.0 < MOULD_FIRST {
+            registry::is_solid(block)
+        } else {
+            self.moulds.get(block).is_some()
+        }
+    }
+
+    /// Whether the tiny cube at `cell`, in tiny cubes from the origin (four to a block), is
+    /// solid. A plain solid block is solid in all 64 of its tiny cubes.
+    pub fn fine_solid(&self, cell: [i32; 3]) -> bool {
+        let at = cell.map(|axis| axis.div_euclid(SIDE));
+        let inside = cell.map(|axis| axis.rem_euclid(SIDE));
+        let block = self.block_at(WorldPos {
+            x: at[0],
+            y: at[1],
+            z: at[2],
+        });
+        if block.0 < MOULD_FIRST {
+            return registry::is_solid(block);
+        }
+        self.moulds
+            .get(block)
+            .is_some_and(|(_, shape)| shape.has(inside[0], inside[1], inside[2]))
+    }
+
     /// Air where no chunk is loaded.
     pub fn block_at(&self, pos: WorldPos) -> BlockId {
         let (chunk_pos, local) = pos.split();

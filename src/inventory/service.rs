@@ -44,7 +44,7 @@ pub fn gather_block(
     direction: Vec3,
 ) -> Result<WorldPos, StockError> {
     let hit = cast(world, origin, direction, REACH).ok_or(EditError::NothingInReach)?;
-    let drop = registry::drop_of(world.block_at(hit.block));
+    let drop = registry::drop_of(world.base_block_at(hit.block));
     if let Some(item) = drop
         && inventory.room_for(item).unwrap_or(0) == 0
     {
@@ -127,7 +127,7 @@ fn break_events(
     pos: WorldPos,
 ) -> Result<Vec<Event>, StockError> {
     let mut events = vec![block_event(world, pos, BlockId::AIR)];
-    if let Some(item) = registry::drop_of(world.block_at(pos)) {
+    if let Some(item) = registry::drop_of(world.base_block_at(pos)) {
         let mut after = inventory.clone();
         if after.room_for(item).unwrap_or(0) == 0 || after.add(item, 1).is_err() {
             return Err(StockError::Full);

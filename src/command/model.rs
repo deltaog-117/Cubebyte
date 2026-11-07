@@ -88,6 +88,12 @@ pub enum Request {
         name: String,
         program: Option<RecipeProgram>,
     },
+    /// Put a blueprint of `what` (`rules`, `recipes` or `build`) on the clipboard.
+    Copy {
+        what: String,
+    },
+    /// Read a blueprint from the clipboard and use it.
+    Paste,
 }
 
 /// One command: how it is written, what it does, and how its checked words become a request.

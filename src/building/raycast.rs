@@ -4,12 +4,16 @@
 
 use glam::{IVec3, Vec3};
 
+use crate::blocks::mould::SIDE;
 use crate::shared::voxel::WorldPos;
 use crate::world::model::World;
 
 /// Rays that start farther out than this are refused, so stepping from the start cell can
 /// never overflow `i32`.
 const COORD_LIMIT: f32 = 1_000_000.0;
+
+/// Tiny cubes per block along an axis, as a float.
+const FINE: u8 = SIDE as u8;
 
 /// The first solid block along a ray.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,12 +31,53 @@ pub struct RayHit {
 /// `direction`, a non-finite or negative `reach`, or an `origin` that is non-finite or
 /// beyond one million blocks from the world origin. `direction` need not be normalized.
 pub fn cast(world: &World, origin: Vec3, direction: Vec3, reach: f32) -> Option<RayHit> {
+    let (cell, before) = walk(origin, direction, reach, COORD_LIMIT, |cell| {
+        !world.block_at(world_pos(cell)).is_air()
+    })?;
+    Some(RayHit {
+        block: world_pos(cell),
+        before: before.map(world_pos),
+    })
+}
+
+/// The first solid tiny cube along a ray, in tiny cubes (four to a block along each axis).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FineHit {
+    pub cell: WorldPos,
+    /// The tiny cube the ray crossed just before `cell`, or `None` when it starts inside.
+    pub before: Option<WorldPos>,
+}
+
+/// [`cast`] at the resolution of moulded blocks: it stops at the first solid tiny cube, so a ray
+/// passes through the carved-away parts of a block. `reach` is in blocks.
+pub fn cast_fine(world: &World, origin: Vec3, direction: Vec3, reach: f32) -> Option<FineHit> {
+    let scale = f32::from(FINE);
+    let limit = COORD_LIMIT * scale;
+    let (cell, before) = walk(origin * scale, direction, reach * scale, limit, |cell| {
+        world.fine_solid(cell.to_array())
+    })?;
+    Some(FineHit {
+        cell: world_pos(cell),
+        before: before.map(world_pos),
+    })
+}
+
+/// Walks the cells along a ray (Amanatides-Woo) and returns the first one `hits` accepts,
+/// with the cell crossed just before it. `reach` and `limit` are in the same cell units as
+/// `origin`.
+fn walk(
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    limit: f32,
+    hits: impl Fn(IVec3) -> bool,
+) -> Option<(IVec3, Option<IVec3>)> {
     let direction = direction.normalize_or_zero();
     if direction == Vec3::ZERO
         || !reach.is_finite()
         || reach < 0.0
         || !origin.is_finite()
-        || origin.abs().max_element() > COORD_LIMIT
+        || origin.abs().max_element() > limit
     {
         return None;
     }
@@ -53,11 +98,8 @@ pub fn cast(world: &World, origin: Vec3, direction: Vec3, reach: f32) -> Option<
 
     let mut before = None;
     loop {
-        if !world.block_at(world_pos(cell)).is_air() {
-            return Some(RayHit {
-                block: world_pos(cell),
-                before: before.map(world_pos),
-            });
+        if hits(cell) {
+            return Some((cell, before));
         }
         let axis = nearest_axis(t_max);
         if t_max[axis] > reach {
@@ -119,6 +161,48 @@ mod tests {
             world.apply(&event).unwrap();
         }
         world
+    }
+
+    #[test]
+    fn the_fine_cast_passes_through_the_carved_half_of_a_block() {
+        let mut world = world_with(&[IVec3::new(2, 0, 0)]);
+        // Keep only the tiny cubes with x in 2..4: the far half of the block.
+        let far_half: u64 = (0..64)
+            .filter(|index| index % 4 >= 2)
+            .fold(0, |bits, index| bits | (1 << index));
+        let cut = world.moulds_mut().id_for(BlockId::STONE, far_half).unwrap();
+        let pos = WorldPos { x: 2, y: 0, z: 0 };
+        let event = Event::BlockSet {
+            pos,
+            old: BlockId::STONE,
+            new: cut,
+        };
+        world.apply(&event).unwrap();
+        let origin = Vec3::new(0.0, 0.5, 0.5);
+        let fine = cast_fine(&world, origin, Vec3::X, REACH).unwrap();
+        // Tiny cube x = 10 is the first kept one: block 2, tiny 2.
+        assert_eq!(fine.cell.x, 2 * 4 + 2);
+        assert_eq!(cast(&world, origin, Vec3::X, REACH).unwrap().block.x, 2);
+    }
+
+    proptest! {
+        #[test]
+        fn on_whole_blocks_the_fine_cast_finds_the_block_the_plain_cast_finds(
+            cells in proptest::collection::vec((-4i32..4, -4i32..4, -4i32..4), 1..12),
+            origin in (-6.0f32..6.0, -6.0f32..6.0, -6.0f32..6.0),
+            direction in (-1.0f32..1.0, -1.0f32..1.0, -1.0f32..1.0),
+        ) {
+            let cells: Vec<_> = cells.into_iter().map(|(x, y, z)| IVec3::new(x, y, z)).collect();
+            let world = world_with(&cells);
+            let (origin, direction) = (Vec3::from(origin), Vec3::from(direction));
+            let plain = cast(&world, origin, direction, REACH).map(|hit| hit.block);
+            let fine = cast_fine(&world, origin, direction, REACH).map(|hit| WorldPos {
+                x: hit.cell.x.div_euclid(4),
+                y: hit.cell.y.div_euclid(4),
+                z: hit.cell.z.div_euclid(4),
+            });
+            prop_assert_eq!(plain, fine);
+        }
     }
 
     /// Distance at which the ray enters the unit cube at `cell`, found with the slab method

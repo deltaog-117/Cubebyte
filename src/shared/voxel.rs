@@ -5,6 +5,17 @@ use thiserror::Error;
 /// Edge length of a cubic chunk, in blocks.
 pub const CHUNK_SIZE: u8 = 16;
 
+/// Tiny cubes along one side of a block: a block can be cut into `TINY_SIDE`³ of them.
+pub const TINY_SIDE: i32 = 4;
+
+/// The bit of the tiny cube at `(x, y, z)`, each in `0..TINY_SIDE`, in a mask of a block's tiny
+/// cubes (x runs fastest, then y, then z), or `None` outside the block.
+pub fn tiny_bit(x: i32, y: i32, z: i32) -> Option<u64> {
+    let inside = |axis: i32| (0..TINY_SIDE).contains(&axis);
+    (inside(x) && inside(y) && inside(z))
+        .then(|| 1u64 << (x + TINY_SIDE * y + TINY_SIDE * TINY_SIDE * z))
+}
+
 /// Number of blocks in one chunk.
 pub const CHUNK_VOLUME: usize = (CHUNK_SIZE as usize).pow(3);
 

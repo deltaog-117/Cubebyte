@@ -5,4 +5,5 @@ pub mod draft;
 pub mod program;
 pub mod registry;
 pub mod service;
+pub mod shaped;
 pub mod text;

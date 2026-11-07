@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod blocks;
+pub mod blueprints;
 pub mod building;
 pub mod combat;
 pub mod command;

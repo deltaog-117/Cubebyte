@@ -22,7 +22,10 @@ pub struct Recipe {
     pub output: (ItemId, u8),
 }
 
-const RECIPES: [Recipe; 4] = [
+/// How many recipes the table holds.
+pub const RECIPE_COUNT: usize = 4;
+
+const RECIPES: [Recipe; RECIPE_COUNT] = [
     Recipe {
         name: "bread",
         inputs: &[(ItemId::GRASS, 3)],

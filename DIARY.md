@@ -1618,3 +1618,41 @@ Walking and mob movement were the last changes with no event, so `Z` refused to 
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-11-07 | Initial entry | deltaog-117 |
+
+---
+
+### Blueprints, a Shaped Grid and Moulding
+
+**Date:** 2026-11-07
+**Status:** Confirmed
+
+#### Context / Background
+Three roadmap items were taken in one cycle, as three slices with the check passing after each: sharing things players make (blueprints), recipes where position matters (a shaped grid), and reshaping a block into anything (moulding). The shaped grid and moulding meet in the chisel, a tool made on the grid and used on blocks.
+
+#### Options Considered
+- **Blueprints:** (A) files of scripts, rules, recipes and small builds; (B) files that also hold big builds with their own playback; (C) the same content as A through the system clipboard.
+- **Shaped grid:** (A) a picker grid with built-in shaped recipes; (B) a grid holding real item stacks; (C) A plus shaped recipes the player writes.
+- **Moulding:** (A) chisel a 4×4×4 grid of tiny cubes; (B) push and pull one box; (C) drag corners like clay.
+
+#### Decision & Rationale
+- **Blueprints: C.** The text is the programs-file grammar plus a `blueprint <name>` build of at most 64 blocks, so every paste goes through the checks a typed line gets. The one cost is a dependency, `arboard`, with its default features off so it pulls in no image code.
+- **Grid: C.** A craft is still "a recipe number plus the existing pack events", so `Z`, intent tracks and replays did not change. A shaped recipe is an ordinary recipe plus a picture, and the picture is used only by the grid: the panel and the craft key skip shaped recipes, since they would bypass it. Built-in shaped recipes are numbered from 200 so adding one never moves a player recipe's number.
+- **Moulding: A.** A moulded block is a block number from 0x8000 naming a material and a 64-bit shape in a table that only grows. Every chisel edit is therefore one ordinary block change, and undo, redo, zone rewind, the log, the archive and replay needed no change. Filling every tiny cube back gives the plain block and chipping all of them gives air, so a whole-looking block is never stored as moulded.
+
+**Trade-offs accepted:**
+- Tiny cubes are not shaded by their neighbours (all corners open), and a face of a moulded block is drawn as one quad per tiny face. A chunk of nothing but heavily carved blocks takes 38 ms to mesh against about 250 µs for terrain; ordinary play has a handful of them.
+- A moulded block next to a plain block never hides the plain block's face, even where the moulded block is whole on that side. This overdraws a little and cannot leave a hole.
+- A pasted or captured build does not carry moulded blocks, and a blueprint cannot change a ready-made script.
+- Collision now asks about quarter-block cells. On whole blocks the numbers are exactly the old ones (every number is scaled by a power of two), and the old body, player and mob tests pass unchanged. The player step (`player_step_walking`) went from 199 ns to 218 ns (+9.5%), over the 5% gate; at 20 steps a second per body that is under a microsecond a second. A per-step cache of block lookups took it from 294 ns to 218 ns, and the remaining cost is the extra loop work. It is left as it is and flagged here rather than hidden.
+- Replays of tracks that chiselled need the saved table, which each session's starting world now holds; sessions recorded before moulding existed have none and are unaffected.
+
+#### Implementation Notes
+- New: `blueprints::{model, text, capture}`, `shared::clipboard`, `crafting::shaped`, `blocks::mould` and `blocks::mould::persist`, `building::chisel`. Changed: `shared::body` (the `Terrain` trait), `building::raycast` (`cast_fine`), `rendering::meshing` (a moulded pass), `world::model` (the table and `Terrain`), `simulation::{action, persist}` (kind 10, version 6), `programs::file` (`nib 4`), `command` (`copy`, `paste`), `app` (keys `K` and `U`, the table saved before the world file).
+- Tests: blueprint round trips and line numbers, clipboard-free capture tests, pattern and grid properties (position-independent matching, double mirror), `nib 4` round trips, the table round trip and file layout, chisel edits that undo exactly under random runs, fine-versus-plain ray agreement on whole blocks, a player resting on a half block, a meshing count for a half block.
+- The window was not run by the assistant. Try: `copy build` after building something small, then `paste` elsewhere; `K`, click cells to lay out stone stone / dirt empty and craft the chisel (it costs 2 stone and 1 dirt); `U`, then left click to chip and right click to fill, and `Z` to take a chip back.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-07 | Initial entry | deltaog-117 |

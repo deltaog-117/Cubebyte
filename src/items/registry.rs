@@ -18,6 +18,7 @@ impl ItemId {
     pub const STEW: Self = Self(5);
     pub const SWORD: Self = Self(6);
     pub const FUEL: Self = Self(7);
+    pub const CHISEL: Self = Self(8);
 }
 
 /// What the game knows about one item type.
@@ -38,7 +39,7 @@ pub struct ItemDef {
 }
 
 /// Indexed by `ItemId - 1`. The `ItemId` constants must match these positions.
-const ITEMS: [ItemDef; 7] = [
+const ITEMS: [ItemDef; 8] = [
     ItemDef {
         name: "stone",
         stack_limit: 64,
@@ -94,6 +95,14 @@ const ITEMS: [ItemDef; 7] = [
         restores_hunger: None,
         damage: None,
         worth: 3,
+    },
+    ItemDef {
+        name: "chisel",
+        stack_limit: 1,
+        places: None,
+        restores_hunger: None,
+        damage: None,
+        worth: 6,
     },
 ];
 

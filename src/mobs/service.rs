@@ -9,7 +9,6 @@ use std::num::NonZeroU64;
 
 use glam::{Vec2, Vec3};
 
-use crate::blocks::registry::is_solid;
 use crate::building::raycast;
 use crate::combat::model::Damage;
 use crate::mobs::model::{HALF_WIDTH, HEIGHT, MAX_HEALTH, Mobs, Zombie};
@@ -112,7 +111,7 @@ pub fn step_with(
     zombie.cooldown = zombie.cooldown.saturating_sub(1);
     // Judged from where the zombie stood before it moved, as a hit is swung before the step.
     let close = look(zombie, target).close;
-    body::step(&mut zombie.body, intent, &|cell| solid(world, cell), dt);
+    body::step(&mut zombie.body, intent, world, dt);
 
     if close && zombie.cooldown == 0 {
         zombie.cooldown = HIT_COOLDOWN;
@@ -134,7 +133,7 @@ fn blocked_ahead(zombie: &Zombie, direction: Vec2, world: &World) -> bool {
 }
 
 fn solid(world: &World, [x, y, z]: [i32; 3]) -> bool {
-    is_solid(world.block_at(WorldPos { x, y, z }))
+    world.solid_at(WorldPos { x, y, z })
 }
 
 /// The events for `damage` landing on zombie `id`: the health it really loses, and its
@@ -157,7 +156,7 @@ pub fn strike_events(id: MobId, zombie: &Zombie, damage: Damage) -> Vec<Event> {
 
 /// Whether the zombie's box overlaps a solid block, as when it would be put inside a wall.
 pub fn blocked(zombie: &Zombie, world: &World) -> bool {
-    body::collides(&zombie.body, &|cell| solid(world, cell))
+    body::collides(&zombie.body, world)
 }
 
 /// The event for a new zombie `id` at `at`, with full health.

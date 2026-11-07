@@ -201,6 +201,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Event log version 8: tag 15 for a mob's move; older versions still load
 - Tests: a move event and its inverse (property), a save and reload of mob moves (property), checkpoints and bridges, a rewind and redo with the player walking between them, and rewinding and redoing every edit with random walks in between (property)
 
+- `blueprints`: a blueprint of rules, recipes and one small build as text (the programs-file grammar plus a `blueprint <name>` section), read all or nothing, refusing text over 32 KiB before reading it; `capture` turns the 9×8×9 blocks around the feet into a build of at most 64 blocks
+- `shared::clipboard::Clipboard`, a lazily opened, kept-open handle on the system clipboard (the `arboard` crate, text only, with Wayland support)
+- The commands `copy rules`, `copy recipes`, `copy build` and `paste`; a paste adds the rules and recipes and starts the build as an ordinary script, and refuses everything if any part would be refused
+- `crafting::shaped`: `Pattern` (a trimmed picture of at most 3×3 cells that can only be made by `Pattern::try_new`), `Grid` and `program_for`, which turns a pattern into an ordinary recipe that spends one item per filled cell, under the same worth rule
+- The shaped crafting grid, opened with key `K`: a click on a cell cycles its item, a click on the recipe crafts it, and "keep as a recipe" saves the picture with a chosen output
+- `programs.nib` version 4: `shape` rows and `make` lines in a `recipe` section; versions 1 to 3 still load
+- The chisel item and its shaped recipe, with built-in shaped recipes numbered from 200
+- `blocks::mould`: `Shape` and `Cut` (a block cut into 4×4×4 tiny cubes), and `Moulds`, the table that gives each material and shape a block number from 0x8000; `blocks::mould::persist` saves it as `moulds.mcmd`
+- `building::chisel`: the chisel edit as one ordinary block change, and the aim that finds the tiny cube to chip and the one to fill
+- `building::raycast::cast_fine`, a ray cast at the size of a tiny cube
+- `World::{moulds, base_block_at, solid_at, fine_solid}` and an implementation of `Terrain` for `World`
+- Chiselling in the window: key `U` takes the chisel out, a left click chips a tiny cube and a right click puts one back; the starting world of each session also saves the table of moulded blocks
+- The intent log is version 6: kind 10 holds a chisel edit
+- A benchmark for meshing a chunk of moulded blocks
+
 ### Changed
 - `Z` and `Y` also move the player: `Z` walks them to where the edit left them and then to where it found them, and `Y` is its exact opposite, so rewinding works wherever the player has walked since; every player edit logs one more event (where the player stood); a replay of a track recorded before this that used `Z` drifts after the first `Z`
 - A player move to the spot where the player already stands no longer stops their fall
@@ -267,6 +282,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `command::model::{Request, Value}` and `command::plan::Plan` are no longer `Copy`, since a recipe line carries a checked recipe
 - `ui::layout::script_panel` and `hack_panel` take the script edits, so a row shows what the script really costs
 - Polling rules ignore action rules, and the rules panel line shows what sets a rule off
+
+- `shared::body::step` and `collides` take a `Terrain` (the world as tiny cubes a quarter of a block wide) instead of a closure; a closure of whole blocks still works, and on whole blocks the numbers are exactly the old ones
+- Meshing: a plain block no longer hides its face against a moulded neighbour, and moulded blocks have their own pass that draws tiny cubes
+- Breaking a moulded block yields its material
+- `crafting::registry::RECIPE_COUNT` names the length of the recipe table; the crafting panel and the craft key skip shaped recipes
 
 ### Fixed
 - Undoing a meal was refused when hunger had drained below what the meal gave (for example eating at 0, a drain to 3, then `Z` asking for -4); the undo now stops at 0

@@ -4,6 +4,7 @@
 //! The output holds no `wgpu` types, so meshing runs and is tested without a window or a
 //! GPU; the pipeline decides how to upload it.
 
+use crate::blocks::mould::{MOULD_FIRST, SIDE, Shape, bit};
 use crate::blocks::registry;
 use crate::shared::voxel::{BlockId, CHUNK_SIZE, ChunkPos, LocalPos, WorldPos};
 use crate::world::model::{Chunk, World};
@@ -159,6 +160,40 @@ impl MeshData {
         };
         self.indices.extend(order.map(|offset| first + offset));
     }
+
+    /// One quad on the tiny cube at `tiny` (each in `0..SIDE`) of the block at `local`. A tiny
+    /// cube is a quarter of a block wide, so every corner is a multiple of 0.25 and stays
+    /// exact. Tiny cubes are not shaded by neighbours: the corners are all open.
+    fn push_tiny_quad(&mut self, local: LocalPos, tiny: [i32; 3], face: Face, block: BlockId) {
+        let first = self.vertices.len() as u32;
+        let origin = [local.x(), local.y(), local.z()];
+        let corners = face.corners();
+        let size = 1.0 / SIDE as f32;
+        self.vertices.extend((0..4).map(|k| Vertex {
+            position: std::array::from_fn(|axis| {
+                f32::from(origin[axis]) + (tiny[axis] + i32::from(corners[k][axis])) as f32 * size
+            }),
+            face,
+            block,
+            occlusion: Occlusion::OPEN,
+        }));
+        self.indices
+            .extend([0, 1, 2, 0, 2, 3].map(|offset| first + offset));
+    }
+}
+
+/// Whether a block of this ID is drawn as a cut one: a moulded ID the world knows.
+fn moulded(world: &World, block: BlockId) -> Option<(BlockId, Shape)> {
+    if block.0 < MOULD_FIRST {
+        return None;
+    }
+    world.moulds().get(block)
+}
+
+/// Whether `neighbour` hides the face of a plain block that looks at it. A moulded block hides
+/// nothing, since it may be carved away right where the face is.
+fn hides(world: &World, neighbour: BlockId) -> bool {
+    !neighbour.is_air() && moulded(world, neighbour).is_none()
 }
 
 /// Meshes the chunk at `pos`: one quad for every block face that touches air.
@@ -172,16 +207,67 @@ pub fn mesh_chunk(world: &World, pos: ChunkPos) -> MeshData {
     if let Some(chunk) = world.chunk(pos) {
         LocalPos::all()
             .map(|local| (local, chunk.get(local)))
-            .filter(|&(_, block)| !block.is_air())
+            .filter(|&(_, block)| !block.is_air() && moulded(world, block).is_none())
             .flat_map(|(local, block)| Face::ALL.map(|face| (local, face, block)))
-            .filter(|&(local, face, _)| neighbor(world, pos, chunk, local, face.normal()).is_air())
+            .filter(|&(local, face, _)| {
+                !hides(world, neighbor(world, pos, chunk, local, face.normal()))
+            })
             .for_each(|(local, face, block)| {
                 let occlusion = face_occlusion(world, pos, chunk, local, face);
                 mesh.push_quad(local, face, block, occlusion);
             });
+        // Moulded blocks are rare, so they get their own pass instead of slowing the one above.
+        LocalPos::all()
+            .filter_map(|local| Some((local, moulded(world, chunk.get(local))?)))
+            .for_each(|(local, (base, shape))| {
+                mesh_moulded(&mut mesh, world, pos, chunk, local, base, shape);
+            });
     }
     tracing::debug!(?pos, quads = mesh.quad_count(), "meshed chunk");
     mesh
+}
+
+/// One quad for every face of every tiny cube of a moulded block that looks at air or at a gap.
+/// Inside the block a face is hidden by the next tiny cube; at the block's edge it is hidden by
+/// whatever tiny cube of the neighbouring block it meets.
+fn mesh_moulded(
+    mesh: &mut MeshData,
+    world: &World,
+    pos: ChunkPos,
+    chunk: &Chunk,
+    local: LocalPos,
+    base: BlockId,
+    shape: Shape,
+) {
+    let range = 0..SIDE;
+    for x in range.clone() {
+        for y in range.clone() {
+            for z in range.clone() {
+                if !shape.has(x, y, z) {
+                    continue;
+                }
+                for face in Face::ALL {
+                    let step = face.normal();
+                    let next = [
+                        x + i32::from(step[0]),
+                        y + i32::from(step[1]),
+                        z + i32::from(step[2]),
+                    ];
+                    let covered = if next.iter().all(|axis| range.contains(axis)) {
+                        shape.has(next[0], next[1], next[2])
+                    } else {
+                        let outside = neighbor(world, pos, chunk, local, step);
+                        let wrapped = next.map(|axis| axis.rem_euclid(SIDE));
+                        bit(wrapped[0], wrapped[1], wrapped[2])
+                            .is_some_and(|bit| world.moulds().bits_of(outside) & bit != 0)
+                    };
+                    if !covered {
+                        mesh.push_tiny_quad(local, [x, y, z], face, base);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Chunks whose meshes depend on the block at `pos`: the chunk holding it, plus any
@@ -301,6 +387,68 @@ mod tests {
             new: block,
         };
         world.apply(&event).unwrap();
+    }
+
+    /// A world with one block at (1, 1, 1) cut from stone, keeping the tiny cubes in `bits`.
+    fn world_with_cut(bits: u64) -> World {
+        let mut world = World::default();
+        let id = world.moulds_mut().id_for(BlockId::STONE, bits).unwrap();
+        place(&mut world, 1, 1, 1, id);
+        world
+    }
+
+    #[test]
+    fn a_block_left_with_one_tiny_cube_has_that_cubes_six_faces() {
+        let mesh = mesh_chunk(&world_with_cut(1), ORIGIN);
+        assert_eq!(mesh.quad_count(), 6);
+        assert!(mesh.vertices().iter().all(|v| v.block == BlockId::STONE));
+        let size = 1.0 / 4.0;
+        assert!(mesh.vertices().iter().all(|v| {
+            v.position
+                .iter()
+                .all(|&axis| (1.0..=1.0 + size).contains(&axis))
+        }));
+    }
+
+    #[test]
+    fn a_block_cut_in_half_shows_its_flat_faces_whole() {
+        // The two lower layers of tiny cubes: bits 0..32 are y 0 and 1 of z 0 and z 1.
+        let lower_half: u64 = (0..64)
+            .filter(|index| (index / 4) % 4 < 2)
+            .fold(0, |bits, index| bits | (1 << index));
+        let mesh = mesh_chunk(&world_with_cut(lower_half), ORIGIN);
+        // Top 16, bottom 16 and four sides of 4 wide by 2 high.
+        assert_eq!(mesh.quad_count(), 16 + 16 + 4 * 8);
+    }
+
+    #[test]
+    fn a_plain_block_still_draws_the_face_that_touches_a_moulded_one() {
+        let mut world = world_with_cut(1);
+        place(&mut world, 2, 1, 1, BlockId::STONE);
+        let plain_faces = mesh_chunk(&world, ORIGIN)
+            .vertices()
+            .chunks(4)
+            .filter(|quad| {
+                quad.iter()
+                    .all(|v| v.position.iter().all(|&axis| axis.fract() == 0.0))
+            })
+            .count();
+        assert_eq!(
+            plain_faces, 6,
+            "the face next to the moulded block is not hidden"
+        );
+    }
+
+    #[test]
+    fn a_moulded_face_is_hidden_by_a_whole_neighbour() {
+        let mut world = world_with_cut(u64::MAX - (1 << 63));
+        let before = mesh_chunk(&world, ORIGIN).quad_count();
+        place(&mut world, 2, 1, 1, BlockId::STONE);
+        let after = mesh_chunk(&world, ORIGIN);
+        // The +x side of the moulded block (16 tiny faces) is covered, less the one cube it
+        // lacks at the far corner; the plain block adds its own five other faces and one that
+        // touches the moulded block.
+        assert!(after.quad_count() < before + 6 + 16);
     }
 
     fn world_with(blocks: &[(i32, i32, i32)]) -> World {

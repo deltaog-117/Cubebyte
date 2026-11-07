@@ -26,7 +26,7 @@ pub const ZONE_MAX: u16 = crate::events::rewind::HISTORY_WINDOW as u16;
 /// Furthest an offset may be written, in blocks. Farther is out of any script's range anyway.
 pub const OFFSET_MAX: i32 = 1000;
 
-const COMMANDS: [Spec; 10] = [
+const COMMANDS: [Spec; 12] = [
     Spec {
         name: "help",
         summary: "open this table",
@@ -125,6 +125,21 @@ const COMMANDS: [Spec; 10] = [
             }),
             _ => None,
         },
+    },
+    Spec {
+        name: "copy",
+        summary: "copy rules, recipes or build",
+        args: &[arg("what", ArgKind::Name)],
+        build: |values| match values {
+            [Value::Name(what)] => Some(Request::Copy { what: what.clone() }),
+            _ => None,
+        },
+    },
+    Spec {
+        name: "paste",
+        summary: "use the blueprint you copied",
+        args: &[],
+        build: |values| matches!(values, []).then_some(Request::Paste),
     },
 ];
 

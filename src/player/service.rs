@@ -4,11 +4,9 @@
 
 use glam::Vec3;
 
-use crate::blocks::registry::is_solid;
 use crate::player::model::{Player, PlayerError};
 use crate::shared::body;
 pub use crate::shared::body::{GRAVITY, Intent, JUMP_SPEED, TERMINAL_SPEED, WALK_SPEED};
-use crate::shared::voxel::WorldPos;
 use crate::world::model::World;
 
 /// Moves `player` through one tick of `dt` seconds.
@@ -17,7 +15,7 @@ use crate::world::model::World;
 /// blocks, so it slides along walls. A jump starts only from the ground. A box that already
 /// overlaps a block, for example one placed on top of the player, can still move out of it.
 pub fn step(player: &mut Player, intent: Intent, world: &World, dt: f32) {
-    body::step(&mut player.body, intent, &|cell| solid(world, cell), dt);
+    body::step(&mut player.body, intent, world, dt);
 }
 
 /// Jumps the player to `feet`, standing still. It does not check the destination: a caller
@@ -34,11 +32,7 @@ pub fn teleport(player: &mut Player, feet: Vec3) -> Result<(), PlayerError> {
 
 /// Whether the player's box overlaps a solid block.
 pub fn collides(player: &Player, world: &World) -> bool {
-    body::collides(&player.body, &|cell| solid(world, cell))
-}
-
-fn solid(world: &World, [x, y, z]: [i32; 3]) -> bool {
-    is_solid(world.block_at(WorldPos { x, y, z }))
+    body::collides(&player.body, world)
 }
 
 #[cfg(test)]
@@ -47,7 +41,7 @@ mod tests {
     use crate::shared::body::SKIN;
     use crate::shared::event::Event;
     use crate::shared::intent::Walk;
-    use crate::shared::voxel::BlockId;
+    use crate::shared::voxel::{BlockId, WorldPos};
     use glam::{Vec2, Vec3};
 
     const DT: f32 = 0.05;
@@ -71,6 +65,57 @@ mod tests {
             }
         }
         world
+    }
+
+    /// A block at (`x`, 1, 0) of which only the lower half is left, on top of [`floor`].
+    fn with_slab(mut world: World, x: i32) -> World {
+        let lower_half: u64 = (0..64)
+            .filter(|index| (index / 4) % 4 < 2)
+            .fold(0, |bits, index| bits | (1 << index));
+        let slab = world
+            .moulds_mut()
+            .id_for(BlockId::STONE, lower_half)
+            .unwrap();
+        let pos = WorldPos { x, y: 1, z: 0 };
+        let event = Event::BlockSet {
+            pos,
+            old: BlockId::AIR,
+            new: slab,
+        };
+        world.apply(&event).unwrap();
+        world
+    }
+
+    #[test]
+    fn a_player_dropped_on_a_half_block_rests_at_its_real_top() {
+        let world = with_slab(floor(), 0);
+        let mut player = player_at(0.5, 4.0, 0.5);
+        run(&mut player, Intent::default(), &world, 40);
+        let rest = player.position().y;
+        assert!(player.on_ground());
+        assert!(
+            (1.5..=1.5 + 2.0 * SKIN).contains(&rest),
+            "rests at {rest}, not the cell top at 2.0 or the floor at 1.0"
+        );
+    }
+
+    #[test]
+    fn a_half_block_is_a_wall_to_a_walker_but_only_half_a_block_high() {
+        let world = with_slab(floor(), 2);
+        let mut player = player_at(0.5, 1.0, 0.5);
+        run(&mut player, walk_towards(1.0, 0.0), &world, 60);
+        assert!(
+            player.position().x < 2.0 - 0.3 + SKIN * 2.0,
+            "the walker is stopped by the slab, at {}",
+            player.position().x
+        );
+        let mut jumper = player_at(0.5, 1.0, 0.5);
+        let jump = Intent {
+            walk: Walk::from_direction(Vec2::new(1.0, 0.0)),
+            jump: true,
+        };
+        run(&mut jumper, jump, &world, 60);
+        assert!(jumper.position().x > 2.5, "a jump clears a half block");
     }
 
     fn player_at(x: f32, y: f32, z: f32) -> Player {

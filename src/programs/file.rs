@@ -20,19 +20,27 @@
 //! make bread 1
 //! end
 //!
+//! recipe stairs
+//! shape stone .
+//! shape stone stone
+//! make fuel 2
+//! end
+//!
 //! script tower
 //! build stone 0 1 0
 //! end
 //! ```
 //!
-//! The first line is the format version: this game writes `nib 3` and reads `nib 1` to
-//! `nib 3`; a file with another version is refused instead of guessed at. A rule's header is
+//! The first line is the format version: this game writes `nib 4` and reads `nib 1` to
+//! `nib 4`; a file with another version is refused instead of guessed at. A rule's header is
 //! `rule on|off` and an anchor (`feet`, `mob` or `cell x y z`). What follows is either
 //! `when <test>`, which makes a rule that looks at its test once a second, or `on <action>`
 //! (`break`, `place`, `craft`, `eat` or `hit`, and from version 3 `hurt`, `respawn` or
 //! `appear`), which makes a rule that fires right after the player does that or it happens, and may be followed by `when <test>` so it fires only if the test holds
 //! then. An `on` rule without a `when` line has no test, so none is kept. The lines up to `end`
-//! are the rule's program. A recipe's header is `recipe <name>`; a script's is `script <name>`,
+//! are the rule's program. A recipe's header is `recipe <name>`, and from version 4 its body may be
+//! `shape` rows (one word per cell: an item, or `.` for an empty cell) and `make` lines, a recipe
+//! crafted from the grid that spends one item per filled cell; a script's is `script <name>`,
 //! the name of a ready-made script, and its lines replace that script's program. Version 1
 //! files have rules that poll and recipes only. Everything goes through the same checks as
 //! blocks in the game, so the file can never hold a program the editor could not build.
@@ -45,7 +53,7 @@
 use std::fmt::Write as _;
 
 use crate::crafting::custom::CustomRecipes;
-use crate::crafting::text::{print as print_recipe, recipe_of};
+use crate::crafting::text::{print as print_recipe, print_shaped, recipe_of, shaped_of};
 use crate::logic::model::{Anchor, DEFAULT_TEST, PlayerAction, Rules, Trigger};
 use crate::programs::scripts::ScriptEdits;
 use crate::scripting::library;
@@ -56,7 +64,7 @@ use crate::scripting::text::{
 use crate::shared::voxel::WorldPos;
 
 /// The format version this game writes.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The oldest format version this game still reads.
 const OLDEST: u32 = 1;
@@ -101,12 +109,11 @@ pub fn write(rules: &Rules, recipes: &CustomRecipes, scripts: &ScriptEdits) -> S
         let _ = writeln!(out, "{}end", print(rule.program()));
     }
     for (_, recipe) in recipes.iter() {
-        let _ = write!(
-            out,
-            "\nrecipe {}\n{}end\n",
-            recipe.name(),
-            print_recipe(recipe.program()),
-        );
+        let body = match recipe.pattern() {
+            Some(pattern) => print_shaped(pattern, recipe.program()),
+            None => print_recipe(recipe.program()),
+        };
+        let _ = write!(out, "\nrecipe {}\n{body}end\n", recipe.name());
     }
     for (id, program) in scripts.iter() {
         let name = library::get(id).map_or("?", |script| script.name);
@@ -282,11 +289,19 @@ pub fn parse(text: &str) -> Result<Programs, TextError> {
                 if stop != Stop::End {
                     return Err(TextError::new(line, "this recipe has no 'end'"));
                 }
-                let recipe = recipe_of(&nodes, line)?;
-                programs
-                    .recipes
-                    .add(name, recipe)
-                    .map_err(|error| TextError::new(line, error.to_string()))?;
+                let shaped = nodes
+                    .first()
+                    .is_some_and(|node| node.words.first() == Some(&"shape"));
+                if shaped && version < 4 {
+                    return Err(TextError::new(line, "shape rows need 'nib 4'"));
+                }
+                let added = if shaped {
+                    let (pattern, program) = shaped_of(&nodes, line)?;
+                    programs.recipes.add_shaped(name, pattern, program)
+                } else {
+                    programs.recipes.add(name, recipe_of(&nodes, line)?)
+                };
+                added.map_err(|error| TextError::new(line, error.to_string()))?;
             }
             ["script", name] if version >= 2 => {
                 let (id, _) = library::find(name).ok_or_else(|| {
@@ -368,7 +383,7 @@ mod tests {
             &ScriptEdits::default(),
         );
         assert_eq!(parse(&text), Ok(Programs::default()));
-        assert!(text.contains("nib 3"));
+        assert!(text.contains("nib 4"));
     }
 
     #[test]
@@ -376,8 +391,9 @@ mod tests {
         assert_eq!(parse("").unwrap_err().line, 1);
         assert_eq!(parse("recipe a\n").unwrap_err().line, 1);
         let error = parse("nib 9\n").unwrap_err();
-        assert!(error.message.contains("nib 1") && error.message.contains("nib 3"));
+        assert!(error.message.contains("nib 1") && error.message.contains("nib 4"));
         assert!(parse("nib 1\n").is_ok() && parse("nib 2\n").is_ok() && parse("nib 3\n").is_ok());
+        assert!(parse("nib 4\n").is_ok());
     }
 
     #[test]
@@ -469,10 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn version_1_files_still_load_and_are_rewritten_as_version_3() {
+    fn version_1_files_still_load_and_are_rewritten_as_version_4() {
         let programs = parse(SAMPLE).unwrap();
         let text = write(&programs.rules, &programs.recipes, &programs.scripts);
-        assert!(text.contains("\nnib 3\n"));
+        assert!(text.contains("\nnib 4\n"));
         assert!(
             programs
                 .rules
@@ -585,6 +601,23 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(again, programs);
+    }
+
+    #[test]
+    fn a_shaped_recipe_is_written_and_read_back() {
+        let text = "nib 4\nrecipe stairs\nshape stone .\nshape stone stone\nmake fuel 2\nend\n";
+        let programs = parse(text).unwrap();
+        let (_, recipe) = programs.recipes.iter().next().unwrap();
+        assert!(recipe.pattern().is_some());
+        let again = write(&programs.rules, &programs.recipes, &programs.scripts);
+        assert_eq!(parse(&again), Ok(programs));
+    }
+
+    #[test]
+    fn shape_rows_need_a_version_4_file() {
+        let error = parse("nib 3\nrecipe stairs\nshape stone\nmake fuel 1\nend\n").unwrap_err();
+        assert_eq!(error.line, 2);
+        assert!(error.message.contains("nib 4"));
     }
 
     #[test]

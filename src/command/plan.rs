@@ -27,6 +27,10 @@ pub enum Plan {
         name: String,
         program: Option<RecipeProgram>,
     },
+    /// Put a blueprint of this kind of thing on the clipboard. The game knows what it holds.
+    Copy(String),
+    /// Read a blueprint from the clipboard and use it.
+    Paste,
 }
 
 fn at(feet: WorldPos, by: [i32; 3]) -> WorldPos {
@@ -53,6 +57,8 @@ pub fn plan(request: Request, feet: WorldPos) -> Plan {
         Request::Zone { back } => Plan::Do(Action::ZoneRewind { centre: feet, back }),
         Request::Hack { script } => Plan::Hack(script),
         Request::Recipe { name, program } => Plan::Recipe { name, program },
+        Request::Copy { what } => Plan::Copy(what),
+        Request::Paste => Plan::Paste,
     }
 }
 

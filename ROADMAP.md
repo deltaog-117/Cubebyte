@@ -74,6 +74,10 @@ Items are organized by priority, not by timeline.
 - ✅ Walking as events, by checkpoint: each player edit logs a move event from where the log last put the player to where they stand (the game has already walked there, so it is logged, not applied), and a mob that walked is checkpointed (`MobMoved`) when it is hit or removed; `Z` first walks the player back to where the edit left them and then undoes it, and `Y` is the exact opposite, so rewinding no longer depends on where you have walked since; mob walks are history only, since `Z` never undoes a mob; the saved log is version 8 (older versions still load)
 - ✅ Rules that react to what happens: `on hurt` (the player lost health: a mob's hit or starving), `on respawn` and `on appear` (a mob came by itself, not by a script) are worked out from the events the world logged as passive actions and respawns; edits, rewinds and redos never react, so a rule's own script and an undo cannot set a rule off; `programs.nib` is `nib 3` (`nib 1` and `nib 2` still load)
 
+- ✅ Blueprints through the clipboard: `copy rules`, `copy recipes` or `copy build` puts a readable blueprint on the system clipboard and `paste` uses what is there; a blueprint is the programs-file grammar plus one `blueprint <name>` section, a build of at most 64 blocks captured from the 9×8×9 around the feet, and a paste adds its rules and recipes and starts its build as an ordinary script (fuel, waits, `Z` undoes it whole); the text is read all or nothing with the line to fix, and anything over 32 KiB is refused unread; a new dependency, `arboard`, without its image features
+- ✅ Shaped crafting grid and player patterns: key `K` opens a 3×3 grid where each cell cycles through the items; the picture matches a shaped recipe wherever it sits in the grid, mirrored left to right too, and a click crafts it as an ordinary recipe number, so `Z`, intent tracks and replays are unchanged; "keep as a recipe" saves the picture and a chosen output as a player recipe (worth rule applies); shaped recipes are left out of the crafting panel and the `R` and `C` keys, since those would bypass the picture; built-in shaped recipes have numbers from 200 so a new one never moves a player recipe's number; `programs.nib` is `nib 4` (`shape` rows in a `recipe` section; older versions still load); the first shaped recipe is the chisel
+- ✅ Moulding with a chisel: key `U` takes the chisel out (it needs one in the pack, made in the grid) and a click chips a 4×4×4 tiny cube off the block you aim at or, with a right click, puts one back inside the same block; a block with every tiny cube gone is air and one with every cube back is the plain block again; a moulded block is a block number from 0x8000 that names a material and a 64-bit shape in a table saved as `moulds.mcmd`, so every edit stays an ordinary block change and undo, redo, zone rewind, the log and replay need no change; the mesher draws the tiny cubes that face a gap, the player and the zombie collide with the real shape (whole-block worlds give exactly the old numbers, so old tracks replay the same), a ray at tiny-cube size finds what to chip, and breaking a moulded block yields its material; the intent log is version 6 (kind 10) and `Z` takes a chip back like any edit
+
 ---
 
 ## 🔥 High Priority (Critical)
@@ -127,11 +131,10 @@ Items are organized by priority, not by timeline.
 
 ## 🟢 Low Priority (Nice‑to‑Have)
 
-- **Shareable blueprints** – Export a build or script as a text blob that others can import and watch build step by step.
 - **Spectate and replay mode** – Watch a world's history as a timelapse.
-- **Block shapes (moulding)** – Let players shape blocks beyond cubes. The meaning is still open: preset shapes (slab, stair, slope), stretching a block into a box, or sculpting cells inside a block. It touches storage, meshing and collision, and custom shapes must be saved so old event logs still replay, so it needs its own COAs first.
-- **Shaped crafting grid** – A 2×2 or 3×3 grid with position-dependent recipes, built on the recipe table.
-- **Script-driven crafting** – Second slice done (see Completed): recipes can be made in the game by command or by a click editor. Still to do: recipes that read more of the world, editing or removing a recipe in the game (a number must keep its meaning for recordings), a click way to name a recipe, `repeat` and `if` in the editor, and sharing them (see Shareable blueprints).
+- **Blueprint follow-ups** – Big builds (more than 64 blocks) need their own stepper and fuel price per block; a captured build does not carry moulded blocks yet, and a blueprint cannot hold a ready-made script's edits; a way to pick the area to capture instead of the fixed 9×8×9.
+- **Moulding follow-ups** – Placing a moulded block from the pack (a shape in hand), smooth corners, finer tiny cubes (8×8×8 would need a 512-bit shape), shading tiny cubes (they are drawn fully lit today), joining the quads of a flat face to draw fewer, a chisel that wears out, and script commands and reads that know a block's shape. A fully moulded chunk takes 38 ms to mesh, about 150 times a terrain chunk, so a very carved area will need joined quads.
+- **Script-driven crafting** – Third slice done (see Completed): shaped recipes, made on the grid or written in `programs.nib`. Still to do: recipes that read more of the world, editing or removing a recipe in the game (a number must keep its meaning for recordings), a click way to name a recipe, `repeat` and `if` in the editor, rotating a shaped picture, and sharing them as a bigger blueprint (see Completed).
 - **Graphics upgrade** – Today blocks are flat colours with no lighting. Done after the current items, in this order. Light and shading are computed from world state and never logged, so replay and rewind are untouched; the mesher keeps producing plain vertex data with no `wgpu` types, so these stay testable without a GPU.
   - ✅ per-face shading (top brighter, sides darker) and ✅ sky colour and distance fog (the Kogama-style bright, simple look); a sun direction is still open;
   - ✅ vertex ambient occlusion (darkening is applied in the shader and applies to all light for now; when sun and block light exist it should touch only ambient light);
@@ -169,15 +172,12 @@ Recommended order, row 1 first.
 |---|---|---|---|
 | 1 | Programmable mobs | Best first use of scripting; needs mob AI on the tick | H |
 | 2 | Checkpoints for script commands | Same bridge and checkpoint code; makes `Z` walk the player back for every edit | S |
-| 3 | Shareable blueprints | The text grammar is the export format; needs a paste-in import | S |
-| 4 | Shaped crafting grid | Builds on the recipe table | M |
-| 5 | Block shapes (moulding) | Needs COAs first on what shape means and how custom shapes are saved | H |
-| 6 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
-| 7 | Graphics: texture atlas | Needs an art style chosen first | M |
-| 8 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
-| 9 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
-| 10 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
-| 11 | Graphics: better mobs | Parts-based models and animation | M |
+| 3 | Spectate and replay mode | The archive file exists now; it needs a viewer that plays it back | M |
+| 4 | Graphics: texture atlas | Needs an art style chosen first | M |
+| 5 | Graphics: skybox, clouds, translucent water and glass | Builds on the atlas and the sky | M |
+| 6 | Graphics: block and sky light | Flood-fill per chunk; unlocks day and night | H |
+| 7 | Graphics: shadow mapping and post-processing | Roblox-style polish; costliest, last | H |
+| 8 | Graphics: better mobs | Parts-based models and animation | M |
 
 ---
 

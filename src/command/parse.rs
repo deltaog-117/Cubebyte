@@ -213,6 +213,13 @@ mod tests {
             Ok(Request::Spawn { by: [2, 0, 0] })
         );
         assert_eq!(parse("zone 10"), Ok(Request::Zone { back: 10 }));
+        assert_eq!(
+            parse("copy build"),
+            Ok(Request::Copy {
+                what: "build".to_owned()
+            })
+        );
+        assert_eq!(parse("paste"), Ok(Request::Paste));
         assert_eq!(parse("rewind"), Ok(Request::Rewind));
         assert_eq!(parse("redo"), Ok(Request::Redo));
         assert_eq!(
