@@ -24,7 +24,9 @@ use crate::command::model::CommandId;
 use crate::command::parse::parse;
 use crate::command::plan::{Plan, plan};
 use crate::command::table as command_table;
-use crate::crafting::custom::CustomRecipes;
+use crate::crafting::custom::{CustomError, CustomRecipes};
+use crate::crafting::draft::RecipeDraft;
+use crate::crafting::program::RecipeProgram;
 use crate::crafting::registry::RecipeId;
 use crate::crafting::service::{CraftError, craft_events, custom_craft_events};
 use crate::events::apply::{ChargeError, Stage, StageError, apply_all, charge_events};
@@ -36,18 +38,21 @@ use crate::events::replay::replay_chunk;
 use crate::events::rewind::{
     clamp_meters, log_action, rewind_events, rewind_price, touched_chunks,
 };
+use crate::events::walk::{bridged, checkpoints};
 use crate::events::zone::{ZONE_BACK_STEPS, ZONE_RADIUS, Zone, zone_events, zone_price};
 use crate::inventory::model::Inventory;
 use crate::inventory::persist as inventory_persist;
 use crate::inventory::service::{StockError, gather_events_at, place_events_at};
 use crate::items::registry::{self, ItemId};
-use crate::logic::model::{Anchor, RuleId, Rules};
+use crate::logic::model::{Anchor, DEFAULT_TEST, PlayerAction, RuleId, Rules};
+use crate::logic::react::reactions;
 use crate::mobs::model::Mobs;
 use crate::mobs::service as mobs;
 use crate::player::input::MoveKeys;
 use crate::player::model::{EYE_HEIGHT, Player, PlayerError};
 use crate::player::service::{Intent, step};
 use crate::programs::file as programs_file;
+use crate::programs::scripts::ScriptEdits;
 use crate::rendering::camera::Camera;
 use crate::rendering::fog::Fog;
 use crate::rendering::meshing::{chunks_to_remesh, mesh_chunk};
@@ -58,7 +63,7 @@ use crate::scripting::library::{self, ScriptId, Target};
 use crate::scripting::model::{
     Answer, Command, Cooldowns, Denied, Facing, Limits, Pace, Permissions, Query,
 };
-use crate::scripting::program::{Compare, Program, Read, Test};
+use crate::scripting::program::{Program, Test};
 use crate::scripting::readout::readout;
 use crate::scripting::runner::{ScriptRun, Step, step as script_step};
 use crate::scripting::service::{ask, run as run_commands};
@@ -78,8 +83,8 @@ use crate::survival::persist as stats_persist;
 use crate::survival::service::eat_events;
 use crate::ui::draw::{command_overlay, menu_overlay, overlay, script_overlay};
 use crate::ui::layout::{
-    EditAct, EditorView, ExtraRow, RulesAct, command_panel, editor_menu, hack_panel, panel_with,
-    rules_menu, script_panel,
+    EditAct, EditorView, ExtraRow, RecipeAct, RecipeView, RulesAct, command_panel, editor_menu,
+    hack_panel, panel_with, recipe_menu, rules_menu, script_panel,
 };
 use crate::world::generation::{MAX_HEIGHT, MIN_HEIGHT, TerrainGenerator};
 use crate::world::model::World;
@@ -210,11 +215,7 @@ enum Origin {
 }
 
 /// The test a new rule starts with: act when hunger is low.
-const DEFAULT_WHEN: Test = Test {
-    read: Read::Hunger,
-    compare: Compare::Below,
-    than: 10,
-};
+const DEFAULT_WHEN: Test = DEFAULT_TEST;
 
 /// A program being edited and where it came from.
 struct Draft {
@@ -223,20 +224,25 @@ struct Draft {
 }
 
 impl Draft {
-    /// A draft of ready-made script `id`.
-    fn of_script(id: ScriptId) -> Option<Self> {
-        Some(Self {
-            editor: Editor::new(None, library::get(id)?.program()),
-            origin: Origin::Script(id),
-        })
+    /// A draft of ready-made script `id`, as it runs now: the player's saved version, or the
+    /// built-in one.
+    fn of_script(edits: &ScriptEdits) -> impl Fn(ScriptId) -> Option<Self> + '_ {
+        move |id| {
+            Some(Self {
+                editor: Editor::new(None, edits.program_of(id)?),
+                origin: Origin::Script(id),
+            })
+        }
     }
 
     /// A draft of rule `id`, with its test as the first line.
     fn of_rule(rules: &Rules) -> impl Fn(RuleId) -> Option<Self> + '_ {
         move |id| {
             let rule = rules.get(id)?;
+            // An action rule that does not use its test has no test line to edit.
+            let when = rule.trigger().uses_test().then(|| rule.test());
             Some(Self {
-                editor: Editor::new(Some(rule.test()), rule.program()),
+                editor: Editor::new(when, rule.program()),
                 origin: Origin::Rule(id),
             })
         }
@@ -269,6 +275,9 @@ struct Running {
     mobs: Mobs,
     /// Steps left before the next zombie appears, counted while no mob is alive.
     zombie_timer: u32,
+    /// What the world did since the rules last looked (a hit taken, a respawn, a mob
+    /// appearing), worked out from the events it logged; the next tick hands it to the rules.
+    reactions: Vec<PlayerAction>,
     /// The id the next zombie will get. It is also the mob's actor in the intent log.
     next_mob: MobId,
     /// What the player and each zombie asked for on every step; settled steps are written to
@@ -281,8 +290,18 @@ struct Running {
     replay: Option<Replay>,
     /// The recipe the craft key makes.
     recipe: RecipeId,
-    /// The recipes the player wrote, after the built-in table. Fixed for the session.
+    /// The recipes the player wrote, after the built-in table. A recipe can be added during the
+    /// session but never changed or removed, so a recorded craft keeps its meaning.
     custom: CustomRecipes,
+    /// The edits the player saved to the ready-made scripts.
+    scripts: ScriptEdits,
+    /// The folder holding the world this session started from, where a replay finds the
+    /// recipes (see [`Self::keep_start_programs`]).
+    start_dir: PathBuf,
+    /// Whether the recipe editor is open (key `M`).
+    recipe_open: bool,
+    /// The recipe being made; kept while the editor is closed.
+    recipe_draft: Option<RecipeDraft>,
     /// Whether `programs.nib` was read (or did not exist). When it was refused, exit leaves the
     /// file alone, so a typo cannot cost the player their work.
     programs_ok: bool,
@@ -399,10 +418,11 @@ impl App {
             &log,
             &inventory,
             stats,
-            &programs_file::write(&programs.rules, &programs.recipes),
+            &programs_file::write(&programs.rules, &programs.recipes, &programs.scripts),
         ) {
             tracing::warn!(%error, "cannot save the starting world; this session will not replay exactly");
         }
+        let start_dir = stream::start_dir(&session);
         let intents = IntentStream::new(session);
         let clock = FixedClock::try_new(TICK_STEP, MAX_STEPS_PER_FRAME)?;
         let terrain = TerrainGenerator::new(SEED);
@@ -428,12 +448,17 @@ impl App {
             stats,
             mobs: Mobs::default(),
             zombie_timer: ZOMBIE_DELAY_STEPS,
+            reactions: Vec::new(),
             next_mob: MobId::FIRST,
             intents,
             sandboxed: replay.is_some(),
             replay,
             recipe: RecipeId::FIRST,
             custom: programs.recipes,
+            scripts: programs.scripts,
+            start_dir,
+            recipe_open: false,
+            recipe_draft: None,
             programs_ok,
             zone_step: 0,
             commands_open: false,
@@ -517,6 +542,7 @@ impl App {
             KeyCode::KeyG if down => self.with_running(Running::toggle_hacks),
             KeyCode::KeyN if down => self.with_running(Running::toggle_rules),
             KeyCode::KeyB if down => self.with_running(Running::toggle_editor),
+            KeyCode::KeyM if down => self.with_running(Running::toggle_recipe_editor),
             KeyCode::KeyQ if down => self.with_running(Running::toggle_readout),
             // Escape first closes the panel, and only then quits.
             KeyCode::Escape if down => match self.running.as_mut() {
@@ -596,7 +622,8 @@ impl App {
                 running.step_stats();
                 running.step_zombie(tick);
                 running.step_script(tick);
-                running.step_rules(tick);
+                running.step_reactions(tick);
+                running.step_rules(tick, None);
             }
             if running.stats.is_dead() {
                 running.die();
@@ -868,6 +895,7 @@ impl Running {
             || self.commands_open
             || self.rules_open
             || self.editor_open
+            || self.recipe_open
     }
 
     /// Opens or closes the crafting panel, freeing the pointer while it is open.
@@ -878,6 +906,7 @@ impl Running {
         self.commands_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
         self.sync_pointer();
     }
 
@@ -889,6 +918,7 @@ impl Running {
         self.commands_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
         self.sync_pointer();
     }
 
@@ -901,6 +931,7 @@ impl Running {
         self.commands_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
         self.hack_menu = if self.hacks_open {
             self.hack_options()
         } else {
@@ -916,6 +947,7 @@ impl Running {
         self.commands_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
         self.sync_pointer();
     }
 
@@ -940,6 +972,15 @@ impl Running {
             }
             return;
         }
+        if self.recipe_open {
+            if let Some(act) = self
+                .recipe_layout()
+                .and_then(|l| l.row_at(cursor.0, cursor.1))
+            {
+                self.click_recipe(act);
+            }
+            return;
+        }
         if self.rules_open {
             if let Some(act) = self.rules_layout().row_at(cursor.0, cursor.1) {
                 self.click_rules(act);
@@ -956,7 +997,12 @@ impl Running {
             return;
         }
         if self.scripts_open {
-            let layout = script_panel(self.renderer.size(), &self.inventory, self.script.is_some());
+            let layout = script_panel(
+                self.renderer.size(),
+                &self.inventory,
+                self.script.is_some(),
+                &self.scripts,
+            );
             if let Some(id) = layout.row_at(cursor.0, cursor.1) {
                 let feet = self.feet_cell();
                 self.start_from_panel(id, feet);
@@ -987,6 +1033,9 @@ impl Running {
             let layout = self.command_layout();
             let hovered = layout.row_at(cursor.0, cursor.1);
             command_overlay(&layout, size, hovered)
+        } else if let Some(layout) = self.recipe_layout().filter(|_| self.recipe_open) {
+            let hovered = layout.row_at(cursor.0, cursor.1);
+            menu_overlay(&layout, size, hovered)
         } else if self.rules_open {
             let layout = self.rules_layout();
             let hovered = layout.row_at(cursor.0, cursor.1);
@@ -995,7 +1044,7 @@ impl Running {
             let hovered = layout.row_at(cursor.0, cursor.1);
             menu_overlay(&layout, size, hovered)
         } else if self.scripts_open {
-            let layout = script_panel(size, &self.inventory, self.script.is_some());
+            let layout = script_panel(size, &self.inventory, self.script.is_some(), &self.scripts);
             let hovered = layout.row_at(cursor.0, cursor.1);
             script_overlay(&layout, size, hovered)
         } else if self.hacks_open {
@@ -1024,6 +1073,7 @@ impl Running {
         self.hacks_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
         self.commands_open = true;
         self.command_table = table;
         self.command_status.clear();
@@ -1107,6 +1157,19 @@ impl Running {
                 };
             }
             Plan::Hack(id) => self.start_hack(id),
+            Plan::Recipe {
+                name,
+                program: Some(program),
+            } => {
+                self.command_status = match self.add_recipe(&name, program) {
+                    Ok(()) => format!("recipe {name} made - tab shows it"),
+                    Err(why) => why,
+                };
+            }
+            Plan::Recipe {
+                name,
+                program: None,
+            } => self.open_recipe_editor(Some(&name)),
             Plan::Queue(_) if self.typed.len() >= MAX_TYPED => {
                 self.command_status = "too many commands waiting".to_owned();
             }
@@ -1174,6 +1237,7 @@ impl Running {
             &self.inventory,
             self.script.is_some(),
             &ids,
+            &self.scripts,
         )
     }
 
@@ -1251,7 +1315,10 @@ impl Running {
         let Some(def) = library::get(id) else {
             return Err("no such script".to_owned());
         };
-        self.start_program(def.name, def.program(), anchor)
+        let Some(program) = self.scripts.program_of(id).cloned() else {
+            return Err("no such script".to_owned());
+        };
+        self.start_program(def.name, &program, anchor)
     }
 
     /// Starts `program` called `name` with its working cell on `anchor`, under the rules of
@@ -1278,6 +1345,157 @@ impl Running {
         Ok(())
     }
 
+    /// Opens or closes the recipe editor (key `M`). It reopens the recipe it last held.
+    fn toggle_recipe_editor(&mut self) {
+        if self.recipe_open {
+            self.close_panels();
+        } else {
+            self.open_recipe_editor(None);
+        }
+    }
+
+    /// Opens the recipe editor. With a `name` it starts a new draft under it (the command
+    /// `recipe <name>`); without one it goes back to the draft it last held, or starts one under
+    /// a free name.
+    fn open_recipe_editor(&mut self, name: Option<&str>) {
+        if self.replay.is_some() {
+            self.command_status = "not while a saved run replays".to_owned();
+            return;
+        }
+        let draft = match name {
+            Some(name) if !self.custom.is_free(name) => {
+                self.command_status = CustomError::Taken(name.to_owned()).to_string();
+                return;
+            }
+            Some(name) => RecipeDraft::new(name),
+            None => match self.recipe_draft.take() {
+                Some(draft) => draft,
+                None => match self.custom.suggest_name() {
+                    Some(name) => RecipeDraft::new(&name),
+                    None => {
+                        self.command_status = CustomError::Full.to_string();
+                        self.script_note = Some(CustomError::Full.to_string());
+                        self.refresh_title();
+                        return;
+                    }
+                },
+            },
+        };
+        self.close_panels_quietly();
+        self.recipe_draft = Some(draft);
+        self.recipe_open = true;
+        self.panel_note.clear();
+        self.sync_pointer();
+    }
+
+    /// The recipe editor's layout, or `None` when there is no draft.
+    fn recipe_layout(&self) -> Option<crate::ui::layout::Menu<RecipeAct>> {
+        let draft = self.recipe_draft.as_ref()?;
+        let view = RecipeView {
+            note: &self.panel_note,
+        };
+        Some(recipe_menu(self.renderer.size(), draft, view))
+    }
+
+    fn click_recipe(&mut self, act: RecipeAct) {
+        self.panel_note.clear();
+        let Some(mut draft) = self.recipe_draft.take() else {
+            return;
+        };
+        match act {
+            RecipeAct::Row(index) => draft.select(index),
+            RecipeAct::Up => draft.up(),
+            RecipeAct::Down => draft.down(),
+            RecipeAct::Verb => {
+                draft.flip_verb();
+            }
+            RecipeAct::Item => {
+                draft.cycle_item();
+            }
+            RecipeAct::Less => {
+                draft.nudge(-1);
+            }
+            RecipeAct::More => {
+                draft.nudge(1);
+            }
+            RecipeAct::Add => {
+                if !draft.add() {
+                    self.panel_note = "no room for another line".to_owned();
+                }
+            }
+            RecipeAct::Delete => {
+                draft.delete();
+            }
+            RecipeAct::Keep => match draft.program() {
+                Err(error) => self.panel_note = error.to_string().replace(';', ","),
+                Ok(program) => match self.add_recipe(draft.name(), program) {
+                    Ok(()) => {
+                        // Show the crafting panel, where the new recipe is a row.
+                        self.close_panels_quietly();
+                        self.panel_open = true;
+                        self.sync_pointer();
+                        self.refresh_title();
+                        return;
+                    }
+                    Err(why) => self.panel_note = why,
+                },
+            },
+        }
+        self.recipe_draft = Some(draft);
+    }
+
+    /// Adds a recipe of the player's. It joins the crafting panel and the craft key at once.
+    /// Recipes are only ever added, so the numbers a recording names keep their meaning, and
+    /// the session's starting world is rewritten to hold the recipe, so a replay can craft it.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the recipe was not added: a replay is running, the name is taken or bad, or
+    /// the player has the most recipes allowed.
+    fn add_recipe(&mut self, name: &str, program: RecipeProgram) -> Result<(), String> {
+        if self.replay.is_some() {
+            return Err("not while a saved run replays".to_owned());
+        }
+        self.custom
+            .add(name, program)
+            .map_err(|error| error.to_string())?;
+        self.keep_start_programs();
+        self.refresh_title();
+        Ok(())
+    }
+
+    /// Rewrites the programs file inside this session's starting world so it holds every
+    /// recipe made so far. A replay loads recipes from there, and a recorded craft names its
+    /// recipe by number, so without this a replay of a session that made a recipe could not
+    /// craft it. A failure is reported and the game carries on.
+    fn keep_start_programs(&mut self) {
+        if let Err(error) =
+            save_start_programs(&self.start_dir, &self.rules, &self.custom, &self.scripts)
+        {
+            tracing::warn!(%error, "cannot update the starting world; a replay may not craft the new recipe");
+            self.script_note =
+                Some("recipe kept, but a replay of this session may not craft it".to_owned());
+        }
+    }
+
+    /// Saves the draft as the ready-made script it came from.
+    fn save_script_draft(&mut self, draft: &Draft) {
+        let Origin::Script(id) = draft.origin else {
+            return;
+        };
+        let program = match draft.editor.program() {
+            Ok(program) => program,
+            Err(error) => {
+                self.panel_note = error.to_string();
+                return;
+            }
+        };
+        self.panel_note = match self.scripts.set(id, program) {
+            Ok(()) => "script saved".to_owned(),
+            Err(error) => error.to_string(),
+        };
+    }
+
     /// Opens or closes the rules panel (key `N`).
     fn toggle_rules(&mut self) {
         let open = !self.rules_open;
@@ -1295,7 +1513,9 @@ impl Running {
         self.editor_open = open;
         self.panel_note.clear();
         if open && self.draft.is_none() {
-            self.draft = library::ids().next().and_then(Draft::of_script);
+            self.draft = library::ids()
+                .next()
+                .and_then(Draft::of_script(&self.scripts));
         }
         self.sync_pointer();
     }
@@ -1308,6 +1528,7 @@ impl Running {
         self.commands_open = false;
         self.rules_open = false;
         self.editor_open = false;
+        self.recipe_open = false;
     }
 
     fn rules_layout(&self) -> crate::ui::layout::Menu<RulesAct> {
@@ -1330,9 +1551,15 @@ impl Running {
             Origin::Script(_) => "make a rule of it",
             Origin::Rule(_) => "save to the rule",
         };
+        let (save, can_reset) = match draft.origin {
+            Origin::Script(id) => ("save the script", self.scripts.edited(id).is_some()),
+            Origin::Rule(_) => ("", false),
+        };
         let view = EditorView {
             title: &title,
             keep,
+            save,
+            can_reset,
             can_run: self.replay.is_none() && self.script.is_none(),
             can_switch: matches!(draft.origin, Origin::Script(_)),
             note: &self.panel_note,
@@ -1377,6 +1604,28 @@ impl Running {
                     let pin = self.aim_context().0.unwrap_or_else(|| self.feet_cell());
                     let next = anchor.next(pin);
                     self.panel_note = match self.rules.set_anchor(id, next) {
+                        Ok(()) => String::new(),
+                        Err(error) => error.to_string(),
+                    };
+                }
+            }
+            RulesAct::Trigger => {
+                if let Some(id) = self.rule_pick
+                    && let Some(rule) = self.rules.get(id)
+                {
+                    let next = rule.trigger().next();
+                    self.panel_note = match self.rules.set_trigger(id, next) {
+                        Ok(()) => String::new(),
+                        Err(error) => error.to_string(),
+                    };
+                }
+            }
+            RulesAct::Gate => {
+                if let Some(id) = self.rule_pick
+                    && let Some(rule) = self.rules.get(id)
+                {
+                    let flipped = rule.trigger().with_gate_flipped();
+                    self.panel_note = match self.rules.set_trigger(id, flipped) {
                         Ok(()) => String::new(),
                         Err(error) => error.to_string(),
                     };
@@ -1432,9 +1681,19 @@ impl Running {
                 };
                 if let Some(opened) = next
                     .or_else(|| library::ids().next())
-                    .and_then(Draft::of_script)
+                    .and_then(Draft::of_script(&self.scripts))
                 {
                     draft = opened;
+                }
+            }
+            EditAct::Save => self.save_script_draft(&draft),
+            EditAct::Reset => {
+                if let Origin::Script(id) = draft.origin {
+                    self.scripts.reset(id);
+                    if let Some(fresh) = Draft::of_script(&self.scripts)(id) {
+                        draft = fresh;
+                    }
+                    self.panel_note = "the built-in program is back".to_owned();
                 }
             }
         }
@@ -1498,7 +1757,9 @@ impl Running {
                 }
             }
             Origin::Rule(id) => {
-                let test = draft.editor.when().unwrap_or(DEFAULT_WHEN);
+                // An action rule that does not use its test keeps the one it has.
+                let kept = self.rules.get(id).map_or(DEFAULT_WHEN, |rule| rule.test());
+                let test = draft.editor.when().unwrap_or(kept);
                 self.panel_note = match self.rules.replace(id, test, program) {
                     Ok(()) => format!("rule {} saved", u16::from(id.0) + 1),
                     Err(error) => error.to_string(),
@@ -1517,10 +1778,15 @@ impl Running {
         }
     }
 
-    /// Fires the first rule whose test holds, as a script. Rules look at the world once per
-    /// [`CHECK_EVERY`](crate::logic::model::CHECK_EVERY) ticks and never during a replay: the
-    /// replay performs the commands the recording holds, which include what a rule once ran.
-    fn step_rules(&mut self, tick: Tick) {
+    /// Fires the first rule that is due, as a script. With `None` that is the first polling rule
+    /// whose test holds; rules look at the world once per
+    /// [`CHECK_EVERY`](crate::logic::model::CHECK_EVERY) ticks. With `Some(kind)` it is the first
+    /// rule reacting to the player having just done `kind`, right now. Rules never fire during a
+    /// replay, which performs the commands the recording holds, including what a rule once ran,
+    /// and an action rule that comes up while a script is running is not queued: the action is
+    /// missed. Only the player's own actions are reactions (see [`reaction_to`]), so what a
+    /// rule's script does cannot set a rule off again.
+    fn step_rules(&mut self, tick: Tick, reacting_to: Option<PlayerAction>) {
         if self.replay.is_some() || self.script.is_some() || self.rules.is_empty() {
             return;
         }
@@ -1550,7 +1816,10 @@ impl Running {
                 Anchor::Feet => Some(feet),
                 Anchor::Mob => mob,
             };
-            self.rules.due(tick.0, &mut resolve, &mut read)
+            match reacting_to {
+                None => self.rules.due(tick.0, &mut resolve, &mut read),
+                Some(kind) => self.rules.due_on(kind, tick.0, &mut resolve, &mut read),
+            }
         };
         let Some(id) = due else {
             return;
@@ -1580,6 +1849,15 @@ impl Running {
                     self.refresh_title();
                 }
             }
+        }
+    }
+
+    /// Hands what the world did since the last tick to the rules, one kind at a time. A rule
+    /// that fires starts a script, and while one runs the rest are missed, as for the player's
+    /// own acts. Nothing reacts during a replay, which performs what the recording holds.
+    fn step_reactions(&mut self, tick: Tick) {
+        for kind in std::mem::take(&mut self.reactions) {
+            self.step_rules(tick, Some(kind));
         }
     }
 
@@ -1677,7 +1955,12 @@ impl Running {
     }
 
     /// [`Self::commit`] for an action of any `kind`.
+    ///
+    /// The checkpoints that go with the action (see [`checkpoints`]) are logged in front of
+    /// `events` but not applied: the player and the mobs already stand where they say. What
+    /// the world did to the player is kept for the rules to react to.
     fn commit_as(&mut self, events: &[Event], kind: ActionKind) -> Result<(), StageError> {
+        let checkpoints = checkpoints(&self.log, &self.player, &self.mobs, events, kind);
         let mut stage = Stage {
             world: &mut self.world,
             player: &mut self.player,
@@ -1686,21 +1969,27 @@ impl Running {
             mobs: &mut self.mobs,
         };
         apply_all(&mut stage, events)?;
-        log_action(&mut self.log, events, kind);
+        let logged: Vec<Event> = checkpoints.iter().chain(events).copied().collect();
+        log_action(&mut self.log, &logged, kind);
+        self.reactions.extend(reactions(kind, events));
         Ok(())
     }
 
     /// Steps back the latest edit still in effect, paying [`rewind_price`] in fuel inside the
     /// same all-or-nothing batch. Reports whether it did. Nothing left to undo is normal, and
     /// so are a respawn in the way and a pack that cannot pay (the title says what it needs); a
-    /// refusal (the state moved on in a way no event records, such as walking, or a meter that
+    /// refusal (the state moved on in a way no event records, such as a mob that was removed, or a meter that
     /// the undo would push out of range) is logged.
     fn rewind(&mut self) -> bool {
         let Some(events) = rewind_events(&self.log) else {
             return false;
         };
         // Passive drains are not rewound, so the meters may sit lower than the undo expects.
-        let mut events = clamp_meters(&events, self.stats);
+        // The player may have walked on since the edit: the undo starts by walking them back.
+        let mut events = bridged(
+            clamp_meters(&events, self.stats),
+            Spot::from_vec3(self.player.position()),
+        );
         let price = rewind_price(&events);
         match charge_events(&self.inventory, &events, ItemId::FUEL, price) {
             Ok(charge) => events.extend(charge),
@@ -1781,6 +2070,7 @@ impl Running {
         let Some(events) = self.redo.take() else {
             return false;
         };
+        let events = bridged(events, Spot::from_vec3(self.player.position()));
         self.load_touched(&events);
         if let Err(error) = self.commit_as(&events, ActionKind::Redo) {
             tracing::warn!(%error, "redo rejected");
@@ -1911,6 +2201,9 @@ impl Running {
         };
         if done {
             self.settle(tick, action);
+            if let Some(kind) = reaction_to(action) {
+                self.step_rules(tick, Some(kind));
+            }
         }
         done
     }
@@ -2076,7 +2369,7 @@ impl Running {
         }
         if let Some(name) = self.custom.name_of(self.recipe) {
             title.push_str(&format!(
-                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, / or H commands)",
+                " | recipe {} (R next, C craft, E eat, Z rewind for fuel, Y redo, T scripts, G hacks, Q read, N rules, B blocks, M recipes, / or H commands)",
                 name
             ));
         }
@@ -2189,7 +2482,12 @@ impl ApplicationHandler for App {
             }
             // A file the game refused is left as the player wrote it.
             if running.programs_ok {
-                save_programs(Path::new(PROGRAMS_PATH), &running.rules, &running.custom);
+                save_programs(
+                    Path::new(PROGRAMS_PATH),
+                    &running.rules,
+                    &running.custom,
+                    &running.scripts,
+                );
             }
             // The meters change all the time, so they are always written; the file is eight bytes.
             if let Err(error) = stats_persist::save(Path::new(STATS_PATH), running.stats) {
@@ -2266,7 +2564,10 @@ fn open_log(path: &Path) -> Result<EventLog, AppError> {
     match persist::load(path)? {
         Some(saved) if saved.seed == SEED => {
             tracing::info!(events = saved.log.len(), "loaded saved world");
-            Ok(saved.log)
+            // Its moves are from an earlier session: this one starts somewhere else.
+            let mut log = saved.log;
+            log.forget_spots();
+            Ok(log)
         }
         Some(saved) => Err(AppError::SeedMismatch {
             found: saved.seed,
@@ -2315,13 +2616,40 @@ fn load_programs(path: &Path) -> (programs_file::Programs, bool) {
     }
 }
 
+/// Writes the programs file inside a session's starting world `dir`.
+fn save_start_programs(
+    dir: &Path,
+    rules: &Rules,
+    recipes: &CustomRecipes,
+    scripts: &ScriptEdits,
+) -> io::Result<()> {
+    std::fs::write(
+        dir.join(PROGRAMS_PATH),
+        programs_file::write(rules, recipes, scripts),
+    )
+}
+
+/// What a rule can react to in `action`: the player's own break, place, craft, meal or hit.
+/// Rewinds, redos, zone rewinds and script commands are not reactions, which is what keeps a
+/// rule's own script from setting a rule off again.
+fn reaction_to(action: Action) -> Option<PlayerAction> {
+    match action {
+        Action::Break(_) => Some(PlayerAction::Break),
+        Action::Place { .. } => Some(PlayerAction::Place),
+        Action::Craft(_) => Some(PlayerAction::Craft),
+        Action::Eat => Some(PlayerAction::Eat),
+        Action::Strike(_) => Some(PlayerAction::Hit),
+        Action::Rewind | Action::Redo | Action::ZoneRewind { .. } | Action::Script(_) => None,
+    }
+}
+
 /// Writes the programs file. Nothing is written when there is nothing to keep and no file to
 /// update. A failure is reported and the game carries on: the next exit tries again.
-fn save_programs(path: &Path, rules: &Rules, recipes: &CustomRecipes) {
-    if rules.is_empty() && recipes.is_empty() && !path.exists() {
+fn save_programs(path: &Path, rules: &Rules, recipes: &CustomRecipes, scripts: &ScriptEdits) {
+    if rules.is_empty() && recipes.is_empty() && scripts.is_empty() && !path.exists() {
         return;
     }
-    if let Err(error) = std::fs::write(path, programs_file::write(rules, recipes)) {
+    if let Err(error) = std::fs::write(path, programs_file::write(rules, recipes, scripts)) {
         tracing::warn!(%error, path = %path.display(), "cannot save the programs file");
     }
 }
@@ -2398,5 +2726,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(loaded_log.is_ok_and(|saved| saved.is_empty()));
+    }
+
+    #[test]
+    fn only_the_players_own_acts_are_reactions() {
+        let pos = WorldPos { x: 0, y: 0, z: 0 };
+        assert_eq!(reaction_to(Action::Break(pos)), Some(PlayerAction::Break));
+        assert_eq!(
+            reaction_to(Action::Place {
+                pos,
+                block: crate::shared::voxel::BlockId::STONE
+            }),
+            Some(PlayerAction::Place)
+        );
+        assert_eq!(reaction_to(Action::Craft(0)), Some(PlayerAction::Craft));
+        assert_eq!(reaction_to(Action::Eat), Some(PlayerAction::Eat));
+        assert_eq!(
+            reaction_to(Action::Strike(actor_of(MobId(0)))),
+            Some(PlayerAction::Hit)
+        );
+        // What a script, a rewind or a redo does never sets a rule off, so no rule loops.
+        assert_eq!(reaction_to(Action::Rewind), None);
+        assert_eq!(reaction_to(Action::Redo), None);
+        assert_eq!(
+            reaction_to(Action::ZoneRewind {
+                centre: pos,
+                back: 1
+            }),
+            None
+        );
+        assert_eq!(
+            reaction_to(Action::Script(Command::Teleport { to: pos })),
+            None
+        );
+    }
+
+    #[test]
+    fn a_recipe_made_mid_session_is_in_the_starting_world_a_replay_loads() {
+        let dir = std::env::temp_dir().join(format!("mcit-recipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut recipes = CustomRecipes::default();
+        let program = crate::crafting::text::recipe_of(
+            &crate::scripting::text::Cursor::new("take grass 3\nmake bread 1\n")
+                .body(0)
+                .unwrap()
+                .0,
+            1,
+        )
+        .unwrap();
+        recipes.add("loaf", program).unwrap();
+        let written =
+            save_start_programs(&dir, &Rules::default(), &recipes, &ScriptEdits::default());
+        let (loaded, ok) = load_programs(&dir.join(PROGRAMS_PATH));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(written.is_ok() && ok);
+        assert_eq!(loaded.recipes, recipes);
     }
 }

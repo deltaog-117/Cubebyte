@@ -186,8 +186,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `crafting::program::RecipeProgram`: player recipes made of `take`, `make`, `repeat` and `if` steps, with a worth rule checked on every path and a size limit; `crafting::custom::CustomRecipes`, `crafting::text` and `crafting::service::custom_craft_events`
 - `worth` for every item, `blocks::registry::find` and `items::registry::find`, and a test that every built-in recipe obeys the worth rule
 - Player recipes in the crafting panel (`ui::layout::panel_with`, `ExtraRow`) and on the `R` and `C` keys; a craft is recorded in intent tracks by its number
+- `recipe <name> [take|make <item> <count> ...]` command: with steps it makes a player recipe at once (fair recipes only, checked by `RecipeProgram::try_new`), without steps it opens the recipe editor under that name; the command line holds up to 72 characters now
+- `crafting::draft::RecipeDraft` and the recipe editor (key `M`, `ui::layout::recipe_menu`): click to add, delete, move, flip take or make, change the item and the count of a line; its hint says why a draft cannot be kept yet, and a kept recipe joins the crafting panel and the `R` and `C` keys
+- `CustomRecipes::suggest_name`, `is_free` and the public `name_is_valid`
+- A recipe made during a session is also written to that session's starting world, so a replay can craft it
+- `programs::scripts::ScriptEdits`: edits saved to the ready-made scripts, kept in `programs.nib` as `script <name>` sections; the editor gains "save the script" and "reset to the built-in program", and the script and hack panels show and check the edited fuel cost
+- `logic::model::Trigger` and `PlayerAction`: a rule can fire right after the player breaks, places, crafts, eats or hits, optionally only if its test holds; `Rules::add_with`, `set_trigger` and `due_on`; the rules panel gains "next trigger" and "action rule: use its test or not"
+- `programs.nib` format `nib 2`: `on <action>` lines for action rules and `script <name>` sections; `nib 1` files still load
+- `Event::MobMoved` and `Mobs::move_to`: a mob's walk from one spot to another, with a stale-position check and an exact inverse
+- `events::walk`: `checkpoints` (the move events that record where the player stood at each edit and where a hit or removed mob stood) and `bridged` (a move in front of a rewind or redo that takes the player to where the edit left them)
+- `EventLog::player_spot`, `mob_spot` and `forget_spots`: where the log last put the player and each mob, worked out as events are pushed and forgotten after a load
+- `logic::react::reactions` and the rule triggers `hurt`, `respawn` and `appear` (`PlayerAction::{Hurt, Respawn, MobAppears}`): worked out from the events of passive actions and respawns
+- `programs.nib` format `nib 3`: `on hurt`, `on respawn` and `on appear`; `nib 1` and `nib 2` files still load
+- Event log version 8: tag 15 for a mob's move; older versions still load
+- Tests: a move event and its inverse (property), a save and reload of mob moves (property), checkpoints and bridges, a rewind and redo with the player walking between them, and rewinding and redoing every edit with random walks in between (property)
 
 ### Changed
+- `Z` and `Y` also move the player: `Z` walks them to where the edit left them and then to where it found them, and `Y` is its exact opposite, so rewinding works wherever the player has walked since; every player edit logs one more event (where the player stood); a replay of a track recorded before this that used `Z` drifts after the first `Z`
+- A player move to the spot where the player already stands no longer stops their fall
+- `programs::file::write` writes `nib 3`; `PlayerAction` has three more kinds
 - The ready-made scripts `tower`, `hop`, `stock` and `summon` are programs now and produce the same commands as before
 - `ScriptRun` takes its commands from a flat list or from a program; a program reads the world through `ask` when it reaches an `if`
 - The `T` panel lists only scripts that need no aim; the title shows `script name (n done)`
@@ -246,6 +263,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Rules::add` takes an `Anchor`, `Rule::anchor` returns one, and `Rules::due` takes a function that turns an anchor into the cell it stands for
 - The rules panel lists each rule's anchor and gains a "next anchor" row
 - `ItemDef` gains a `worth` field
+- `programs::file::write` takes the script edits too, and `Programs` has a `scripts` field; the game writes `nib 2`
+- `command::model::{Request, Value}` and `command::plan::Plan` are no longer `Copy`, since a recipe line carries a checked recipe
+- `ui::layout::script_panel` and `hack_panel` take the script edits, so a row shows what the script really costs
+- Polling rules ignore action rules, and the rules panel line shows what sets a rule off
 
 ### Fixed
 - Undoing a meal was refused when hunger had drained below what the meal gave (for example eating at 0, a drain to 3, then `Z` asking for -4); the undo now stops at 0

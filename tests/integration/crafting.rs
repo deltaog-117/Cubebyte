@@ -59,3 +59,42 @@ fn grass_becomes_bread_which_refills_hunger() {
     assert_eq!(stats.hunger().value(), hungry + 4);
     assert!(inventory.is_empty());
 }
+
+#[test]
+fn a_recipe_typed_on_the_command_line_can_be_crafted() {
+    use minecraft_clone::command::{parse::parse, plan::Plan, plan::plan};
+    use minecraft_clone::crafting::custom::CustomRecipes;
+    use minecraft_clone::scripting::model::Denied;
+    use minecraft_clone::shared::voxel::WorldPos;
+
+    let feet = WorldPos { x: 0, y: 0, z: 0 };
+    let request = parse("recipe loaf take grass 3 make bread 1").unwrap();
+    let Plan::Recipe {
+        name,
+        program: Some(program),
+    } = plan(request, feet)
+    else {
+        panic!("a line with steps makes a recipe");
+    };
+    let mut recipes = CustomRecipes::default();
+    let id = recipes.add(&name, program).unwrap();
+    assert_eq!(recipes.name_of(id), Some("loaf"));
+
+    let mut pack = Inventory::default();
+    pack.add(ItemId::GRASS, 3).unwrap();
+    let recipe = recipes.get(id).unwrap();
+    let after = recipe
+        .program()
+        .run(&pack, feet, &mut |_| Err(Denied::NothingToDo))
+        .unwrap();
+    assert_eq!(after.count_of(ItemId::BREAD), 1);
+    assert_eq!(after.count_of(ItemId::GRASS), 0);
+    // The pack it ran on is untouched: a recipe works on a copy.
+    assert_eq!(pack.count_of(ItemId::GRASS), 3);
+}
+
+#[test]
+fn a_recipe_line_that_makes_worth_from_nothing_is_refused_before_it_exists() {
+    use minecraft_clone::command::parse::parse;
+    assert!(parse("recipe free make sword 1").is_err());
+}

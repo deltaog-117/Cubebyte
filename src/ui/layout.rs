@@ -6,11 +6,13 @@ use std::fmt::Write;
 
 use crate::command::model::CommandId;
 use crate::command::table as commands;
+use crate::crafting::draft::RecipeDraft;
 use crate::crafting::registry::{self, RecipeId};
 use crate::crafting::service::can_craft;
 use crate::inventory::model::Inventory;
 use crate::items::registry::{self as items, ItemId};
-use crate::logic::model::{Anchor, RuleId, Rules};
+use crate::logic::model::{Anchor, RuleId, Rules, Trigger};
+use crate::programs::scripts::ScriptEdits;
 use crate::scripting::edit::{Editor, test_text};
 use crate::scripting::library::{self, ScriptId, Target};
 use crate::ui::font::{GLYPH_HEIGHT, GLYPH_WIDTH};
@@ -280,17 +282,30 @@ impl ScriptPanel {
 }
 
 /// "tower - 3 fuel".
-fn describe_script(id: ScriptId) -> Option<String> {
+fn describe_script(id: ScriptId, edits: &ScriptEdits) -> Option<String> {
     let script = library::get(id)?;
-    Some(format!("{} - {} fuel", script.name, script.fuel_cost()))
+    Some(format!("{} - {} fuel", script.name, edits.fuel_cost(id)?))
 }
 
 /// Lays the script panel out centred in a window of `size` pixels, one row per script that needs
 /// no aiming. A row can be started when the pack holds the fuel for the whole script and none
 /// is running.
-pub fn script_panel(size: (u32, u32), inventory: &Inventory, running: bool) -> ScriptPanel {
+pub fn script_panel(
+    size: (u32, u32),
+    inventory: &Inventory,
+    running: bool,
+    edits: &ScriptEdits,
+) -> ScriptPanel {
     let ids: Vec<_> = library::ids_for(Target::Feet).collect();
-    script_rows(size, inventory, running, &ids, SCRIPT_TITLE, SCRIPT_HINT)
+    script_rows(
+        size,
+        inventory,
+        running,
+        &ids,
+        SCRIPT_TITLE,
+        SCRIPT_HINT,
+        edits,
+    )
 }
 
 /// The quick-hack menu: one row per script in `ids`, which the game picks from what the player
@@ -300,9 +315,10 @@ pub fn hack_panel(
     inventory: &Inventory,
     running: bool,
     ids: &[ScriptId],
+    edits: &ScriptEdits,
 ) -> ScriptPanel {
     let hint = if ids.is_empty() { HACK_NONE } else { HACK_HINT };
-    script_rows(size, inventory, running, ids, HACK_TITLE, hint)
+    script_rows(size, inventory, running, ids, HACK_TITLE, hint, edits)
 }
 
 fn script_rows(
@@ -312,10 +328,11 @@ fn script_rows(
     ids: &[ScriptId],
     title: &str,
     hint: &str,
+    edits: &ScriptEdits,
 ) -> ScriptPanel {
     let described: Vec<_> = ids
         .iter()
-        .filter_map(|&id| Some((id, describe_script(id)?)))
+        .filter_map(|&id| Some((id, describe_script(id, edits)?)))
         .collect();
     let texts: Vec<_> = described.iter().map(|(_, text)| text.clone()).collect();
     let arranged = arrange(size, title, hint, &texts);
@@ -327,7 +344,7 @@ fn script_rows(
             script,
             rect,
             label,
-            startable: !running && library::get(script).is_some_and(|s| fuel >= s.fuel_cost()),
+            startable: !running && edits.fuel_cost(script).is_some_and(|cost| fuel >= cost),
         })
         .collect();
     ScriptPanel {
@@ -424,7 +441,23 @@ pub enum RulesAct {
     Remove,
     /// Steps the picked rule to the next kind of anchor: cell, feet, mob.
     Anchor,
+    /// Steps the picked rule to the next trigger: poll, then each action.
+    Trigger,
+    /// Makes the picked action rule use its test or ignore it.
+    Gate,
     New,
+}
+
+/// How a rule's trigger reads in the rules panel: its test for a rule that polls, or the
+/// action, with the test when it is part of the trigger.
+fn trigger_text(rule: &crate::logic::model::Rule) -> String {
+    match rule.trigger() {
+        Trigger::Poll => test_text(rule.test()),
+        Trigger::On { kind, gated: false } => format!("on {}", kind.name()),
+        Trigger::On { kind, gated: true } => {
+            format!("on {} if {}", kind.name(), test_text(rule.test()))
+        }
+    }
 }
 
 /// The rules panel: one line per rule, then what can be done with the picked one.
@@ -447,13 +480,16 @@ pub fn rules_menu(
                     Anchor::Feet => "feet",
                     Anchor::Mob => "mob",
                 },
-                test_text(rule.test())
+                trigger_text(rule)
             ),
             usable: true,
             chosen: picked == Some(id),
         })
         .collect();
     let has_pick = picked.is_some_and(|id| rules.get(id).is_some());
+    let acts_on_action = picked
+        .and_then(|id| rules.get(id))
+        .is_some_and(|rule| matches!(rule.trigger(), Trigger::On { .. }));
     lines.extend([
         MenuLine {
             act: RulesAct::Switch,
@@ -471,6 +507,18 @@ pub fn rules_menu(
             act: RulesAct::Anchor,
             text: "next anchor: cell, feet, mob".to_owned(),
             usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::Trigger,
+            text: "next trigger: poll, break, place...".to_owned(),
+            usable: has_pick,
+            chosen: false,
+        },
+        MenuLine {
+            act: RulesAct::Gate,
+            text: "action rule: use its test or not".to_owned(),
+            usable: acts_on_action,
             chosen: false,
         },
         MenuLine {
@@ -508,6 +556,10 @@ pub enum EditAct {
     Delete,
     Run,
     Keep,
+    /// Saves the draft as the ready-made script it came from.
+    Save,
+    /// Brings the ready-made script's built-in program back.
+    Reset,
     Other,
 }
 
@@ -520,6 +572,11 @@ pub struct EditorView<'a> {
     pub title: &'a str,
     /// What the keep line says, or `None` when keeping makes no sense.
     pub keep: &'a str,
+    /// What the save line says, or empty when the draft is not a ready-made script's (no save
+    /// and no reset lines then).
+    pub save: &'a str,
+    /// Whether the ready-made script has a saved edit to drop.
+    pub can_reset: bool,
     /// Whether the draft can start right now.
     pub can_run: bool,
     /// Whether another ready-made script can be opened in its place.
@@ -565,14 +622,93 @@ pub fn editor_menu(size: (u32, u32), editor: &Editor, view: EditorView<'_>) -> M
         button(EditAct::Delete, "delete", !rows.is_empty()),
         button(EditAct::Run, "run", view.can_run),
         button(EditAct::Keep, view.keep, !view.keep.is_empty()),
-        button(EditAct::Other, "other script", view.can_switch),
     ]);
+    if !view.save.is_empty() {
+        lines.extend([
+            button(EditAct::Save, view.save, true),
+            button(
+                EditAct::Reset,
+                "reset to the built-in program",
+                view.can_reset,
+            ),
+        ]);
+    }
+    lines.push(button(EditAct::Other, "other script", view.can_switch));
     let hint = if view.note.is_empty() {
         "click to edit - b closes"
     } else {
         view.note
     };
     menu(size, view.title, hint, lines)
+}
+
+/// What a click in the recipe editor asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecipeAct {
+    Row(usize),
+    Up,
+    Down,
+    /// Turns the picked line's take into a make or back.
+    Verb,
+    /// Gives the picked line the next item.
+    Item,
+    Less,
+    More,
+    Add,
+    Delete,
+    Keep,
+}
+
+/// How many lines of the recipe draft show at once.
+pub const RECIPE_LINES: usize = 5;
+
+/// What the recipe editor needs to know besides the draft itself.
+#[derive(Clone, Copy, Debug)]
+pub struct RecipeView<'a> {
+    /// What the editor last had to say; it replaces the hint while it is not empty.
+    pub note: &'a str,
+}
+
+/// The recipe editor: a stretch of the draft's lines, then the buttons. Its hint says why the
+/// draft cannot be kept yet, or that it can.
+pub fn recipe_menu(size: (u32, u32), draft: &RecipeDraft, view: RecipeView<'_>) -> Menu<RecipeAct> {
+    let mut lines: Vec<_> = draft
+        .window(RECIPE_LINES)
+        .map(|index| MenuLine {
+            act: RecipeAct::Row(index),
+            text: RecipeDraft::text(draft.lines()[index]),
+            usable: true,
+            chosen: index == draft.selected(),
+        })
+        .collect();
+    let any = !draft.lines().is_empty();
+    let button = |act, text: &str, usable| MenuLine {
+        act,
+        text: text.to_owned(),
+        usable,
+        chosen: false,
+    };
+    let verdict = draft.program();
+    lines.extend([
+        button(RecipeAct::Up, "up", any),
+        button(RecipeAct::Down, "down", any),
+        button(RecipeAct::Verb, "take or make", any),
+        button(RecipeAct::Item, "next item", any),
+        button(RecipeAct::Less, "less", any),
+        button(RecipeAct::More, "more", any),
+        button(RecipeAct::Add, "add a line", true),
+        button(RecipeAct::Delete, "delete", any),
+        button(RecipeAct::Keep, "keep the recipe", verdict.is_ok()),
+    ]);
+    let hint = if !view.note.is_empty() {
+        view.note.to_owned()
+    } else {
+        match &verdict {
+            Ok(_) => "fair - keep it - m closes".to_owned(),
+            Err(error) => error.to_string().replace(';', ","),
+        }
+    };
+    menu(size, &format!("recipe {}", draft.name()), &hint, lines)
 }
 
 /// One clickable command of the table.
@@ -701,6 +837,8 @@ mod tests {
         EditorView {
             title: "editing tower",
             keep: "make a rule of it",
+            save: "save the script",
+            can_reset: true,
             can_run: true,
             can_switch: true,
             note: "",
@@ -717,7 +855,8 @@ mod tests {
         let menu = editor_menu((1280, 720), &tower(), view());
         let acts: Vec<_> = menu.rows.iter().map(|row| row.act).collect();
         assert_eq!(acts[..4], (0..4).map(EditAct::Row).collect::<Vec<_>>()[..]);
-        assert_eq!(acts.len(), 4 + 11);
+        assert_eq!(acts.len(), 4 + 13);
+        assert!(acts.contains(&EditAct::Save) && acts.contains(&EditAct::Reset));
         assert!(acts.contains(&EditAct::Keep) && acts.contains(&EditAct::Run));
         assert_eq!(menu.rows.iter().filter(|row| row.chosen).count(), 1);
     }
@@ -748,7 +887,84 @@ mod tests {
         assert!(none.rows[1..4].iter().all(|row| !row.usable));
         let picked = rules_menu((1280, 720), &rules, Some(id), "");
         assert!(picked.rows[0].chosen);
-        assert!(picked.rows[1..].iter().all(|row| row.usable));
+        // Every button works for a rule that polls except the gate, which only action rules have.
+        assert!(
+            picked.rows[1..]
+                .iter()
+                .all(|row| row.usable != (row.act == RulesAct::Gate))
+        );
+    }
+
+    #[test]
+    fn a_rules_line_says_what_sets_it_off() {
+        let (_, stock) = library::find("stock").expect("stock exists");
+        let test = Test {
+            read: Read::Hunger,
+            compare: Compare::Below,
+            than: 10,
+        };
+        let mut rules = Rules::default();
+        let make = |rules: &mut Rules, trigger| {
+            rules
+                .add_with(trigger, test, stock.program().clone(), Anchor::Feet)
+                .unwrap()
+        };
+        let plain = Trigger::On {
+            kind: crate::logic::model::PlayerAction::Break,
+            gated: false,
+        };
+        let gated = Trigger::On {
+            kind: crate::logic::model::PlayerAction::Craft,
+            gated: true,
+        };
+        let first = make(&mut rules, plain);
+        make(&mut rules, gated);
+        let menu = rules_menu((1280, 720), &rules, Some(first), "");
+        assert_eq!(menu.rows[0].label.text, "1 on feet on break");
+        assert_eq!(
+            menu.rows[1].label.text,
+            "2 on feet on craft if hunger below 10"
+        );
+        // The gate button works for an action rule.
+        assert!(
+            menu.rows
+                .iter()
+                .any(|row| row.act == RulesAct::Gate && row.usable)
+        );
+    }
+
+    #[test]
+    fn the_recipe_editor_says_why_a_draft_cannot_be_kept() {
+        use crate::crafting::draft::RecipeDraft;
+        let mut draft = RecipeDraft::new("loaf");
+        let view = RecipeView { note: "" };
+        let empty = recipe_menu((1280, 720), &draft, view);
+        assert!(empty.title.text.contains("loaf"));
+        assert!(empty.hint.text.contains("at least one step"));
+        let keep = |menu: &Menu<RecipeAct>| {
+            menu.rows
+                .iter()
+                .find(|row| row.act == RecipeAct::Keep)
+                .map(|row| row.usable)
+        };
+        assert_eq!(keep(&empty), Some(false));
+        // Take 3 grass, make 1 bread: fair, so it can be kept.
+        draft.add();
+        draft.nudge(2);
+        draft.add();
+        draft.flip_verb();
+        while draft.lines()[1].item != ItemId::BREAD {
+            draft.cycle_item();
+        }
+        draft.nudge(-2);
+        while draft.lines()[0].item != ItemId::GRASS {
+            draft.select(0);
+            draft.cycle_item();
+        }
+        let fair = recipe_menu((1280, 720), &draft, view);
+        assert_eq!(keep(&fair), Some(true), "{}", fair.hint.text);
+        let said = recipe_menu((1280, 720), &draft, RecipeView { note: "kept" });
+        assert_eq!(said.hint.text, "kept");
     }
 
     proptest! {
@@ -794,12 +1010,45 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_edit_changes_the_cost_a_row_shows_and_needs() {
+        use crate::scripting::program::{Block, Plan, Program};
+        let (id, _) = library::find("tower").expect("tower exists");
+        let dear = Program::try_new(
+            (0..10)
+                .map(|_| Block::Do(Plan::Hop { by: [0, 1, 0] }))
+                .collect(),
+        )
+        .unwrap();
+        let mut edits = ScriptEdits::default();
+        edits.set(id, dear.clone()).unwrap();
+        let cost = dear.fuel_cost();
+        assert_eq!(
+            describe_script(id, &edits),
+            Some(format!("tower - {cost} fuel"))
+        );
+        let mut inventory = Inventory::default();
+        inventory.add(ItemId::FUEL, cost - 1).unwrap();
+        let startable = |edits: &ScriptEdits| {
+            script_panel((1280, 720), &inventory, false, edits)
+                .rows
+                .iter()
+                .find(|row| row.script == id)
+                .map(|row| row.startable)
+        };
+        assert_eq!(startable(&edits), Some(false));
+        assert_eq!(startable(&ScriptEdits::default()), Some(true));
+    }
+
+    #[test]
     fn a_script_row_reads_as_its_name_and_fuel_cost() {
         assert_eq!(
-            describe_script(ScriptId(0)).as_deref(),
+            describe_script(ScriptId(0), &ScriptEdits::default()).as_deref(),
             Some("tower - 3 fuel")
         );
-        assert_eq!(describe_script(ScriptId(200)), None);
+        assert_eq!(
+            describe_script(ScriptId(200), &ScriptEdits::default()),
+            None
+        );
     }
 
     #[test]
@@ -812,7 +1061,12 @@ mod tests {
 
     #[test]
     fn the_script_panel_lists_only_scripts_that_need_no_aim() {
-        let panel = script_panel((1280, 720), &Inventory::default(), false);
+        let panel = script_panel(
+            (1280, 720),
+            &Inventory::default(),
+            false,
+            &ScriptEdits::default(),
+        );
         assert!(panel.rows.iter().all(|row| {
             library::get(row.script).is_some_and(|script| script.target == Target::Feet)
         }));
@@ -820,11 +1074,23 @@ mod tests {
 
     #[test]
     fn the_hack_menu_says_what_to_aim_at_when_it_is_empty() {
-        let empty = hack_panel((1280, 720), &Inventory::default(), false, &[]);
+        let empty = hack_panel(
+            (1280, 720),
+            &Inventory::default(),
+            false,
+            &[],
+            &ScriptEdits::default(),
+        );
         assert!(empty.rows.is_empty());
         assert_eq!(empty.hint.text, HACK_NONE);
         let ids: Vec<_> = library::ids_for(Target::Mob).collect();
-        let full = hack_panel((1280, 720), &Inventory::default(), false, &ids);
+        let full = hack_panel(
+            (1280, 720),
+            &Inventory::default(),
+            false,
+            &ids,
+            &ScriptEdits::default(),
+        );
         assert_eq!(full.hint.text, HACK_HINT);
         assert_eq!(full.title.text, HACK_TITLE);
     }
@@ -834,7 +1100,7 @@ mod tests {
         let mut inventory = Inventory::default();
         inventory.add(ItemId::FUEL, 3).unwrap();
         let startable = |running| {
-            script_panel((1280, 720), &inventory, running)
+            script_panel((1280, 720), &inventory, running, &ScriptEdits::default())
                 .rows
                 .iter()
                 .map(|row| (library::get(row.script).map(|s| s.name), row.startable))
@@ -852,7 +1118,7 @@ mod tests {
         fn script_rows_fit_and_clicks_find_them(
             size in size(), fx in 0.0f32..1.0, fy in 0.0f32..1.0,
         ) {
-            let panel = script_panel(size, &Inventory::default(), false);
+            let panel = script_panel(size, &Inventory::default(), false, &ScriptEdits::default());
             prop_assert_eq!(panel.rows.len(), library::ids_for(Target::Feet).count());
             let (width, height) = (size.0 as f32, size.1 as f32);
             prop_assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);
@@ -874,7 +1140,7 @@ mod tests {
             size in size(), fx in 0.0f32..1.0, fy in 0.0f32..1.0, count in 0usize..6,
         ) {
             let ids: Vec<_> = library::ids_for(Target::Block).take(count).collect();
-            let panel = hack_panel(size, &Inventory::default(), false, &ids);
+            let panel = hack_panel(size, &Inventory::default(), false, &ids, &ScriptEdits::default());
             prop_assert_eq!(panel.rows.len(), ids.len());
             let (width, height) = (size.0 as f32, size.1 as f32);
             prop_assert!(panel.rect.x >= 0.0 && panel.rect.x + panel.rect.width <= width);

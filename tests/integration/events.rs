@@ -11,6 +11,7 @@ use minecraft_clone::events::persist::{decode, encode};
 use minecraft_clone::events::redo::RedoStack;
 use minecraft_clone::events::replay::replay_chunk;
 use minecraft_clone::events::rewind::{inverse_run, log_action, rewind_events};
+use minecraft_clone::events::walk::{bridged, checkpoints};
 use minecraft_clone::inventory::model::Inventory;
 use minecraft_clone::inventory::service::{
     gather_block, gather_events, place_events, place_from_stock,
@@ -19,7 +20,8 @@ use minecraft_clone::items::registry::ItemId;
 use minecraft_clone::mobs::model::Mobs;
 use minecraft_clone::mobs::service::{clear_events, despawn_event, spawn_event, strike_events};
 use minecraft_clone::player::model::Player;
-use minecraft_clone::shared::event::{Event, MobId};
+use minecraft_clone::player::service::teleport;
+use minecraft_clone::shared::event::{Event, MobId, Spot};
 use minecraft_clone::shared::voxel::{BlockId, ChunkPos, WorldPos};
 use minecraft_clone::survival::model::{Meter, Stats};
 use minecraft_clone::survival::service::{eat, eat_events};
@@ -286,7 +288,21 @@ struct Game {
 }
 
 impl Game {
+    fn with(player: Player) -> Self {
+        Self {
+            world: World::default(),
+            player,
+            pack: Inventory::default(),
+            stats: Stats::default(),
+            mobs: Mobs::default(),
+            log: EventLog::new(),
+        }
+    }
+
+    /// Commits as the game does: the checkpoints are logged but not applied, since the player
+    /// and the mobs already stand where they say.
     fn commit(&mut self, events: &[Event], kind: ActionKind) {
+        let walked = checkpoints(&self.log, &self.player, &self.mobs, events, kind);
         let mut stage = Stage {
             world: &mut self.world,
             player: &mut self.player,
@@ -295,7 +311,179 @@ impl Game {
             mobs: &mut self.mobs,
         };
         assert_eq!(apply_all(&mut stage, events), Ok(()));
-        log_action(&mut self.log, events, kind);
+        let logged: Vec<Event> = walked.iter().chain(events).copied().collect();
+        log_action(&mut self.log, &logged, kind);
+    }
+
+    /// The player walks to `x`: no event, as the physics step does it.
+    fn walk_to(&mut self, x: f32) {
+        assert!(
+            teleport(&mut self.player, Vec3::new(x, 3.0, 0.5)).is_ok(),
+            "{x} is not a position the player can walk to"
+        );
+    }
+
+    fn spot(&self) -> Spot {
+        Spot::from_vec3(self.player.position())
+    }
+
+    /// An edit that sets the block at `x` to `new`.
+    fn block_edit(&self, x: i32, new: u16) -> Vec<Event> {
+        let pos = WorldPos { x, y: 0, z: 0 };
+        vec![Event::BlockSet {
+            pos,
+            old: self.world.block_at(pos),
+            new: BlockId(new),
+        }]
+    }
+
+    /// `Z`: undoes the latest live edit, first walking the player to where it left them.
+    fn rewind(&mut self, redo: &mut RedoStack) -> bool {
+        let Some(events) = rewind_events(&self.log) else {
+            return false;
+        };
+        let events = bridged(events, self.spot());
+        self.commit(&events, ActionKind::Rewind);
+        redo.record(&events);
+        true
+    }
+
+    /// `Y`: brings back the edit `Z` undid last.
+    fn redo(&mut self, redo: &mut RedoStack) -> bool {
+        let Some(events) = redo.take() else {
+            return false;
+        };
+        let events = bridged(events, self.spot());
+        self.commit(&events, ActionKind::Redo);
+        true
+    }
+}
+
+// An edit records where the player stood. Walking on does not change what `Z` does: it walks
+// them back to where the log last had them, undoes the edit, and `Y` is the exact opposite,
+// including where the player was standing when `Z` was pressed.
+#[test]
+fn rewind_walks_the_player_back_and_redo_undoes_that_exactly() {
+    let mut game = Game::with(Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap());
+    let mut redo = RedoStack::default();
+    let start = game.spot();
+    let wall = WorldPos { x: 1, y: 0, z: 0 };
+    let bare = game.world.block_at(wall);
+
+    let first = game.block_edit(0, 1);
+    game.commit(&first, ActionKind::Edit);
+    game.walk_to(4.5);
+    let second = game.block_edit(1, 2);
+    game.commit(&second, ActionKind::Edit);
+    game.walk_to(9.5);
+    let pressed_at = game.spot();
+
+    assert!(game.rewind(&mut redo));
+    assert_eq!(game.spot(), start);
+    assert_eq!(game.world.block_at(wall), bare);
+
+    game.walk_to(20.5);
+    let before_redo = game.spot();
+    assert!(game.redo(&mut redo));
+    assert_eq!(game.world.block_at(wall), BlockId(2));
+    assert_eq!(game.spot(), pressed_at);
+
+    // The redo is an edit like any other, and `Z` is its exact opposite: the block goes and
+    // the player is back where they stood before pressing `Y`.
+    game.walk_to(1.5);
+    assert!(game.rewind(&mut redo));
+    assert_eq!(game.spot(), before_redo);
+    assert_eq!(game.world.block_at(wall), bare);
+}
+
+// A log that was saved and read back puts the redo stack, and the walks inside it, back too.
+#[test]
+fn the_walk_in_a_rewound_edit_survives_a_save() {
+    let mut game = Game::with(Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap());
+    let mut redo = RedoStack::default();
+    let first = game.block_edit(0, 1);
+    game.commit(&first, ActionKind::Edit);
+    game.walk_to(6.5);
+    let second = game.block_edit(1, 2);
+    game.commit(&second, ActionKind::Edit);
+    game.walk_to(12.5);
+    assert!(game.rewind(&mut redo));
+
+    let saved = decode(&encode(7, &game.log)).unwrap().log;
+    assert_eq!(saved, game.log);
+    assert_eq!(RedoStack::from_log(&saved), redo);
+}
+
+// A mob that walked on is checkpointed when it is hit, so the log says where it was hit, and
+// undoing the whole history in reverse puts it, and then nothing, back exactly.
+#[test]
+fn a_mob_that_walked_is_checkpointed_when_hit_and_undoes_exactly() {
+    let mut game = Game::with(Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap());
+    let id = MobId::FIRST;
+    let spawn = spawn_event(id, Vec3::new(5.0, 3.0, 5.0));
+    game.commit(&[spawn], ActionKind::Passive);
+    let from = Spot::from_vec3(Vec3::new(5.0, 3.0, 5.0));
+    let to = Spot::from_vec3(Vec3::new(2.0, 3.0, 1.0));
+    game.mobs.move_to(id, from, to).unwrap();
+
+    let hit = strike_events(id, game.mobs.get(id).unwrap(), Damage::try_new(4).unwrap());
+    game.commit(&hit, ActionKind::Passive);
+    assert!(game.log.iter().any(|event| {
+        *event
+            == Event::MobMoved {
+                id,
+                old: from,
+                new: to,
+            }
+    }));
+    assert_eq!(game.log.mob_spot(id), Some(to));
+
+    let logged: Vec<Event> = game.log.iter().copied().collect();
+    for event in inverse_run(&logged) {
+        let mut stage = Stage {
+            world: &mut game.world,
+            player: &mut game.player,
+            inventory: &mut game.pack,
+            stats: &mut game.stats,
+            mobs: &mut game.mobs,
+        };
+        assert_eq!(apply(&mut stage, &event), Ok(()));
+    }
+    assert_eq!(game.mobs, Mobs::default());
+}
+
+proptest! {
+    // However the player walks between edits and between undos, undoing every edit leaves the
+    // world as it began and the player where the first edit found them, and redoing every one
+    // brings back the world after the last.
+    #[test]
+    fn walking_between_rewinds_and_redos_never_stops_them_working(
+        edits in prop::collection::vec((-30i32..30, 1u16..4, -50.0f32..50.0), 1..8),
+        paths in prop::collection::vec(-50.0f32..50.0, 16),
+    ) {
+        let mut game = Game::with(Player::try_new(Vec3::new(0.5, 3.0, 0.5)).unwrap());
+        let mut redo = RedoStack::default();
+        let mut first_spot = None;
+        for &(x, block, at) in &edits {
+            game.walk_to(at);
+            first_spot.get_or_insert(game.spot());
+            let events = game.block_edit(x, block);
+            game.commit(&events, ActionKind::Edit);
+        }
+        let after = game.world.clone();
+
+        for (index, _) in edits.iter().enumerate() {
+            game.walk_to(paths[index]);
+            prop_assert!(game.rewind(&mut redo));
+        }
+        prop_assert_eq!(&game.world, &World::default());
+        prop_assert_eq!(Some(game.spot()), first_spot);
+
+        for (index, _) in edits.iter().enumerate() {
+            game.walk_to(paths[8 + index]);
+            prop_assert!(game.redo(&mut redo));
+        }
+        prop_assert_eq!(&game.world, &after);
     }
 }
 
@@ -376,9 +564,16 @@ fn mob_events_are_passive_survive_a_save_and_undo_exactly() {
     game.commit(&killed, ActionKind::Passive);
     assert!(game.mobs.is_empty());
 
-    // `Z` undoes the gift, not the zombie's life and death.
+    // `Z` undoes the gift, not the zombie's life and death. The gift also logged where the
+    // player stood (here the player never walked, so the move is of no length), and its undo
+    // takes that back too.
     let undo = rewind_events(&game.log).unwrap();
-    assert_eq!(undo, inverse_run(&gift));
+    let stood = Event::PlayerMoved {
+        old: game.spot(),
+        new: game.spot(),
+    };
+    let edit: Vec<Event> = std::iter::once(stood).chain(gift.iter().copied()).collect();
+    assert_eq!(undo, inverse_run(&edit));
 
     // A save and a reload keep every record, and only blocks are replayed into chunks.
     let saved = decode(&encode(117, &game.log)).unwrap();

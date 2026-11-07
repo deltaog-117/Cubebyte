@@ -131,7 +131,8 @@ impl World {
             | Event::HealthChanged { .. }
             | Event::MobSpawned { .. }
             | Event::MobRemoved { .. }
-            | Event::MobHealthChanged { .. } => Ok(()),
+            | Event::MobHealthChanged { .. }
+            | Event::MobMoved { .. } => Ok(()),
             Event::BlockSet { pos, old, new } => {
                 let found = self.block_at(pos);
                 if found != old {

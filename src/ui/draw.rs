@@ -265,7 +265,12 @@ mod tests {
             hover in prop::option::of(0u8..4),
             running in any::<bool>(),
         ) {
-            let panel = script_panel((width, height), &Inventory::default(), running);
+            let panel = script_panel(
+                (width, height),
+                &Inventory::default(),
+                running,
+                &crate::programs::scripts::ScriptEdits::default(),
+            );
             let (vertices, indices) = script_overlay(&panel, (width, height), hover.map(ScriptId));
             prop_assert!(!indices.is_empty() && indices.len() % 3 == 0);
             prop_assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));

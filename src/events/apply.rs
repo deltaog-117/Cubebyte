@@ -68,7 +68,8 @@ pub enum StageError {
 /// - [`StageError::BadHeld`] when the event's `new` is not a stack the game can hold.
 /// - [`StageError::Meter`] when a meter change would leave `0..=20`.
 /// - [`StageError::Mob`] when a spawn names a mob already there, a removal or hit names one
-///   that is not or whose health differs, or a health change would leave `0..=20`.
+///   that is not or whose health differs, a health change would leave `0..=20`, or a move
+///   starts from where the mob does not stand.
 ///
 /// The stage is left unchanged on any error.
 pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
@@ -82,6 +83,11 @@ pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
                     expected: old,
                     found,
                 });
+            }
+            // A checkpoint taken where the player already stood moves nobody, so it must not
+            // stop their fall either.
+            if old == new {
+                return Ok(());
             }
             Ok(teleport(stage.player, new.to_vec3())?)
         }
@@ -108,6 +114,7 @@ pub fn apply(stage: &mut Stage<'_>, event: &Event) -> Result<(), StageError> {
         Event::MobSpawned { id, at, health } => Ok(stage.mobs.spawn(id, at.to_vec3(), health)?),
         Event::MobRemoved { id, health, .. } => Ok(stage.mobs.remove(id, health)?),
         Event::MobHealthChanged { id, by } => Ok(stage.mobs.shift_health(id, by)?),
+        Event::MobMoved { id, old, new } => Ok(stage.mobs.move_to(id, old, new)?),
     }
 }
 

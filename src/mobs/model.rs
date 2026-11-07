@@ -6,7 +6,7 @@ use glam::Vec3;
 use thiserror::Error;
 
 use crate::shared::body::{Body, BodyError};
-use crate::shared::event::MobId;
+use crate::shared::event::{MobId, Spot};
 
 /// Half the width of the zombie's box, which is as deep as it is wide.
 pub const HALF_WIDTH: f32 = 0.3;
@@ -84,6 +84,13 @@ pub enum MobError {
     /// A health change that would leave `0..=MAX_HEALTH`.
     #[error("mob {id:?} cannot go from {from} health by {by}")]
     HealthRange { id: MobId, from: u8, by: i8 },
+    /// The mob does not stand where the move was recorded from.
+    #[error("stale move of mob {id:?}: expected it at {expected:?} but found {found:?}")]
+    StaleMove {
+        id: MobId,
+        expected: Spot,
+        found: Spot,
+    },
     #[error(transparent)]
     Body(#[from] BodyError),
 }
@@ -91,8 +98,9 @@ pub enum MobError {
 /// Every mob that is alive, by id.
 ///
 /// Mobs come and go and lose health only through the three methods below, which the event
-/// door calls, so the log always says how the store got to be what it is. Walking is not an
-/// event yet, so [`Mobs::get_mut`] hands out a mob to be stepped; its health is private to
+/// door calls, so the log always says how the store got to be what it is. Walking is not
+/// an event on every step, only at the checkpoints [`Mobs::move_to`] undoes and redoes, so
+/// [`Mobs::get_mut`] hands out a mob to be stepped; its health is private to
 /// this feature and only the store changes it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mobs {
@@ -118,7 +126,7 @@ impl Mobs {
     }
 
     /// Takes mob `id` out, if it has `health`. Where it stands is not checked: it has walked
-    /// since it appeared, and walking is not an event.
+    /// since it appeared, and its walk is logged only at checkpoints.
     ///
     /// # Errors
     ///
@@ -158,6 +166,33 @@ impl Mobs {
                 from: zombie.health,
                 by,
             })?;
+        Ok(())
+    }
+
+    /// Puts mob `id` at `new`, standing still, if it stands at `old`. Walking itself is not
+    /// an event: this is how a logged checkpoint is undone or redone.
+    ///
+    /// # Errors
+    ///
+    /// - [`MobError::Missing`] if `id` is not in the world.
+    /// - [`MobError::StaleMove`] if it stands anywhere but `old`.
+    /// - [`MobError::Body`] if `new` is not finite.
+    ///
+    /// The store is unchanged on any error.
+    pub fn move_to(&mut self, id: MobId, old: Spot, new: Spot) -> Result<(), MobError> {
+        let zombie = self.zombies.get_mut(&id).ok_or(MobError::Missing(id))?;
+        let found = Spot::from_vec3(zombie.position());
+        if found != old {
+            return Err(MobError::StaleMove {
+                id,
+                expected: old,
+                found,
+            });
+        }
+        // A move to where it already stands changes nothing, not even its speed.
+        if new != old {
+            zombie.body.place(new.to_vec3())?;
+        }
         Ok(())
     }
 

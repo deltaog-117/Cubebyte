@@ -55,7 +55,9 @@ fn first_id() -> u8 {
     u8::try_from(registry::ids().count()).unwrap_or(u8::MAX)
 }
 
-fn name_is_valid(name: &str) -> bool {
+/// Whether `name` is a name a recipe may have: 1 to [`MAX_NAME`] lower case letters, digits, `-`
+/// or `_`. It says nothing about whether the name is taken.
+pub fn name_is_valid(name: &str) -> bool {
     (1..=MAX_NAME).contains(&name.chars().count())
         && name
             .chars()
@@ -105,6 +107,31 @@ impl CustomRecipes {
         self.list.get(usize::from(id.0.checked_sub(first_id())?))
     }
 
+    /// A valid name no recipe has yet: `mine`, then `mine2`, `mine3` and so on, or `None` when
+    /// all [`MAX_CUSTOM`] places are taken.
+    pub fn suggest_name(&self) -> Option<String> {
+        if self.list.len() >= MAX_CUSTOM {
+            return None;
+        }
+        (1..=MAX_CUSTOM + 1)
+            .map(|n| {
+                if n == 1 {
+                    "mine".to_owned()
+                } else {
+                    format!("mine{n}")
+                }
+            })
+            .find(|name| self.is_free(name))
+    }
+
+    /// Whether no built-in recipe and no recipe of the player's has `name`.
+    pub fn is_free(&self, name: &str) -> bool {
+        !registry::ids()
+            .filter_map(registry::get)
+            .any(|recipe| recipe.name == name)
+            && !self.list.iter().any(|recipe| recipe.name == name)
+    }
+
     /// Adds a recipe and returns its ID.
     ///
     /// # Errors
@@ -116,11 +143,7 @@ impl CustomRecipes {
         if !name_is_valid(name) {
             return Err(CustomError::BadName);
         }
-        let taken = registry::ids()
-            .filter_map(registry::get)
-            .any(|recipe| recipe.name == name)
-            || self.list.iter().any(|recipe| recipe.name == name);
-        if taken {
+        if !self.is_free(name) {
             return Err(CustomError::Taken(name.to_owned()));
         }
         if self.list.len() >= MAX_CUSTOM {
@@ -205,6 +228,18 @@ mod tests {
             recipes.add("mine", program()),
             Err(CustomError::Taken("mine".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_suggested_name_is_valid_and_free() {
+        let mut recipes = CustomRecipes::default();
+        assert_eq!(recipes.suggest_name().as_deref(), Some("mine"));
+        for _ in 0..MAX_CUSTOM {
+            let name = recipes.suggest_name().unwrap();
+            assert!(name_is_valid(&name));
+            recipes.add(&name, program()).unwrap();
+        }
+        assert_eq!(recipes.suggest_name(), None);
     }
 
     #[test]

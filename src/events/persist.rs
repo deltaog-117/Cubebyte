@@ -26,6 +26,7 @@
 //! | 12 | mob removed | mob id (4), x, y, z bits (4 each), health (1) |
 //! | 13 | mob health changed | mob id (4), by (1, signed) |
 //! | 14 | redo ends | none: the events since the last end bring an undone edit back |
+//! | 15 | mob moved | mob id (4), old x, y, z bits (4 each), new x, y, z bits (4 each) |
 //!
 //! The record count is not stored: the records run to the end of the file, so a file cut
 //! short mid-record is rejected instead of silently losing its last event. Version 1 held
@@ -38,7 +39,9 @@
 //! version 6, when mobs did. A restart does not bring mobs back: only block events are replayed
 //! into chunks, so these records stay in the file as history. Tag 14 came with version 7, so
 //! the redo stack can be rebuilt at startup: a version 6 file marks a redo as a plain edit, and
-//! reads back with an empty stack.
+//! reads back with an empty stack. Tag 15 came with version 8, when walking got checkpoints:
+//! tag 2 now also records where the player stood at each edit, and tag 15 where a mob stood
+//! when it was hit or left. Older files simply hold none.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,7 +55,7 @@ use crate::shared::voxel::{BlockId, WorldPos};
 const MAGIC: [u8; 4] = *b"MCEL";
 
 /// The version written. Bump it when the layout changes.
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 
 /// The oldest version still read. A layout that cannot be read unchanged is refused, not
 /// guessed at.
@@ -75,6 +78,7 @@ const TAG_MOB_SPAWNED: u8 = 11;
 const TAG_MOB_REMOVED: u8 = 12;
 const TAG_MOB_HEALTH_CHANGED: u8 = 13;
 const TAG_REDO_END: u8 = 14;
+const TAG_MOB_MOVED: u8 = 15;
 
 /// Bytes a base block takes in a file, tag included.
 const BASE_RECORD_LEN: usize = 1 + 3 * 4 + 2;
@@ -88,6 +92,7 @@ const fn record_len(event: &Event) -> usize {
         Event::HungerChanged { .. } | Event::HealthChanged { .. } => 1 + 1,
         Event::MobSpawned { .. } | Event::MobRemoved { .. } => 1 + 4 + 3 * 4 + 1,
         Event::MobHealthChanged { .. } => 1 + 4 + 1,
+        Event::MobMoved { .. } => 1 + 4 + 6 * 4,
     }
 }
 
@@ -208,6 +213,13 @@ pub fn encode(seed: u64, log: &EventLog) -> Vec<u8> {
                 bytes.extend_from_slice(&id.0.to_le_bytes());
                 bytes.extend_from_slice(&by.to_le_bytes());
             }
+            Event::MobMoved { id, old, new } => {
+                bytes.push(TAG_MOB_MOVED);
+                bytes.extend_from_slice(&id.0.to_le_bytes());
+                for bits in old.to_bits().into_iter().chain(new.to_bits()) {
+                    bytes.extend_from_slice(&bits.to_le_bytes());
+                }
+            }
         }
     }
     bytes
@@ -295,6 +307,19 @@ pub fn decode(bytes: &[u8]) -> Result<SavedLog, DecodeError> {
                 id: MobId(u32::from_le_bytes(reader.take()?)),
                 by: i8::from_le_bytes(reader.take()?),
             }),
+            TAG_MOB_MOVED if version >= 8 => {
+                let id = MobId(u32::from_le_bytes(reader.take()?));
+                let mut spot = || -> Result<Spot, DecodeError> {
+                    Ok(Spot::from_bits([
+                        u32::from_le_bytes(reader.take()?),
+                        u32::from_le_bytes(reader.take()?),
+                        u32::from_le_bytes(reader.take()?),
+                    ]))
+                };
+                let old = spot()?;
+                let new = spot()?;
+                log.push(Event::MobMoved { id, old, new });
+            }
             TAG_PASSIVE_END if version >= 5 => log.end_action(ActionKind::Passive),
             TAG_RESPAWN_END if version >= 5 => log.end_action(ActionKind::Respawn),
             TAG_REDO_END if version >= 7 => log.end_action(ActionKind::Redo),
@@ -405,6 +430,13 @@ mod tests {
             }),
             (any::<u32>(), any::<i8>())
                 .prop_map(|(id, by)| Event::MobHealthChanged { id: MobId(id), by }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<[u32; 3]>()).prop_map(|(id, old, new)| {
+                Event::MobMoved {
+                    id: MobId(id),
+                    old: Spot::from_bits(old),
+                    new: Spot::from_bits(new),
+                }
+            }),
         ]
     }
 
@@ -626,8 +658,8 @@ mod tests {
     #[test]
     fn an_unknown_tag_is_rejected() {
         let mut bytes = encode(7, &EventLog::new());
-        bytes.extend_from_slice(&[15; BLOCK_RECORD_LEN]);
-        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(15)));
+        bytes.extend_from_slice(&[16; BLOCK_RECORD_LEN]);
+        assert_eq!(decode(&bytes), Err(DecodeError::UnknownEvent(16)));
     }
 
     #[test]

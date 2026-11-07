@@ -26,7 +26,7 @@ pub const ZONE_MAX: u16 = crate::events::rewind::HISTORY_WINDOW as u16;
 /// Furthest an offset may be written, in blocks. Farther is out of any script's range anyway.
 pub const OFFSET_MAX: i32 = 1000;
 
-const COMMANDS: [Spec; 9] = [
+const COMMANDS: [Spec; 10] = [
     Spec {
         name: "help",
         summary: "open this table",
@@ -114,6 +114,18 @@ const COMMANDS: [Spec; 9] = [
             _ => None,
         },
     },
+    Spec {
+        name: "recipe",
+        summary: "make one, or open the editor",
+        args: &[arg("name", ArgKind::Name), arg("steps", ArgKind::Steps)],
+        build: |values| match values {
+            [Value::Name(name), Value::Steps(program)] => Some(Request::Recipe {
+                name: name.clone(),
+                program: program.clone(),
+            }),
+            _ => None,
+        },
+    },
 ];
 
 /// The command at `id`, or `None` for a position no command uses.
@@ -161,6 +173,8 @@ mod tests {
             ArgKind::Count { .. } => "1".into(),
             ArgKind::Offset => "0".into(),
             ArgKind::Hack => "tower".into(),
+            ArgKind::Name => "loaf".into(),
+            ArgKind::Steps => String::new(),
         }
     }
 

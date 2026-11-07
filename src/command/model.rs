@@ -1,5 +1,6 @@
 //! The types a typed command is made of.
 
+use crate::crafting::program::RecipeProgram;
 use crate::items::registry::ItemId;
 use crate::scripting::library::ScriptId;
 use crate::shared::voxel::BlockId;
@@ -24,6 +25,11 @@ pub enum ArgKind {
     Offset,
     /// The name of a ready-made script or quick-hack.
     Hack,
+    /// A name for a recipe the player makes.
+    Name,
+    /// Everything left on the line, as `take <item> <count>` and `make <item> <count>` steps.
+    /// It may be empty, and it must be the last argument.
+    Steps,
 }
 
 /// One word a command takes.
@@ -34,7 +40,7 @@ pub struct ArgSpec {
 }
 
 /// A word after it was checked against its [`ArgKind`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     Item(ItemId),
     Block(BlockId),
@@ -42,10 +48,13 @@ pub enum Value {
     Count(u16),
     Offset(i32),
     Hack(ScriptId),
+    Name(String),
+    /// The checked recipe the steps make, or `None` when there were no steps.
+    Steps(Option<RecipeProgram>),
 }
 
 /// What a typed line asks for, with every word already checked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Open the table of commands.
     Help,
@@ -73,6 +82,11 @@ pub enum Request {
     /// Run this script or quick-hack, anchored on what it needs.
     Hack {
         script: ScriptId,
+    },
+    /// Make a recipe called `name`. With no steps the recipe editor opens under that name.
+    Recipe {
+        name: String,
+        program: Option<RecipeProgram>,
     },
 }
 

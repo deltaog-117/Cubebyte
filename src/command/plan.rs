@@ -1,13 +1,14 @@
 //! Turning a checked request into something the game already knows how to do.
 
 use crate::command::model::Request;
+use crate::crafting::program::RecipeProgram;
 use crate::scripting::library::ScriptId;
 use crate::scripting::model::Command;
 use crate::shared::voxel::WorldPos;
 use crate::simulation::action::Action;
 
 /// What the game does with a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Plan {
     /// Show the table of commands.
     Table,
@@ -20,6 +21,12 @@ pub enum Plan {
     /// Start this script or quick-hack, anchored on what it needs. The game finds the anchor,
     /// since the aim is not known here.
     Hack(ScriptId),
+    /// Keep this recipe under this name, or open the recipe editor under the name when there
+    /// is no program yet.
+    Recipe {
+        name: String,
+        program: Option<RecipeProgram>,
+    },
 }
 
 fn at(feet: WorldPos, by: [i32; 3]) -> WorldPos {
@@ -45,6 +52,7 @@ pub fn plan(request: Request, feet: WorldPos) -> Plan {
         Request::Redo => Plan::Do(Action::Redo),
         Request::Zone { back } => Plan::Do(Action::ZoneRewind { centre: feet, back }),
         Request::Hack { script } => Plan::Hack(script),
+        Request::Recipe { name, program } => Plan::Recipe { name, program },
     }
 }
 
@@ -103,6 +111,26 @@ mod tests {
         assert_eq!(
             plan(Request::Hack { script }, cell(1, 2, 3)),
             Plan::Hack(script)
+        );
+    }
+
+    #[test]
+    fn a_recipe_is_left_to_the_game_to_keep_or_edit() {
+        let plan_of = |program| {
+            plan(
+                Request::Recipe {
+                    name: "loaf".into(),
+                    program,
+                },
+                cell(0, 0, 0),
+            )
+        };
+        assert_eq!(
+            plan_of(None),
+            Plan::Recipe {
+                name: "loaf".into(),
+                program: None
+            }
         );
     }
 

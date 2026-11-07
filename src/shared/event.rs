@@ -96,12 +96,17 @@ pub enum Event {
     MobSpawned { id: MobId, at: Spot, health: u8 },
     /// Mob `id` left the world while standing at `at` with `health`: killed, dropped for
     /// being too far away, or cleared at a respawn. Undoing it puts the mob back as it was.
-    /// Walking is not an event, so `at` is where the mob stood when it went, and applying
-    /// the event does not check it; `id` and `health` are checked.
+    /// Walking is logged only at checkpoints ([`Event::MobMoved`]), so `at` is where the mob
+    /// stood when it went, and applying the event does not check it, because an undone spawn
+    /// removes a mob that has walked since; `id` and `health` are checked.
     MobRemoved { id: MobId, at: Spot, health: u8 },
     /// Mob `id` gained (`by` above zero) or lost health, by the amount it really moved. A
     /// change, not a set, like the player's meters.
     MobHealthChanged { id: MobId, by: i8 },
+    /// Mob `id` walked from `old` to `new`. Like the player's moves it is logged at checkpoints
+    /// (when the mob is hit or leaves), not on every step: the mob already stands at `new` when
+    /// it is logged, and undoing it puts the mob back at `old`.
+    MobMoved { id: MobId, old: Spot, new: Spot },
 }
 
 impl Event {
@@ -116,7 +121,8 @@ impl Event {
             | Self::HealthChanged { .. }
             | Self::MobSpawned { .. }
             | Self::MobRemoved { .. }
-            | Self::MobHealthChanged { .. } => None,
+            | Self::MobHealthChanged { .. }
+            | Self::MobMoved { .. } => None,
         }
     }
 
@@ -147,6 +153,11 @@ impl Event {
             Self::MobHealthChanged { id, by } => Self::MobHealthChanged {
                 id,
                 by: by.wrapping_neg(),
+            },
+            Self::MobMoved { id, old, new } => Self::MobMoved {
+                id,
+                old: new,
+                new: old,
             },
         }
     }
@@ -210,6 +221,13 @@ mod tests {
             }),
             (any::<u32>(), any::<i8>())
                 .prop_map(|(id, by)| Event::MobHealthChanged { id: MobId(id), by }),
+            (any::<u32>(), any::<[u32; 3]>(), any::<[u32; 3]>()).prop_map(|(id, old, new)| {
+                Event::MobMoved {
+                    id: MobId(id),
+                    old: Spot::from_bits(old),
+                    new: Spot::from_bits(new),
+                }
+            }),
         ]
     }
 
@@ -287,6 +305,15 @@ mod tests {
             None
         );
         assert_eq!(Event::MobHealthChanged { id: mob, by: -2 }.chunk(), None);
+        assert_eq!(
+            Event::MobMoved {
+                id: mob,
+                old: at,
+                new: at
+            }
+            .chunk(),
+            None
+        );
     }
 
     #[test]

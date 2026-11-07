@@ -1,8 +1,8 @@
 //! Append-only event log.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::shared::event::Event;
+use crate::shared::event::{Event, MobId, Spot};
 use crate::shared::voxel::{BlockId, ChunkPos, WorldPos};
 
 /// What one logged action was.
@@ -58,6 +58,17 @@ pub struct EventLog {
     base: HashMap<ChunkPos, HashMap<WorldPos, BlockId>>,
     // The records `compact` folded away since the last `take_folded`, oldest first.
     folded: Vec<Record>,
+    // Where the player and each mob stood at the newest position the log records, so the
+    // next checkpoint can say where the walk began. Worked out from the events as they are
+    // pushed, so it is no part of the history and does not count in equality.
+    spots: Spots,
+}
+
+/// The newest position the log records for the player and for each mob alive in it.
+#[derive(Clone, Debug, Default)]
+struct Spots {
+    player: Option<Spot>,
+    mobs: BTreeMap<MobId, Spot>,
 }
 
 impl PartialEq for EventLog {
@@ -68,12 +79,35 @@ impl PartialEq for EventLog {
 
 impl Eq for EventLog {}
 
+impl Spots {
+    fn note(&mut self, event: Event) {
+        match event {
+            Event::PlayerMoved { new, .. } => self.player = Some(new),
+            Event::MobSpawned { id, at, .. } => {
+                self.mobs.insert(id, at);
+            }
+            Event::MobMoved { id, new, .. } => {
+                self.mobs.insert(id, new);
+            }
+            Event::MobRemoved { id, .. } => {
+                self.mobs.remove(&id);
+            }
+            Event::BlockSet { .. }
+            | Event::SlotSet { .. }
+            | Event::HungerChanged { .. }
+            | Event::HealthChanged { .. }
+            | Event::MobHealthChanged { .. } => {}
+        }
+    }
+}
+
 impl EventLog {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn push(&mut self, event: Event) {
+        self.spots.note(event);
         if let Some(chunk) = event.chunk() {
             self.by_chunk
                 .entry(chunk)
@@ -81,6 +115,23 @@ impl EventLog {
                 .push(self.events.len());
         }
         self.events.push(event);
+    }
+
+    /// Where the log last put the player, or `None` before it has put them anywhere.
+    pub fn player_spot(&self) -> Option<Spot> {
+        self.spots.player
+    }
+
+    /// Where the log last put mob `id`, or `None` if it has not met that mob or it has left.
+    pub fn mob_spot(&self, id: MobId) -> Option<Spot> {
+        self.spots.mobs.get(&id).copied()
+    }
+
+    /// Forgets where everything was. A log read back from disk describes an earlier session:
+    /// the player and the mobs of this one start somewhere else, and the first checkpoint
+    /// must not claim a walk from there.
+    pub fn forget_spots(&mut self) {
+        self.spots = Spots::default();
     }
 
     /// Sets what `pos` is in the folded-away history.

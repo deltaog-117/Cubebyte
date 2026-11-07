@@ -1,7 +1,7 @@
 //! The text being typed into the command line.
 
 /// Most characters a line holds, so the prompt stays on screen.
-pub const MAX_LEN: usize = 48;
+pub const MAX_LEN: usize = 72;
 
 /// A line being typed. Only lowercase letters, digits, spaces and minus signs get in, which
 /// is everything a command is made of, so the text is always drawable and never needs escaping.

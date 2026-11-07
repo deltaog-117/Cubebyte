@@ -8,11 +8,15 @@
 //!
 //! A rule rests for [`REST_TICKS`] after it fires, so one that stays true cannot drain the
 //! pack every second.
+//!
+//! A rule has a [`Trigger`]: it either polls its test once a second, or fires right after the
+//! player does something ([`PlayerAction`]), optionally only if its test holds at that moment. A
+//! rule never reacts to what a script, a rewind or a replay does, so a rule cannot start itself.
 
 use thiserror::Error;
 
 use crate::scripting::model::{Answer, Denied, Query};
-use crate::scripting::program::{Program, Test};
+use crate::scripting::program::{Compare, Program, Read, Test};
 use crate::shared::voxel::WorldPos;
 
 /// Most rules at once.
@@ -24,9 +28,118 @@ pub const CHECK_EVERY: u64 = 20;
 /// Ticks a rule rests after it fires (ten seconds).
 pub const REST_TICKS: u64 = 200;
 
+/// The test a new rule starts with: act when hunger is low. An action rule that does not use
+/// its test keeps this one, and the programs file does not store an unused test.
+pub const DEFAULT_TEST: Test = Test {
+    read: Read::Hunger,
+    compare: Compare::Below,
+    than: 10,
+};
+
 /// Identifies a rule. IDs are not reused while the game runs, so a stale ID finds nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuleId(pub u8);
+
+/// What a rule can react to: something the player does, or something that happens to them or
+/// near them. The first five are the player's own acts; the last three are what the world did,
+/// worked out from the events it logged (see [`crate::logic::react`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerAction {
+    Break,
+    Place,
+    Craft,
+    Eat,
+    /// A hit on a mob.
+    Hit,
+    /// The player lost health: a mob's hit, or starving.
+    Hurt,
+    /// The player died and started over.
+    Respawn,
+    /// A mob appeared by itself, not by a script's command.
+    MobAppears,
+}
+
+impl PlayerAction {
+    /// Every kind, in the order the rules panel steps through them.
+    pub const ALL: [Self; 8] = [
+        Self::Break,
+        Self::Place,
+        Self::Craft,
+        Self::Eat,
+        Self::Hit,
+        Self::Hurt,
+        Self::Respawn,
+        Self::MobAppears,
+    ];
+
+    /// The word the panel and the programs file use.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Break => "break",
+            Self::Place => "place",
+            Self::Craft => "craft",
+            Self::Eat => "eat",
+            Self::Hit => "hit",
+            Self::Hurt => "hurt",
+            Self::Respawn => "respawn",
+            Self::MobAppears => "appear",
+        }
+    }
+
+    /// The kind written as `word`.
+    pub fn from_name(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == word)
+    }
+}
+
+/// When a rule looks at its test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    /// Once a second, firing when the test holds.
+    Poll,
+    /// Right after the player does `kind`. With `gated` the rule's test must hold at that
+    /// moment too; without it the test is kept but ignored.
+    On { kind: PlayerAction, gated: bool },
+}
+
+impl Trigger {
+    /// The next trigger in the cycle the rules panel steps through: poll, then each kind of
+    /// action, then poll again. A gate is carried from one action to the next.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Poll => Self::On {
+                kind: PlayerAction::ALL[0],
+                gated: false,
+            },
+            Self::On { kind, gated } => {
+                let at = PlayerAction::ALL
+                    .iter()
+                    .position(|k| *k == kind)
+                    .unwrap_or(0);
+                match PlayerAction::ALL.get(at + 1) {
+                    Some(&kind) => Self::On { kind, gated },
+                    None => Self::Poll,
+                }
+            }
+        }
+    }
+
+    /// The same trigger with its gate flipped; a polling rule has no gate and is unchanged.
+    pub fn with_gate_flipped(self) -> Self {
+        match self {
+            Self::Poll => Self::Poll,
+            Self::On { kind, gated } => Self::On {
+                kind,
+                gated: !gated,
+            },
+        }
+    }
+
+    /// Whether the rule's test is part of when it fires.
+    pub const fn uses_test(self) -> bool {
+        matches!(self, Self::Poll | Self::On { gated: true, .. })
+    }
+}
 
 /// What a rule's program and test are anchored on, which is what their offsets count from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +168,7 @@ impl Anchor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     test: Test,
+    trigger: Trigger,
     program: Program,
     anchor: Anchor,
     on: bool,
@@ -67,8 +181,18 @@ impl Rule {
         self.test
     }
 
+    pub fn trigger(&self) -> Trigger {
+        self.trigger
+    }
+
     pub fn program(&self) -> &Program {
         &self.program
+    }
+
+    /// Whether the rule's own condition holds with its anchor on `cell`: its test when the
+    /// trigger uses it (a read that is refused counts as not holding), and always otherwise.
+    fn holds(&self, cell: WorldPos, ask: &mut dyn FnMut(Query) -> Result<Answer, Denied>) -> bool {
+        !self.trigger.uses_test() || self.test.check(cell, ask).unwrap_or(false)
     }
 
     /// What the program's working cell starts on, and the test's reads count from.
@@ -139,6 +263,22 @@ impl Rules {
         program: Program,
         anchor: Anchor,
     ) -> Result<RuleId, RulesError> {
+        self.add_with(Trigger::Poll, test, program, anchor)
+    }
+
+    /// Like [`Self::add`], with a chosen [`Trigger`]. `test` is what a polling or gated rule
+    /// checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RulesError::Full`] when [`MAX_RULES`] rules exist.
+    pub fn add_with(
+        &mut self,
+        trigger: Trigger,
+        test: Test,
+        program: Program,
+        anchor: Anchor,
+    ) -> Result<RuleId, RulesError> {
         if self.list.len() >= MAX_RULES {
             return Err(RulesError::Full);
         }
@@ -150,6 +290,7 @@ impl Rules {
             id,
             Rule {
                 test,
+                trigger,
                 program,
                 anchor,
                 on: true,
@@ -185,6 +326,18 @@ impl Rules {
         Ok(())
     }
 
+    /// Gives rule `id` another trigger. It is ready to fire again at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RulesError::Missing`] for an ID no rule has.
+    pub fn set_trigger(&mut self, id: RuleId, trigger: Trigger) -> Result<(), RulesError> {
+        let rule = self.get_mut(id).ok_or(RulesError::Missing)?;
+        rule.trigger = trigger;
+        rule.rests_until = 0;
+        Ok(())
+    }
+
     /// Switches rule `id` on or off and returns the new state, or `None` for a missing rule.
     pub fn switch(&mut self, id: RuleId) -> Option<bool> {
         let rule = self.get_mut(id)?;
@@ -199,8 +352,8 @@ impl Rules {
         self.list.len() != before
     }
 
-    /// The first rule that is on, not resting and whose test holds, if `tick` is one of the
-    /// ticks rules are looked at. `resolve` turns an anchor into the cell it stands for right
+    /// The first polling rule that is on, not resting and whose test holds, if `tick` is one of
+    /// the ticks rules are looked at. `resolve` turns an anchor into the cell it stands for right
     /// now; a rule whose anchor has no cell (no mob in range) is skipped. A read that is
     /// refused counts as a test that does not hold. Nothing changes: call [`Self::fired`] once
     /// the rule really started.
@@ -216,9 +369,26 @@ impl Rules {
         self.list
             .iter()
             .filter(|(_, rule)| rule.on && !rule.is_resting(tick))
-            .find(|(_, rule)| {
-                resolve(rule.anchor).is_some_and(|cell| rule.test.check(cell, ask).unwrap_or(false))
-            })
+            .filter(|(_, rule)| rule.trigger == Trigger::Poll)
+            .find(|(_, rule)| resolve(rule.anchor).is_some_and(|cell| rule.holds(cell, ask)))
+            .map(|(id, _)| *id)
+    }
+
+    /// The first rule that reacts to the player doing `kind` that is on, not resting and, when
+    /// it is gated, whose test holds right now. Called when the action happened; nothing
+    /// changes until [`Self::fired`].
+    pub fn due_on(
+        &self,
+        kind: PlayerAction,
+        tick: u64,
+        resolve: &mut dyn FnMut(Anchor) -> Option<WorldPos>,
+        ask: &mut dyn FnMut(Query) -> Result<Answer, Denied>,
+    ) -> Option<RuleId> {
+        self.list
+            .iter()
+            .filter(|(_, rule)| rule.on && !rule.is_resting(tick))
+            .filter(|(_, rule)| matches!(rule.trigger, Trigger::On { kind: k, .. } if k == kind))
+            .find(|(_, rule)| resolve(rule.anchor).is_some_and(|cell| rule.holds(cell, ask)))
             .map(|(id, _)| *id)
     }
 
@@ -429,6 +599,111 @@ mod tests {
             seen.push(anchor);
         }
         assert_eq!(seen, [Anchor::Feet, Anchor::Mob, Anchor::Cell(pin)]);
+    }
+
+    fn on(kind: PlayerAction, gated: bool) -> Trigger {
+        Trigger::On { kind, gated }
+    }
+
+    #[test]
+    fn an_action_rule_is_not_polled_and_a_polling_rule_is_not_an_action_rule() {
+        let mut rules = Rules::default();
+        let reacts = rules
+            .add_with(
+                on(PlayerAction::Break, false),
+                hunger_below(10),
+                program(),
+                cell(),
+            )
+            .unwrap();
+        let polls = rules.add(hunger_below(10), program(), cell()).unwrap();
+        assert_eq!(rules.due(0, &mut resolve, &mut answer(0)), Some(polls));
+        rules.fired(polls, 0);
+        assert_eq!(rules.due(CHECK_EVERY, &mut resolve, &mut answer(0)), None);
+        assert_eq!(
+            rules.due_on(PlayerAction::Break, 1, &mut resolve, &mut answer(0)),
+            Some(reacts)
+        );
+        assert_eq!(
+            rules.due_on(PlayerAction::Place, 1, &mut resolve, &mut answer(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ungated_rule_ignores_its_test_and_a_gated_one_checks_it() {
+        let mut rules = Rules::default();
+        let id = rules
+            .add_with(
+                on(PlayerAction::Eat, false),
+                hunger_below(10),
+                program(),
+                cell(),
+            )
+            .unwrap();
+        let due = |rules: &Rules, number| {
+            rules.due_on(PlayerAction::Eat, 0, &mut resolve, &mut answer(number))
+        };
+        assert_eq!(due(&rules, 99), Some(id));
+        rules.set_trigger(id, on(PlayerAction::Eat, true)).unwrap();
+        assert_eq!(due(&rules, 99), None);
+        assert_eq!(due(&rules, 3), Some(id));
+        // A refused read counts as a test that does not hold.
+        assert_eq!(
+            rules.due_on(PlayerAction::Eat, 0, &mut resolve, &mut |_| Err(
+                Denied::OverLimit
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn an_action_rule_rests_like_any_other_and_waits_for_its_anchor() {
+        let mut rules = Rules::default();
+        let id = rules
+            .add_with(
+                on(PlayerAction::Hit, false),
+                hunger_below(10),
+                program(),
+                cell(),
+            )
+            .unwrap();
+        rules.fired(id, 5);
+        let due = |rules: &Rules, tick| {
+            rules.due_on(PlayerAction::Hit, tick, &mut resolve, &mut answer(0))
+        };
+        assert_eq!(due(&rules, 6), None);
+        assert_eq!(due(&rules, 5 + REST_TICKS), Some(id));
+        rules.set_anchor(id, Anchor::Mob).unwrap();
+        // No mob in range: the anchor has no cell, so the rule is skipped.
+        assert_eq!(due(&rules, 5 + REST_TICKS), None);
+    }
+
+    #[test]
+    fn stepping_the_trigger_visits_every_kind_once_and_comes_back() {
+        let mut trigger = Trigger::Poll;
+        let mut seen = Vec::new();
+        for _ in 0..=PlayerAction::ALL.len() {
+            trigger = trigger.next();
+            seen.push(trigger);
+        }
+        assert_eq!(seen.last(), Some(&Trigger::Poll));
+        assert_eq!(seen.len(), PlayerAction::ALL.len() + 1);
+        assert_eq!(Trigger::Poll.with_gate_flipped(), Trigger::Poll);
+        assert!(!on(PlayerAction::Craft, false).uses_test());
+        assert!(
+            on(PlayerAction::Craft, false)
+                .with_gate_flipped()
+                .uses_test()
+        );
+    }
+
+    #[test]
+    fn every_kind_is_found_by_its_own_name() {
+        for kind in PlayerAction::ALL {
+            assert_eq!(PlayerAction::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(PlayerAction::from_name("jump"), None);
     }
 
     proptest! {

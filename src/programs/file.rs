@@ -1,26 +1,43 @@
-//! The programs file (`programs.nib`): every rule and every player recipe, as readable text.
+//! The programs file (`programs.nib`): every rule, every player recipe and every edited ready-made
+//! script, as readable text.
 //!
 //! ```text
-//! nib 1
+//! nib 3
 //!
 //! rule on feet
 //! when hunger below 8
 //! give bread 1
 //! end
 //!
+//! rule on feet
+//! on break
+//! when count fuel below 3
+//! give fuel 2
+//! end
+//!
 //! recipe loaf
 //! take grass 3
 //! make bread 1
 //! end
+//!
+//! script tower
+//! build stone 0 1 0
+//! end
 //! ```
 //!
-//! The first line is the format version; a file with another version is refused instead of
-//! guessed at. A rule's header is `rule on|off` and an anchor (`feet`, `mob` or `cell x y z`),
-//! its `when` line is the test, and the lines up to `end` are its program. A recipe's header is
-//! `recipe <name>`. Everything goes through the same checks as blocks in the game, so the file
-//! can never hold a program the editor could not build. Reading is all or nothing: one bad line
-//! refuses the file and names the line, and the game then leaves the file alone on exit so a
-//! typo cannot cost the player their work.
+//! The first line is the format version: this game writes `nib 3` and reads `nib 1` to
+//! `nib 3`; a file with another version is refused instead of guessed at. A rule's header is
+//! `rule on|off` and an anchor (`feet`, `mob` or `cell x y z`). What follows is either
+//! `when <test>`, which makes a rule that looks at its test once a second, or `on <action>`
+//! (`break`, `place`, `craft`, `eat` or `hit`, and from version 3 `hurt`, `respawn` or
+//! `appear`), which makes a rule that fires right after the player does that or it happens, and may be followed by `when <test>` so it fires only if the test holds
+//! then. An `on` rule without a `when` line has no test, so none is kept. The lines up to `end`
+//! are the rule's program. A recipe's header is `recipe <name>`; a script's is `script <name>`,
+//! the name of a ready-made script, and its lines replace that script's program. Version 1
+//! files have rules that poll and recipes only. Everything goes through the same checks as
+//! blocks in the game, so the file can never hold a program the editor could not build.
+//! Reading is all or nothing: one bad line refuses the file and names the line, and the game
+//! then leaves the file alone on exit so a typo cannot cost the player their work.
 //!
 //! Comments (`#`) and blank lines are free to write but are not kept: the game rewrites the
 //! file from what it holds.
@@ -29,20 +46,27 @@ use std::fmt::Write as _;
 
 use crate::crafting::custom::CustomRecipes;
 use crate::crafting::text::{print as print_recipe, recipe_of};
-use crate::logic::model::{Anchor, Rules};
+use crate::logic::model::{Anchor, DEFAULT_TEST, PlayerAction, Rules, Trigger};
+use crate::programs::scripts::ScriptEdits;
+use crate::scripting::library;
+use crate::scripting::program::Test;
 use crate::scripting::text::{
     Cursor, Stop, TextError, number, print, program_of, test_of, test_text,
 };
 use crate::shared::voxel::WorldPos;
 
-/// The format version this game writes and reads.
-pub const VERSION: u32 = 1;
+/// The format version this game writes.
+pub const VERSION: u32 = 3;
+
+/// The oldest format version this game still reads.
+const OLDEST: u32 = 1;
 
 /// What a programs file holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Programs {
     pub rules: Rules,
     pub recipes: CustomRecipes,
+    pub scripts: ScriptEdits,
 }
 
 fn anchor_text(anchor: Anchor) -> String {
@@ -53,22 +77,28 @@ fn anchor_text(anchor: Anchor) -> String {
     }
 }
 
-/// The file's text for these rules and recipes. [`parse`] reads it back to equal ones (a rule's
-/// rest timer is not kept: a rule starts ready).
-pub fn write(rules: &Rules, recipes: &CustomRecipes) -> String {
+/// The file's text for these rules, recipes and script edits. [`parse`] reads it back to equal
+/// ones (a rule's rest timer is not kept: a rule starts ready; nor is the test of an action
+/// rule that does not use it).
+pub fn write(rules: &Rules, recipes: &CustomRecipes, scripts: &ScriptEdits) -> String {
     let mut out = format!(
-        "# Your rules and recipes. The game rewrites this file when it closes, so comments are not kept.\nnib {VERSION}\n"
+        "# Your rules, recipes and script edits. The game rewrites this file when it closes, so comments are not kept.\nnib {VERSION}\n"
     );
     for (_, rule) in rules.iter() {
         // Writing to a String cannot fail.
         let _ = write!(
             out,
-            "\nrule {} {}\nwhen {}\n{}end\n",
+            "\nrule {} {}\n",
             if rule.is_on() { "on" } else { "off" },
             anchor_text(rule.anchor()),
-            test_text(rule.test()),
-            print(rule.program()),
         );
+        if let Trigger::On { kind, .. } = rule.trigger() {
+            let _ = writeln!(out, "on {}", kind.name());
+        }
+        if rule.trigger().uses_test() {
+            let _ = writeln!(out, "when {}", test_text(rule.test()));
+        }
+        let _ = writeln!(out, "{}end", print(rule.program()));
     }
     for (_, recipe) in recipes.iter() {
         let _ = write!(
@@ -77,6 +107,10 @@ pub fn write(rules: &Rules, recipes: &CustomRecipes) -> String {
             recipe.name(),
             print_recipe(recipe.program()),
         );
+    }
+    for (id, program) in scripts.iter() {
+        let name = library::get(id).map_or("?", |script| script.name);
+        let _ = write!(out, "\nscript {name}\n{}end\n", print(program));
     }
     out
 }
@@ -97,67 +131,147 @@ fn anchor_of(words: &[&str], line: usize) -> Result<Anchor, TextError> {
     }
 }
 
+/// The first format version in which `on <kind>` is written.
+const fn written_since(kind: PlayerAction) -> u32 {
+    match kind {
+        PlayerAction::Hurt | PlayerAction::Respawn | PlayerAction::MobAppears => 3,
+        PlayerAction::Break
+        | PlayerAction::Place
+        | PlayerAction::Craft
+        | PlayerAction::Eat
+        | PlayerAction::Hit => 2,
+    }
+}
+
+/// Reads a rule's trigger and test: `when <test>` for a polling rule, or `on <action>` and an
+/// optional `when <test>` for an action rule (version 2 only). Returns the trigger, the test
+/// and the number of the last line read.
+fn trigger_of(
+    cursor: &mut Cursor<'_>,
+    version: u32,
+    rule_line: usize,
+) -> Result<(Trigger, Test, usize), TextError> {
+    let first = cursor
+        .take()
+        .ok_or_else(|| TextError::new(rule_line, "a rule's next line is: when <test>"))?;
+    match first.words.as_slice() {
+        ["when", rest @ ..] => {
+            let test = test_of(rest, first.number)?;
+            Ok((Trigger::Poll, test, first.number))
+        }
+        ["on", word] if version >= 2 => {
+            let kind = PlayerAction::from_name(word).ok_or_else(|| {
+                TextError::new(
+                    first.number,
+                    "write: on break, place, craft, eat, hit, hurt, respawn or appear",
+                )
+            })?;
+            if version < written_since(kind) {
+                return Err(TextError::new(
+                    first.number,
+                    format!("on {word} needs a file that starts with 'nib 3'"),
+                ));
+            }
+            match cursor
+                .peek()
+                .filter(|next| next.words.first() == Some(&"when"))
+            {
+                Some(_) => {
+                    let when = cursor.take().ok_or_else(|| {
+                        TextError::new(first.number, "a rule's next line is: when <test>")
+                    })?;
+                    let test = test_of(&when.words[1..], when.number)?;
+                    Ok((Trigger::On { kind, gated: true }, test, when.number))
+                }
+                None => Ok((
+                    Trigger::On { kind, gated: false },
+                    DEFAULT_TEST,
+                    first.number,
+                )),
+            }
+        }
+        _ => Err(TextError::new(
+            rule_line,
+            if version >= 2 {
+                "a rule's next line is: when <test> or on <action>"
+            } else {
+                "a rule's next line is: when <test>"
+            },
+        )),
+    }
+}
+
 /// Reads a programs file.
 ///
 /// # Errors
 ///
 /// Returns a [`TextError`] naming the first line to fix: a missing or unknown version, an
 /// unknown section, a block or step that is not valid, a program that breaks a rule of the
-/// language, or more rules or recipes than the game allows.
+/// language, a script that does not exist or is edited twice, or more rules or recipes than
+/// the game allows.
 ///
 /// # Examples
 ///
 /// ```
 /// use minecraft_clone::programs::file::{parse, write};
 ///
-/// let text = "nib 1\nrecipe loaf\ntake grass 3\nmake bread 1\nend\n";
+/// let text = "nib 2\nrecipe loaf\ntake grass 3\nmake bread 1\nend\n";
 /// let programs = parse(text).unwrap();
 /// assert_eq!(programs.recipes.len(), 1);
-/// assert_eq!(parse(&write(&programs.rules, &programs.recipes)), Ok(programs));
+/// assert_eq!(
+///     parse(&write(&programs.rules, &programs.recipes, &programs.scripts)),
+///     Ok(programs)
+/// );
 /// assert!(parse("nib 9\n").is_err());
 /// ```
 pub fn parse(text: &str) -> Result<Programs, TextError> {
     let mut cursor = Cursor::new(text);
-    match cursor.take() {
-        Some(line) if line.words.as_slice() == ["nib", "1"] => {}
-        Some(line) if line.words.first() == Some(&"nib") => {
-            return Err(TextError::new(
-                line.number,
-                format!("this game reads 'nib {VERSION}' files only"),
-            ));
-        }
-        Some(line) => {
-            return Err(TextError::new(
-                line.number,
-                format!("the first line must be 'nib {VERSION}'"),
-            ));
-        }
+    let version = match cursor.take() {
+        Some(line) => match line.words.as_slice() {
+            ["nib", word] => match word.parse::<u32>() {
+                Ok(version) if (OLDEST..=VERSION).contains(&version) => version,
+                _ => {
+                    return Err(TextError::new(
+                        line.number,
+                        format!("this game reads 'nib {OLDEST}' and 'nib {VERSION}' files only"),
+                    ));
+                }
+            },
+            ["nib", ..] => {
+                return Err(TextError::new(
+                    line.number,
+                    format!("this game reads 'nib {OLDEST}' and 'nib {VERSION}' files only"),
+                ));
+            }
+            _ => {
+                return Err(TextError::new(
+                    line.number,
+                    format!("the first line must be 'nib {VERSION}'"),
+                ));
+            }
+        },
         None => {
             return Err(TextError::new(
                 1,
                 format!("empty file: start with 'nib {VERSION}'"),
             ));
         }
-    }
+    };
     let mut programs = Programs::default();
     while let Some(header) = cursor.take() {
         let line = header.number;
         match header.words.as_slice() {
             ["rule", state @ ("on" | "off"), anchor @ ..] => {
                 let anchor = anchor_of(anchor, line)?;
-                let when = cursor
-                    .take()
-                    .filter(|when| when.words.first() == Some(&"when"))
-                    .ok_or_else(|| TextError::new(line, "a rule's next line is: when <test>"))?;
-                let test = test_of(&when.words[1..], when.number)?;
+                let (trigger, test, last) = trigger_of(&mut cursor, version, line)?;
                 let (nodes, stop) = cursor.body(0)?;
                 if stop != Stop::End {
                     return Err(TextError::new(line, "this rule has no 'end'"));
                 }
-                let program = program_of(&nodes, when.number)?;
+                let program = program_of(&nodes, last)?;
                 let id = programs
                     .rules
-                    .add(test, program, anchor)
+                    .add_with(trigger, test, program, anchor)
                     .map_err(|error| TextError::new(line, error.to_string()))?;
                 if *state == "off" {
                     programs.rules.switch(id);
@@ -174,10 +288,31 @@ pub fn parse(text: &str) -> Result<Programs, TextError> {
                     .add(name, recipe)
                     .map_err(|error| TextError::new(line, error.to_string()))?;
             }
+            ["script", name] if version >= 2 => {
+                let (id, _) = library::find(name).ok_or_else(|| {
+                    TextError::new(line, format!("no ready-made script called '{name}'"))
+                })?;
+                if programs.scripts.edited(id).is_some() {
+                    return Err(TextError::new(line, format!("'{name}' is edited twice")));
+                }
+                let (nodes, stop) = cursor.body(0)?;
+                if stop != Stop::End {
+                    return Err(TextError::new(line, "this script has no 'end'"));
+                }
+                let program = program_of(&nodes, line)?;
+                programs
+                    .scripts
+                    .set(id, program)
+                    .map_err(|error| TextError::new(line, error.to_string()))?;
+            }
             _ => {
                 return Err(TextError::new(
                     line,
-                    "expected 'rule on|off <anchor>' or 'recipe <name>'",
+                    if version >= 2 {
+                        "expected 'rule on|off <anchor>', 'recipe <name>' or 'script <name>'"
+                    } else {
+                        "expected 'rule on|off <anchor>' or 'recipe <name>'"
+                    },
                 ));
             }
         }
@@ -203,7 +338,12 @@ mod tests {
         let programs = parse(SAMPLE).unwrap();
         assert_eq!(programs.rules.len(), 3);
         assert_eq!(programs.recipes.len(), 2);
-        let again = parse(&write(&programs.rules, &programs.recipes)).unwrap();
+        let again = parse(&write(
+            &programs.rules,
+            &programs.recipes,
+            &programs.scripts,
+        ))
+        .unwrap();
         assert_eq!(again, programs);
     }
 
@@ -222,17 +362,22 @@ mod tests {
 
     #[test]
     fn an_empty_world_writes_just_the_version() {
-        let text = write(&Rules::default(), &CustomRecipes::default());
+        let text = write(
+            &Rules::default(),
+            &CustomRecipes::default(),
+            &ScriptEdits::default(),
+        );
         assert_eq!(parse(&text), Ok(Programs::default()));
-        assert!(text.contains("nib 1"));
+        assert!(text.contains("nib 3"));
     }
 
     #[test]
     fn the_version_line_is_required_and_checked() {
         assert_eq!(parse("").unwrap_err().line, 1);
         assert_eq!(parse("recipe a\n").unwrap_err().line, 1);
-        let error = parse("nib 2\n").unwrap_err();
-        assert!(error.message.contains("nib 1"));
+        let error = parse("nib 9\n").unwrap_err();
+        assert!(error.message.contains("nib 1") && error.message.contains("nib 3"));
+        assert!(parse("nib 1\n").is_ok() && parse("nib 2\n").is_ok() && parse("nib 3\n").is_ok());
     }
 
     #[test]
@@ -283,7 +428,172 @@ mod tests {
             than: 5,
         };
         rules.add(test, program, Anchor::Mob).unwrap();
-        let text = write(&rules, &CustomRecipes::default());
+        let text = write(&rules, &CustomRecipes::default(), &ScriptEdits::default());
         assert_eq!(parse(&text).unwrap().rules, rules);
+    }
+
+    const SAMPLE_2: &str = "nib 2\n\n\
+        rule on feet\non break\ngive fuel 1\nend\n\n\
+        rule off mob\non craft\nwhen count fuel below 3\ngive fuel 2\nend\n\n\
+        rule on feet\nwhen hunger below 8\ngive bread 1\nend\n\n\
+        recipe loaf\ntake grass 3\nmake bread 1\nend\n\n\
+        script tower\nbuild stone 0 4 0\nend\n";
+
+    #[test]
+    fn action_rules_and_script_edits_read_and_write_back_the_same() {
+        let programs = parse(SAMPLE_2).unwrap();
+        let rules: Vec<_> = programs.rules.iter().map(|(_, rule)| rule).collect();
+        assert_eq!(
+            rules[0].trigger(),
+            Trigger::On {
+                kind: PlayerAction::Break,
+                gated: false
+            }
+        );
+        assert_eq!(
+            rules[1].trigger(),
+            Trigger::On {
+                kind: PlayerAction::Craft,
+                gated: true
+            }
+        );
+        assert_eq!(rules[2].trigger(), Trigger::Poll);
+        assert_eq!(programs.scripts.len(), 1);
+        let again = parse(&write(
+            &programs.rules,
+            &programs.recipes,
+            &programs.scripts,
+        ))
+        .unwrap();
+        assert_eq!(again, programs);
+    }
+
+    #[test]
+    fn version_1_files_still_load_and_are_rewritten_as_version_3() {
+        let programs = parse(SAMPLE).unwrap();
+        let text = write(&programs.rules, &programs.recipes, &programs.scripts);
+        assert!(text.contains("\nnib 3\n"));
+        assert!(
+            programs
+                .rules
+                .iter()
+                .all(|(_, rule)| rule.trigger() == Trigger::Poll)
+        );
+    }
+
+    #[test]
+    fn version_1_has_no_action_rules_or_script_sections() {
+        let bad = |text: &str| parse(text).unwrap_err();
+        assert_eq!(
+            bad("nib 1\nrule on feet\non break\ngive fuel 1\nend\n").line,
+            2
+        );
+        assert_eq!(bad("nib 1\nscript tower\nbuild stone 0 1 0\nend\n").line, 2);
+    }
+
+    #[test]
+    fn action_rule_and_script_mistakes_name_their_line() {
+        let bad = |text: &str| parse(text).unwrap_err();
+        assert_eq!(
+            bad("nib 2\nrule on feet\non jump\ngive fuel 1\nend\n").line,
+            3
+        );
+        assert_eq!(bad("nib 2\nrule on feet\non break extra\nend\n").line, 2);
+        assert_eq!(
+            bad("nib 2\nscript nowhere\nbuild stone 0 1 0\nend\n").line,
+            2
+        );
+        assert_eq!(
+            bad("nib 2\nscript tower\nbuild stone 0 1 0\nend\nscript tower\nbuild stone 0 2 0\nend\n")
+                .line,
+            5
+        );
+        assert_eq!(bad("nib 2\nscript tower\nbuild stone 0 1 0\n").line, 2);
+    }
+
+    #[test]
+    fn a_script_edit_equal_to_the_built_in_one_is_not_kept() {
+        let (_, tower) = library::find("tower").unwrap();
+        let text = format!("nib 2\nscript tower\n{}end\n", print(tower.program()));
+        assert!(parse(&text).unwrap().scripts.is_empty());
+    }
+
+    #[test]
+    fn action_rules_built_in_the_game_are_written_and_read_back() {
+        let mut rules = Rules::default();
+        let program = Program::try_new(vec![Block::Do(Plan::Give {
+            item: ItemId::FUEL,
+            count: 1,
+        })])
+        .unwrap();
+        let gated = Test {
+            read: Read::Count { item: ItemId::FUEL },
+            compare: Compare::Below,
+            than: 4,
+        };
+        for (kind, gated_on) in [(PlayerAction::Place, true), (PlayerAction::Eat, false)] {
+            let test = if gated_on { gated } else { DEFAULT_TEST };
+            rules
+                .add_with(
+                    Trigger::On {
+                        kind,
+                        gated: gated_on,
+                    },
+                    test,
+                    program.clone(),
+                    Anchor::Feet,
+                )
+                .unwrap();
+        }
+        let text = write(&rules, &CustomRecipes::default(), &ScriptEdits::default());
+        assert_eq!(parse(&text).unwrap().rules, rules);
+    }
+
+    #[test]
+    fn rules_that_react_to_what_happens_are_written_and_read_back() {
+        let text = "nib 3\n\n\
+            rule on feet\non hurt\nwhen health below 6\ngive fuel 1\nend\n\n\
+            rule on mob\non appear\ngive fuel 1\nend\n\n\
+            rule on feet\non respawn\ngive fuel 1\nend\n";
+        let programs = parse(text).unwrap();
+        let kinds: Vec<_> = programs
+            .rules
+            .iter()
+            .map(|(_, rule)| rule.trigger())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Trigger::On {
+                    kind: PlayerAction::Hurt,
+                    gated: true
+                },
+                Trigger::On {
+                    kind: PlayerAction::MobAppears,
+                    gated: false
+                },
+                Trigger::On {
+                    kind: PlayerAction::Respawn,
+                    gated: false
+                },
+            ]
+        );
+        let again = parse(&write(
+            &programs.rules,
+            &programs.recipes,
+            &programs.scripts,
+        ))
+        .unwrap();
+        assert_eq!(again, programs);
+    }
+
+    #[test]
+    fn the_new_reactions_need_a_version_3_file() {
+        for word in ["hurt", "respawn", "appear"] {
+            let text = format!("nib 2\nrule on feet\non {word}\ngive fuel 1\nend\n");
+            let error = parse(&text).unwrap_err();
+            assert_eq!(error.line, 3, "{word}");
+            assert!(error.message.contains("nib 3"), "{word}");
+        }
     }
 }

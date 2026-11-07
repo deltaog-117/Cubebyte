@@ -45,6 +45,8 @@
 | 2026-11-02 | Scripting language, first slice, and quick-hacks | A script is a checked tree of blocks (do, shift, repeat, if) stepped under a budget; a quick-hack is a program anchored on the aimed block or the nearest mob, chosen from a menu or by `hack <name>` | ✅ Confirmed |
 | 2026-11-02 | Clamped meter rewind and distance fog | A rewind cuts its meter changes to what fits; fog is computed per pixel from a checked range tied to the load radius; the Kogama-style block editor is put on hold | ✅ Confirmed |
 | 2026-11-03 | Rules and the block editor | Rules are a test plus a program on a cell, fired as ordinary scripts; the editor is a click-driven draft that can only yield a checked program, session only | ✅ Confirmed |
+| 2026-11-06 | Recipes in the game, saved script edits and action rules | Both a command and a click editor for recipes; script edits as `script` sections; rules that react to the player's own actions; one `nib 2` bump | ✅ Confirmed |
+| 2026-11-07 | Walking as events and reactions to what happens | Walking logged at checkpoints (player at each edit, mobs when hit or removed) with a bridge so `Z` and `Y` follow the player; rule triggers worked out from passive and respawn events | ✅ Confirmed |
 
 ---
 
@@ -1536,3 +1538,83 @@ Three roadmap items were taken together: saving player programs and rules, the n
 | Date | Update | Author |
 |------|--------|--------|
 | 2026-11-04 | Initial entry | deltaog-117 |
+
+
+### Recipes in the Game, Saved Script Edits and Action Rules
+
+**Date:** 2026-11-06
+**Status:** Confirmed
+
+#### Context / Background
+Two backlog items were taken together: making recipes and saving script edits inside the game, and the next logic slice, rules that react to an event instead of polling once a second. All three change `programs.nib`, so its format was bumped once.
+
+#### Options Considered
+- **Making a recipe:** a `recipe` command on the command line; a click editor like the block editor; or both.
+- **What counts as an event for a rule:** edge-triggered polling (fire when a test turns true); the player's own actions (break, place, craft, eat, hit); or any event at the one door.
+
+#### Decision & Rationale
+- **Both recipe paths, one result.** The command is quick and is the typed view of a recipe; the editor needs no words. Both end in `RecipeProgram::try_new`, so a recipe the worth rule refuses cannot exist however it was made. The editor is flat (take and make lines); `repeat` and `if` stay in the file. This was chosen over generalising the block editor, which already works.
+- **Recipes are added, never changed or removed, during a session.** A craft is recorded by the recipe's number, so numbers must keep their meaning. Adding a recipe also rewrites the programs file inside the session's starting world, so a replay loads it. No recipe can be made while a replay runs.
+- **Script edits are `script <name>` sections** that replace the built-in program, with a reset button. A script is recorded as the commands it ran, never as a program, so an edit cannot change an old recording. A program equal to the built-in one is not kept as an edit.
+- **Action rules react to the player's own acts only.** Rewinds, redos, zone rewinds and script commands are not reactions, so a rule's own script can never set a rule off, and no loop guard is needed. Rules still never fire during a replay, which performs the commands the recording holds. This was chosen over reacting to every logged event (a break is several events, and a script's commands would need a guard) and over edge-triggered polling (not really event-driven).
+- **`nib 2`.** `on <action>` and `script <name>` are new lines, so the version moved to 2; `nib 1` files still load and are rewritten as `nib 2`. An action rule's test is optional (a gate): an unused test is not stored in the file.
+
+**Trade-offs accepted:**
+- Things done to the player (a zombie's hit, a respawn, a mob appearing) cannot trigger a rule yet.
+- An action that happens while a script is running is not queued, so a rule that would have fired misses it. An action rule rests for 10 seconds after firing, like any rule.
+- The recipe editor cannot name a recipe by clicking: the name comes from the `recipe <name>` command or is `mine`, `mine2` and so on.
+- Recipes cannot be edited or deleted in the game.
+
+#### Implementation Notes
+- `crafting::draft`, `programs::scripts`, `logic::model::{Trigger, PlayerAction}`, `programs::file` (`nib 2`), the `recipe` command in `command::{table, parse, plan}`; `app` wires the `M` panel, the script save and reset buttons, and fires action rules from `perform`.
+- The `recipe` command needed a request that carries a checked recipe, so `Request`, `Value` and `Plan` are no longer `Copy`.
+- `PlayerAction` has its own name because `events::log::ActionKind` already means something else.
+- Tests: draft click sequences (property), the command parser for good and bad recipe lines, print-then-parse of `nib 2` with action rules and script sections, `nib 1` files still loading, trigger rules in `logic::model`, and the recipe command through to a craft.
+- The window was not run by the assistant: press `M` or type `recipe loaf take grass 3 make bread 1`, press `Tab` to see and craft it; in `N`, press "next trigger" on a rule and break a block.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-06 | Initial entry | deltaog-117 |
+
+---
+
+### Walking as Events and Reactions to What Happens
+
+**Date:** 2026-11-07
+**Status:** Confirmed
+
+#### Context / Background
+Walking and mob movement were the last changes with no event, so `Z` refused to undo an edit once the player had walked on (the old state check said so), and rules could not react to what the world did to the player. The two backlog items were taken together: once everything is an event, what a rule reacts to can come from the events.
+
+#### Options Considered
+- **Walking:** (A) a move event on every moving tick; (B) a move event at checkpoints only, with a bridge so a rewind first walks the player to where the edit left them; (C) an event per block cell crossed.
+- **Reactions:** (P) a hand-written trigger call for each new kind; (Q) triggers worked out from the committed events by one function; (R) new reads polled once a second.
+
+#### Decision & Rationale
+- **B, checkpoints.** The physics step already works a walk out from the intent track, which replays exactly, so logging each step would repeat it and grow the log and the archive with walking time. Each player edit logs one move from where the log last put the player to where they stand. The game has already walked there, so the move is logged and not applied (the log is the one place that has to know). `Z` and `Y` then start with a bridge: one move from where the player stands to where the edit left them, logged inside the rewind. The inverse of the bridge ends the matching redo, so a redo is still the exact opposite of a rewind, and the redo stack rebuilt from the log still agrees with the live one.
+- **A move to the same spot is a no-op.** A checkpoint taken while the player stood still must not stop a fall, so applying it does nothing; the first edit of a session logs such a move of no length.
+- **Mob checkpoints are history only.** A mob that walked is checkpointed when it is hit or removed (`MobMoved`). `Z` never undoes a mob (mob events are passive), so no bridge is built for mobs, and the check that `MobRemoved` skips stays skipped: undoing a script's spawn removes a mob wherever it has walked to, and a check would refuse that.
+- **Q, with a limit.** One function, `logic::react::reactions`, turns a passive action or a respawn into triggers: `hurt` (health lost: a mob's hit or starving), `respawn` and `appear` (a mob that came by itself). Edits, rewinds and redos never react, so a rule's own script and an undo cannot set a rule off. The player's own five acts stay on the action that was performed: a break and a script's `build` log the same block event, so the events alone cannot say which one the player did.
+- **`nib 3` and log version 8.** New `on` words need a new file version, and the log gets tag 15; older files still load.
+
+**Trade-offs accepted:**
+- `Z` returns the player to where the edit recorded them, not along the path walked. Walking between checkpoints is not undoable on its own.
+- Replays of tracks recorded before this slice that used `Z` drift after the first `Z`, because `Z` now moves the player. Tracks that did not use `Z` are unchanged. No flag was added to keep the old behaviour alive.
+- Script commands other than a teleport record no checkpoint yet, so `Z` does not walk the player back for them.
+- "The player walked" is not a trigger: checkpoints are too coarse for it. It needs an event per cell (COA C).
+- As for the player's own acts, an action that arrives while a script is running is missed.
+
+#### Implementation Notes
+- `shared::event::Event::MobMoved`; `mobs::model::{Mobs::move_to, MobError::StaleMove}`; `events::apply` handles it, and skips a player move to the same spot; `events::log::EventLog` keeps the newest spot of the player and of each mob, updated as events are pushed and forgotten after a load (`forget_spots`), so a new session does not claim a walk from the last one.
+- `events::walk::{checkpoints, bridged}`; `app::commit_as` logs the checkpoints in front of the events but applies only the events; `rewind` and `redo` call `bridged`.
+- `logic::react::reactions`; `Running::reactions` collects them and `step_reactions` hands them to `step_rules` on the next tick (nothing fires during a replay).
+- Tests: `Event` and `MobMoved` property tests, `events::walk` unit tests, three integration tests and one property test (random walks between rewinds and redos), `nib 3` round trips, and `reactions` unit and property tests. The existing test that pinned an exact rewind now expects the edit's checkpoint, and the unknown-tag test moved from tag 15 to 16, since 15 is assigned.
+- The window was not run by the assistant: place a block, walk away, press `Z` and you should be back where you stood at the previous action; press `Y` and you should be where you pressed `Z`. In `N`, step a rule's trigger to `on hurt` and let a zombie hit you.
+
+#### Review / Update Log
+
+| Date | Update | Author |
+|------|--------|--------|
+| 2026-11-07 | Initial entry | deltaog-117 |

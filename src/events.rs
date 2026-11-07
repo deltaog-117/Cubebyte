@@ -8,4 +8,5 @@ pub mod persist;
 pub mod redo;
 pub mod replay;
 pub mod rewind;
+pub mod walk;
 pub mod zone;
